@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Приватное сообщение об уязвимости
+    url: https://github.com/juvenileslave/vpn/security/advisories/new
+    about: Не публикуйте уязвимости, секреты или приватные материалы в issues; используйте приватный канал.

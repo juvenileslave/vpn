@@ -1,0 +1,60 @@
+name: Ограниченная задача
+description: Изменение с явными границами, критериями приёмки и способом проверки.
+title: "task: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Репозиторий содержит архитектурный план и инструменты работы с репозиторием,
+        но не реализованный или развёрнутый VPN. Задача не разрешает production-действия.
+        Не включайте секреты, реальные серверные адреса и идентификаторы или приватные материалы.
+        Для уязвимостей используйте [приватный канал](https://github.com/juvenileslave/vpn/security/advisories/new).
+  - type: checkboxes
+    id: publication
+    attributes:
+      label: Безопасность публикации
+      options:
+        - label: Описание и вложения не содержат секретов, приватных данных или деталей уязвимости.
+          required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Цель
+      description: Какая проблема решается и кому нужен результат?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Входит в задачу
+      description: Конкретные файлы, компоненты или поведение, которые требуется изменить.
+    validations:
+      required: true
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Не входит в задачу
+      description: Явные ограничения. Исходный архитектурный план сохраняется без изменений.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Критерии приёмки
+      description: Наблюдаемые условия готовности; каждый пункт должен допускать проверку.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Способ проверки
+      description: Как подтвердить критерии приёмки? Различайте существующие инструменты и планируемую реализацию.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Риски, ограничения и откат
+      description: Зависимости, возможные регрессии и безопасная отмена изменения через PR. Если рисков нет, объясните почему.
+    validations:
+      required: true
