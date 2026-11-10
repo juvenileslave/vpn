@@ -1,0 +1,62 @@
+name: Ошибка репозитория
+description: Обезличенный отчёт об ошибке документации или инструментов репозитория.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Здесь пока нет реализованного или развёрнутого VPN. Описывайте ошибки
+        публичной документации и инструментов репозитория.
+        Не публикуйте секреты, реальные адреса и идентификаторы серверов, рабочие
+        конфигурации, дампы или приватные журналы.
+        Уязвимости сообщайте только [приватно](https://github.com/juvenileslave/vpn/security/advisories/new).
+  - type: checkboxes
+    id: publication
+    attributes:
+      label: Безопасность публикации
+      options:
+        - label: Отчёт и вложения обезличены и не содержат секретов или приватных материалов.
+          required: true
+        - label: Это не сообщение об уязвимости; для уязвимостей использую приватный канал.
+          required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Версия репозитория
+      description: Публичный commit SHA или ссылка на PR, к которому относится ошибка.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Окружение
+      description: ОС, архитектура, версии Python и Git; без локальных путей и персональных данных.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Минимальное воспроизведение
+      description: Точные шаги с обезличенными данными. Не прикладывайте целый конфиг или дамп.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемый результат
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактический результат
+      description: Короткий очищенный фрагмент ошибки, если нужен; не полный журнал.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Влияние и известный обход
+      description: Что блокирует ошибка? Если безопасный обход неизвестен, так и укажите.
+    validations:
+      required: false

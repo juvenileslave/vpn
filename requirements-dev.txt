@@ -1,0 +1,6 @@
+# https://pypi.org/project/actionlint-py/1.7.12.25/ — actionlint 1.7.12
+# https://pypi.org/project/pre-commit/4.7.0/
+# https://pypi.org/project/PyYAML/6.0.3/
+actionlint-py==1.7.12.25
+pre-commit==4.7.0
+PyYAML==6.0.3

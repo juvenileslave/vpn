@@ -1,0 +1,47 @@
+minimum_pre_commit_version: '4.7.0'
+default_stages: [pre-commit]
+fail_fast: true
+
+repos:
+  # Политика проверяется первой: нельзя читать или исправлять принудительно
+  # добавленные приватные файлы последующими хуками.
+  - repo: local
+    hooks:
+      - id: repository-policy
+        name: Public repository policy
+        entry: .venv/bin/python scripts/check_repository.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: no-commit-to-branch
+        args: [--branch, master, --branch, main]
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=512, --enforce-all]
+      - id: check-merge-conflict
+        args: [--assume-in-merge]
+      - id: detect-private-key
+      - id: check-case-conflict
+      - id: check-ast
+      - id: trailing-whitespace
+        # Исходный архитектурный план сохраняется побайтно.
+        exclude: ^docs/ARCHITECTURE_PLAN\.md$
+      - id: end-of-file-fixer
+        exclude: ^docs/ARCHITECTURE_PLAN\.md$
+
+  - repo: local
+    hooks:
+      - id: actionlint
+        name: actionlint
+        entry: .venv/bin/actionlint
+        language: system
+        files: ^\.github/workflows/[^/]+\.ya?ml$
+        types: [yaml]
+        # ShellCheck/Pyflakes не входят в контракт: одинаковый результат
+        # независимо от случайно установленных системных инструментов.
+        args: [-shellcheck=, -pyflakes=]
