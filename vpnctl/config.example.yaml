@@ -1,0 +1,23 @@
+# Синтетический пример конфигурации vpnctl. Адреса и имена — только
+# документационные (RFC 5737, RFC 3849, example.com); это не рабочие серверы.
+panel:
+  url: https://panel.example.com
+  # Имя переменной окружения с API-токеном панели, а не сам токен.
+  token_env: VPNCTL_PANEL_TOKEN
+nodes:
+  - name: exit-01
+    role: exit
+    address: 192.0.2.10
+    port: 443
+  - name: relay-01
+    role: relay
+    address: 2001:db8::10
+    port: 443
+  - name: cp-01
+    role: cp
+    address: cp.example.com
+    port: 8443
+probe:
+  timeout: 5s
+  interval: 60s
+log_level: info
