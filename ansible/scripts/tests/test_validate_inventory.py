@@ -132,6 +132,11 @@ class ValidateInventoryTest(unittest.TestCase):
         self.all_vars["xhttp_mode"] = "xmux"
         self.assertInvalid("xhttp_mode: must be one of")
 
+    def test_cp_placement_must_be_scalar(self) -> None:
+        self.all_vars["cp_placement"] = ["exit"]
+        errors = self.errors()
+        self.assertTrue(any("cp_placement: must be one of" in error for error in errors), errors)
+
     def test_cp_placement_only_in_all(self) -> None:
         self.group_vars["exit"]["cp_placement"] = "exit"
         self.assertInvalid("cp_placement must be set only in group_vars/all")

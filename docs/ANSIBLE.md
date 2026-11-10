@@ -32,9 +32,9 @@ ansible/
 
 `ansible.cfg` включает проверку SSH host key (`host_key_checking = True`) и делает
 неразбираемый inventory фатальной ошибкой. Вывод в YAML настроен встроенным
-callback `ansible.builtin.default` с `callback_result_format = yaml`: короткое имя
-`stdout_callback = yaml` относится к `community.general` и без этой коллекции
-ломает запуск `ansible-playbook`.
+callback `ansible.builtin.default` через секцию `[callback_default]`
+(`result_format = yaml`): короткое имя `stdout_callback = yaml` относится к
+`community.general` и без этой коллекции ломает запуск `ansible-playbook`.
 
 ## Контракт переменных
 

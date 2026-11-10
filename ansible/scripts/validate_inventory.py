@@ -224,7 +224,9 @@ class Inventory:
                 self.validate_host(group, host, values, addresses)
                 self.validate_common(host, values)
                 if "cp_placement" in values:
-                    placements.add(self.placement_value(values["cp_placement"]))
+                    placement = self.placement_value(values["cp_placement"])
+                    if isinstance(placement, str):
+                        placements.add(placement)
         self.validate_topology(placements)
 
     def placement_value(self, located: Located) -> Any:
