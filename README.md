@@ -46,15 +46,16 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 
 ## Управление изменениями
 
-Требуемый процесс: feature-ветка → PR в `master` → успешные `Repository checks`
-и `Secret scan` → squash merge. Перед слиянием база должна быть актуальна
-относительно `master`, а обсуждения разрешены. Force push и удаление защищённой
-ветки запрещены; администраторы также подчиняются правилам.
+Разработка выполняется в [форке popularhono/vpn](https://github.com/popularhono/vpn):
+`origin` — форк, `upstream` — `juvenileslave/vpn`. Feature-ветка из форка →
+PR в основной `master` → успешные `Repository checks` и `Secret scan` →
+approval и squash merge от `juvenileslave`.
 
-Обязательных approvals — `0`, поскольку владелец один; PR и CI остаются
-обязательными. [Защита master активна в GitHub](https://github.com/juvenileslave/vpn/rules/26988307),
-без bypass для владельца. Подробности и единственное исключение для
-первоначального bootstrap-коммита описаны в [CONTRIBUTING.md](CONTRIBUTING.md).
+Обязателен один approval от владельца CODEOWNERS. Перед слиянием база должна
+быть актуальна, обсуждения разрешены, последний push одобрен другим аккаунтом.
+[Защита master активна в GitHub](https://github.com/juvenileslave/vpn/rules/26988307),
+без bypass, force-push и удаления ветки. Подробности — в
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Не публикуйте секреты, рабочие конфигурации, реальные серверные идентификаторы,
 дампы и приватные обсуждения. Изменение репозитория не даёт разрешения на
