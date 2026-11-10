@@ -1,0 +1,4 @@
+# https://pypi.org/project/ansible-core/2.19.15/ — latest line supporting Python >=3.11
+# https://pypi.org/project/PyYAML/6.0.3/ — same pin as requirements-dev.txt
+ansible-core==2.19.15
+PyYAML==6.0.3

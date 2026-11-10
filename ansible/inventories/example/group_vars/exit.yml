@@ -1,0 +1,3 @@
+node_role: exit
+egress_family: v4_prefer
+egress_slots: 3

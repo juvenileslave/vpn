@@ -1,0 +1,3 @@
+node_role: relay
+client_family: v4
+s2s_family: v6_prefer

@@ -1,0 +1,4 @@
+ansible_host: 203.0.113.30
+public_ipv4: 203.0.113.30
+public_ipv6: 2001:db8:30::30
+node_role: control_plane

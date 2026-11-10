@@ -1,0 +1,14 @@
+cp_placement: dedicated
+client_family: v4
+s2s_family: v6_prefer
+egress_family: v4_prefer
+egress_slots: 3
+slot_fanout: sni
+node_port_allow:
+  - 203.0.113.30/32
+  - 2001:db8:30::30/128
+reality_sni: www.example.com
+reality_target: 127.0.0.1:8445
+xhttp_path: /xhttp
+xhttp_mode: stream-one
+image_tags: {}
