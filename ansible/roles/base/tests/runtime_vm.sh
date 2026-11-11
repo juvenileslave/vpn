@@ -212,7 +212,10 @@ systemctl is-enabled vpn-base-firewall.service
 [[ $(sysctl -n net.ipv4.tcp_congestion_control) == bbr ]] || fail "BBR не активен"
 ok "BBR"
 systemctl is-active chrony.service
-unattended-upgrade --dry-run --debug 2>&1 | grep -m1 'Allowed origins are'
+# unattended-upgrade may return 120 when another apt client holds a lock on
+# the disposable runner; the configuration output is what this check needs.
+unattended-upgrade --dry-run --debug > "$WORK/unattended.log" 2>&1 || true
+grep -m1 'Allowed origins are' "$WORK/unattended.log" || fail "нет Allowed origins"
 apt-config dump APT::Periodic::Unattended-Upgrade
 
 step "Некорректный кандидат не меняет активную таблицу"
