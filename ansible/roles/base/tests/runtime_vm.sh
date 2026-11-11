@@ -228,6 +228,11 @@ ok "предыдущая таблица осталась активной"
 
 step "Перезапуск nftables.service не теряет таблицу"
 systemctl restart nftables.service
+# PartOf propagation starts the owned unit asynchronously after nftables.
+for _ in {1..20}; do
+  nft list table inet vpn_base >/dev/null 2>&1 && break
+  sleep 0.5
+done
 nft list table inet vpn_base >/dev/null || fail "таблица потеряна после flush ruleset"
 in_ns trusted ssh "${SSH_OPTS[@]}" -i "$WORK/admin_new" "vpnadmin@$HOST4" true || fail "SSH после restart nftables"
 ok "таблица восстановлена, SSH работает"
