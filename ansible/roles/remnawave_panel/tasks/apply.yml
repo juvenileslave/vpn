@@ -1,0 +1,78 @@
+---
+- name: Create the project directory
+  ansible.builtin.file:
+    path: "{{ remnawave_panel_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write env files
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ remnawave_panel_dir }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    remnawave_panel_env_render: "{{ item.env }}"
+  loop:
+    - {name: panel.env, env: "{{ _remnawave_panel_panel_env }}"}
+    - {name: db.env, env: "{{ _remnawave_panel_db_env }}"}
+  register: _remnawave_panel_env_files
+  no_log: true
+  diff: false
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ remnawave_panel_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _remnawave_panel_compose_file
+
+- name: List running services of the project
+  ansible.builtin.command:
+    argv:
+      - docker
+      - container
+      - ls
+      - --filter=label=com.docker.compose.project={{ remnawave_panel_project }}
+      - --filter=status=running
+      - --format={{ '{{' }}.Label "com.docker.compose.service"{{ '}}' }}
+  register: _remnawave_panel_running
+  check_mode: false
+  changed_when: false
+
+- name: Decide whether the stack must be (re)started
+  ansible.builtin.set_fact:
+    _remnawave_panel_up_needed: >-
+      {{ _remnawave_panel_env_files is changed
+         or _remnawave_panel_compose_file is changed
+         or (['remnawave', 'remnawave-db', 'remnawave-redis']
+             | difference(_remnawave_panel_running.stdout_lines)) | length > 0 }}
+
+- name: Report the start that check mode skips
+  ansible.builtin.debug:
+    msg: docker compose up would run here; check mode pulls no images.
+  when: ansible_check_mode and _remnawave_panel_up_needed
+  changed_when: true
+
+# Pulls missing images only. Volumes are never removed.
+- name: Start the stack and wait for healthy containers
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name={{ remnawave_panel_project }}
+      - --project-directory={{ remnawave_panel_dir }}
+      - --file={{ remnawave_panel_dir }}/compose.yaml
+      - up
+      - --detach
+      - --wait
+      - --wait-timeout={{ remnawave_panel_up_timeout }}
+      - --remove-orphans
+      - --quiet-pull
+  when: not ansible_check_mode and _remnawave_panel_up_needed
+  changed_when: true
