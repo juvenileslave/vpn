@@ -1,0 +1,12 @@
+---
+# Rendered profiles contain the REALITY private key and client UUIDs. The
+# default is the Git-ignored /artifacts/ directory at the repository root.
+profiles_output_dir: "{{ playbook_dir | dirname | dirname }}/artifacts/profiles/{{ inventory_hostname }}"
+
+# Required, no defaults:
+#   exit_direct_port, transit_port            — integers 1..65535, distinct
+# Secrets, supplied from outside Git (vault or an extra-vars file):
+#   reality_private_key                       — X25519 private key, base64url (43 chars)
+#   reality_short_ids                         — list of hex strings, even length, 2..16 chars
+#   exit_direct_client_ids                    — non-empty list of UUIDs
+#   transit_client_ids                        — list of egress_slots UUIDs (egress-0..egress-<slots-1>)

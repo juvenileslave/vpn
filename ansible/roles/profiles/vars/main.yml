@@ -1,0 +1,25 @@
+---
+# Fixed by architecture task 3.2; not an operator setting.
+profiles_xpadding_bytes: "100-1000"
+profiles_required_xhttp_mode: stream-one
+
+# egress_family -> freedom outbound streamSettings.sockopt.domainStrategy
+# (Xray v26.11.9; freedom.domainStrategy/targetStrategy are deprecated there).
+profiles_egress_domain_strategy:
+  v4_prefer: UseIPv4v6
+  v6_prefer: UseIPv6v4
+  v4_only: ForceIPv4
+
+# Extra freedom finalRules per family: v4_only also blocks IPv6 literals,
+# which domainStrategy does not cover.
+profiles_egress_family_block:
+  v4_prefer: []
+  v6_prefer: []
+  v4_only: ["::/0"]
+
+profiles_uuid_regex: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+profiles_short_id_regex: '^([0-9a-f]{2}){1,8}$'
+profiles_private_key_regex: '^[A-Za-z0-9_-]{43}$'
+profiles_dns_name_regex: '^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+profiles_target_regex: '^(\[(?P<v6>[0-9A-Fa-f:.]+)\]|(?P<host>[^:\[\]\s]+)):(?P<port>[0-9]{1,5})$'
+profiles_port_regex: '^[0-9]{1,5}$'

@@ -1,0 +1,22 @@
+---
+- name: Create output directory
+  ansible.builtin.file:
+    path: "{{ profiles_output_dir }}"
+    state: directory
+    mode: "0700"
+
+# no_log/diff: rendered files contain the REALITY private key and client UUIDs.
+- name: Render profile JSON
+  ansible.builtin.template:
+    src: "{{ item }}.json.j2"
+    dest: "{{ profiles_output_dir }}/{{ item }}.json"
+    mode: "0600"
+  loop:
+    - exit
+    - transit
+  no_log: true
+  diff: false
+
+- name: Report output location
+  ansible.builtin.debug:
+    msg: "Rendered exit.json and transit.json into {{ profiles_output_dir }}"
