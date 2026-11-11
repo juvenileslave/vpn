@@ -1,0 +1,57 @@
+---
+# Renders the owned site file. nginx -t validates the full configuration with
+# the candidate in place before any reload; on failure the previous file is
+# restored (or the new one removed) and nginx keeps running the old config.
+- name: Render and validate the site
+  block:
+    - name: Render site file
+      ansible.builtin.template:
+        src: cp_proxy.conf.j2
+        dest: "{{ cp_proxy_site_available }}"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: cp_proxy_site
+      notify: Reload nginx
+
+    - name: Enable site
+      ansible.builtin.file:
+        src: "{{ cp_proxy_site_available }}"
+        dest: "{{ cp_proxy_site_enabled }}"
+        state: link
+      register: cp_proxy_link
+      notify: Reload nginx
+
+    - name: Test nginx configuration with the candidate site
+      ansible.builtin.command: nginx -t
+      when:
+        - cp_proxy_site is changed or cp_proxy_link is changed
+        - not ansible_check_mode
+      changed_when: false
+
+  rescue:
+    - name: Restore the previous site file
+      ansible.builtin.copy:
+        src: "{{ cp_proxy_site.backup_file }}"
+        dest: "{{ cp_proxy_site_available }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when: cp_proxy_site.backup_file is defined
+
+    - name: Remove the newly created site
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ cp_proxy_site_enabled }}"
+        - "{{ cp_proxy_site_available }}"
+      when:
+        - cp_proxy_site is defined and cp_proxy_site is changed
+        - cp_proxy_site.backup_file is not defined
+
+    - name: Stop after restoring the previous configuration
+      ansible.builtin.fail:
+        msg: "nginx -t rejected the candidate site; previous state restored, nginx not reloaded: {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) }}"
