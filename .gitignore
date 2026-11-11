@@ -8,7 +8,9 @@
 
 # Live inventory, credentials, and generated VPN client/server configurations.
 /ansible/inventories/production/
-/secrets/
+# SOPS files and age identities stay local (docs/SECRETS.md). Ignore rules do not
+# protect already tracked files; scripts/check_secrets.py checks the index.
+secrets/
 /credentials/
 /backups/
 /artifacts/
