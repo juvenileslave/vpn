@@ -1,0 +1,91 @@
+name: node_exporter role
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-exporter:
+    name: node_exporter role
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: ansible
+    # Одноразовый runner с systemd: роль применяется только к нему самому.
+    env:
+      PLAYBOOK: ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/node_exporter.yml
+      RELEASE_DIR: /opt/node_exporter/node_exporter-1.12.1.linux-amd64
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Установить закреплённый ansible-core
+        working-directory: .
+        run: make -C ansible bootstrap
+      - name: Проверить синтаксис playbook
+        run: ../.venv/bin/ansible-playbook --syntax-check playbooks/node_exporter.yml
+      - name: Отклонить wildcard-адрес до изменений
+        run: |
+          if $PLAYBOOK -e node_exporter_listen_address=0.0.0.0; then exit 1; fi
+          test ! -e /opt/node_exporter
+      - name: Check mode на чистом runner
+        run: |
+          $PLAYBOOK --check
+          test ! -e /opt/node_exporter
+          test ! -e /etc/systemd/system/node_exporter.service
+          if getent passwd node_exporter; then exit 1; fi
+      - name: Установка
+        run: $PLAYBOOK
+      - name: Повторный запуск без изменений
+        run: |
+          $PLAYBOOK | tee "$RUNNER_TEMP/second.log"
+          grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$RUNNER_TEMP/second.log"
+      - name: Проверить checksum, версию, сервис и учётную запись
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            https://github.com/prometheus/node_exporter/releases/download/v1.12.1/sha256sums.txt \
+            --output "$RUNNER_TEMP/sha256sums.txt"
+          (cd /opt/node_exporter && grep ' node_exporter-1.12.1.linux-amd64.tar.gz$' "$RUNNER_TEMP/sha256sums.txt" | sha256sum --check --strict)
+          "$RELEASE_DIR/node_exporter" --version 2>&1 | grep -F 'version 1.12.1 '
+          systemctl is-enabled node_exporter.service
+          systemctl is-active node_exporter.service
+          getent passwd node_exporter | grep -E ':/nonexistent:/usr/sbin/nologin$'
+          pid="$(systemctl show --property=MainPID --value node_exporter.service)"
+          test "$(ps -o user= -p "$pid")" = node_exporter
+          grep -E '^Cap(Eff|Prm|Amb):[[:space:]]+0+$' "/proc/$pid/status" | wc -l | grep -qx 3
+      - name: Проверить адрес по умолчанию и метрики
+        run: |
+          set -euo pipefail
+          ss -Hltn 'sport = :9100' | tee "$RUNNER_TEMP/listen.txt"
+          test "$(wc -l < "$RUNNER_TEMP/listen.txt")" -eq 1
+          grep -q ' 127\.0\.0\.1:9100 ' "$RUNNER_TEMP/listen.txt"
+          curl --fail --silent --show-error http://127.0.0.1:9100/metrics --output "$RUNNER_TEMP/metrics.txt"
+          grep -E '^node_exporter_build_info\{.*version="1\.12\.1"' "$RUNNER_TEMP/metrics.txt"
+      - name: Явный IPv6-адрес
+        run: |
+          set -euo pipefail
+          $PLAYBOOK -e node_exporter_listen_address=::1
+          $PLAYBOOK -e node_exporter_listen_address=::1 | tee "$RUNNER_TEMP/v6.log"
+          grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$RUNNER_TEMP/v6.log"
+          sleep 2
+          ss -Hltn 'sport = :9100' | tee "$RUNNER_TEMP/listen6.txt"
+          test "$(wc -l < "$RUNNER_TEMP/listen6.txt")" -eq 1
+          grep -q ' \[::1\]:9100 ' "$RUNNER_TEMP/listen6.txt"
+          curl --fail --silent --show-error --globoff 'http://[::1]:9100/metrics' --output "$RUNNER_TEMP/metrics6.txt"
+          grep -E '^node_exporter_build_info\{.*version="1\.12\.1"' "$RUNNER_TEMP/metrics6.txt"

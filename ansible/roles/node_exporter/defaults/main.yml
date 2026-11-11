@@ -1,0 +1,4 @@
+# Literal IPv4 or IPv6 address of this host; wildcards and hostnames are rejected.
+# Non-loopback values need the separate base-role firewall restricted to CP.
+node_exporter_listen_address: 127.0.0.1
+node_exporter_listen_port: 9100

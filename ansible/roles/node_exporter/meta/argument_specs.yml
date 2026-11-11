@@ -1,0 +1,12 @@
+argument_specs:
+  main:
+    short_description: Install a pinned node_exporter as a systemd service
+    options:
+      node_exporter_listen_address:
+        type: str
+        default: 127.0.0.1
+        description: Literal IPv4 or IPv6 unicast address assigned to the host.
+      node_exporter_listen_port:
+        type: int
+        default: 9100
+        description: TCP port in the range 1-65535.
