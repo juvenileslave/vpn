@@ -1,0 +1,37 @@
+---
+# Required: plain DNS name of the subscription vhost (no wildcard, no IP).
+cp_proxy_server_name: ""
+# Required: loopback panel upstream, the `panel_bind:panel_port` contract of
+# the remnawave_panel role (127.0.0.0/8 or [::1] only).
+cp_proxy_upstream: ""
+# Public prefix proxied to the upstream; everything else returns 404.
+cp_proxy_path_prefix: /sub/
+# Path the prefix is mapped to on the upstream.
+cp_proxy_upstream_path: "{{ cp_proxy_path_prefix }}"
+
+# Certificate mode. false: operator-provided files, no ACME calls.
+cp_proxy_acme: false
+cp_proxy_certificate_path: ""
+cp_proxy_key_path: ""
+
+# ACME mode only (cp_proxy_acme: true).
+cp_proxy_acme_email: ""
+cp_proxy_acme_agree_tos: false
+cp_proxy_acme_staging: false
+# DNS preflight: the name must resolve only to these addresses. Override when a
+# documented front proxy/DNAT address receives the HTTP-01 challenge.
+cp_proxy_acme_expected_ipv4: "{{ public_ipv4 | default('') }}"
+cp_proxy_acme_expected_ipv6: "{{ public_ipv6 | default('') }}"
+# NSS source for `getent -s`; `dns` bypasses /etc/hosts. `files` is for tests.
+cp_proxy_acme_nss_service: dns
+
+# Served over HTTP for /.well-known/acme-challenge/ in every mode.
+cp_proxy_acme_webroot: /var/www/cp_proxy-acme
+
+cp_proxy_listen_ipv6: true
+cp_proxy_hsts: false
+cp_proxy_hsts_max_age: 31536000
+cp_proxy_client_max_body_size: 64k
+cp_proxy_proxy_connect_timeout: 5s
+cp_proxy_proxy_send_timeout: 30s
+cp_proxy_proxy_read_timeout: 30s
