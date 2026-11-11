@@ -1,0 +1,92 @@
+---
+- name: Ensure CA certificates for the HTTPS repository
+  ansible.builtin.apt:
+    name: ca-certificates
+    state: present
+
+- name: Ensure the apt keyring directory
+  ansible.builtin.file:
+    path: "{{ docker_apt_keyring_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Vendored copy of https://download.docker.com/linux/{debian,ubuntu}/gpg,
+# fingerprint 9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88.
+- name: Install the Docker repository signing key
+  ansible.builtin.copy:
+    src: docker.asc
+    dest: "{{ docker_apt_keyring_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: docker_apt_key
+
+- name: Configure the Docker apt repository
+  ansible.builtin.template:
+    src: docker.sources.j2
+    dest: "{{ docker_apt_source_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: docker_apt_source
+
+- name: Query cached Docker package versions
+  ansible.builtin.command:
+    argv: "{{ ['apt-cache', 'madison'] + (docker_package_targets.keys() | list) }}"
+  register: docker_apt_madison_cached
+  changed_when: false
+  check_mode: false
+
+- name: Refresh the apt cache for the Docker repository
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - not ansible_check_mode
+    - >-
+      docker_apt_key is changed or docker_apt_source is changed
+      or docker_package_specs | difference(docker_available_specs) | length > 0
+  vars:
+    docker_available_specs: >-
+      {{ docker_apt_madison_cached.stdout_lines | select('search', docker_madison_source_regex)
+         | map('regex_replace', docker_madison_line_regex, '\1=\2') | list }}
+  register: docker_apt_cache_refresh
+
+- name: Query refreshed Docker package versions
+  ansible.builtin.command:
+    argv: "{{ ['apt-cache', 'madison'] + (docker_package_targets.keys() | list) }}"
+  register: docker_apt_madison_refreshed
+  changed_when: false
+  check_mode: false
+  when: docker_apt_cache_refresh is not skipped
+
+- name: Determine missing pinned versions
+  ansible.builtin.set_fact:
+    docker_missing_specs: >-
+      {{ docker_package_specs | difference(
+           (madison.stdout_lines | select('search', docker_madison_source_regex)
+            | map('regex_replace', docker_madison_line_regex, '\1=\2') | list)) }}
+  vars:
+    madison: >-
+      {{ docker_apt_madison_refreshed if docker_apt_cache_refresh is not skipped
+         else docker_apt_madison_cached }}
+
+# In check mode the repository may not be configured yet, so availability is
+# unknown: report it instead of failing or pretending the packages resolve.
+- name: Report unresolved versions in check mode
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: pinned Docker versions are not in the current apt cache
+      ({{ docker_missing_specs | join(', ') }}). The real run refreshes the cache
+      and fails if they are still unavailable; package and daemon changes are not predicted.
+  when: ansible_check_mode and docker_missing_specs | length > 0
+
+- name: Fail on unavailable pinned versions
+  ansible.builtin.assert:
+    that: docker_missing_specs | length == 0
+    fail_msg: >-
+      The official repository does not provide: {{ docker_missing_specs | join(', ') }}.
+      Pin versions that exist for {{ docker_apt_distro }} {{ ansible_facts['distribution_release'] }}.
+    quiet: true
+  when: not ansible_check_mode

@@ -1,0 +1,11 @@
+---
+# Install encrypted panel PostgreSQL backups with a systemd timer (docs/BACKUP.md).
+# Example:
+#   ansible-playbook -i <inventory> playbooks/backup.yml \
+#     -e cp_backup_recipients_file=/path/outside/git/recipients.txt
+- name: Install encrypted panel backups
+  hosts: "{{ cp_backup_hosts | default('cp') }}"
+  become: true
+  gather_facts: true
+  roles:
+    - role: "{{ playbook_dir }}/../roles/cp_backup"

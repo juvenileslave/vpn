@@ -1,0 +1,13 @@
+---
+# Order matters: every check that can fail runs before the first mutation.
+- name: Validate inputs on the controller
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Render and validate the compose file in a scratch directory
+  ansible.builtin.import_tasks: stage.yml
+
+- name: Check the Docker daemon and refuse to take over unmanaged objects
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Install files and converge the stack
+  ansible.builtin.import_tasks: apply.yml

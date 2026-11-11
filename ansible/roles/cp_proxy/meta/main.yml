@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: cp_proxy
+  author: juvenileslave/vpn
+  description: nginx TLS vhost proxying only the subscription prefix to the loopback panel
+  license: none
+  min_ansible_version: "2.19"
+  platforms:
+    - name: Debian
+    - name: Ubuntu
+dependencies: []

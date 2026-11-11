@@ -1,0 +1,89 @@
+# {{ cp_proxy_marker }}. Manual edits are overwritten.
+# Subscription vhost for {{ cp_proxy_server_name }}: only {{ cp_proxy_path_prefix }} is proxied.
+
+server {
+    listen {{ cp_proxy_http_port }};
+{% if cp_proxy_listen_ipv6 | bool %}
+    listen [::]:{{ cp_proxy_http_port }};
+{% endif %}
+    server_name {{ cp_proxy_server_name }};
+    server_tokens off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ cp_proxy_acme_webroot }};
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+{% if cp_proxy_tls_enabled %}
+        return 301 https://{{ cp_proxy_server_name }}$request_uri;
+{% else %}
+        # ACME bootstrap: no certificate yet, nothing but the challenge is served.
+        return 404;
+{% endif %}
+    }
+}
+{% if cp_proxy_tls_enabled %}
+
+server {
+    listen {{ cp_proxy_https_port }} ssl;
+{% if cp_proxy_listen_ipv6 | bool %}
+    listen [::]:{{ cp_proxy_https_port }} ssl;
+{% endif %}
+    server_name {{ cp_proxy_server_name }};
+    server_tokens off;
+
+    ssl_certificate {{ cp_proxy_ssl_certificate }};
+    ssl_certificate_key {{ cp_proxy_ssl_certificate_key }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers {{ cp_proxy_tls_ciphers }};
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:cp_proxy_tls:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+{% if cp_proxy_hsts | bool %}
+    add_header Strict-Transport-Security "max-age={{ cp_proxy_hsts_max_age | int }}" always;
+{% endif %}
+
+    # This vhost may be the implicit default on the TLS port: other names are refused.
+    if ($host != "{{ cp_proxy_server_name }}") {
+        return 421;
+    }
+
+    location ^~ {{ cp_proxy_path_prefix }} {
+        limit_except GET {
+            deny all;
+        }
+        client_max_body_size {{ cp_proxy_client_max_body_size }};
+
+        # An explicit URI makes nginx forward the normalized path, not the raw one.
+        proxy_pass http://{{ cp_proxy_upstream }}{{ cp_proxy_upstream_path }};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_connect_timeout {{ cp_proxy_proxy_connect_timeout }};
+        proxy_send_timeout {{ cp_proxy_proxy_send_timeout }};
+        proxy_read_timeout {{ cp_proxy_proxy_read_timeout }};
+        proxy_redirect off;
+
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+{% if cp_proxy_hsts | bool %}
+        add_header Strict-Transport-Security "max-age={{ cp_proxy_hsts_max_age | int }}" always;
+{% endif %}
+    }
+
+    location / {
+        return 404;
+    }
+}
+{% endif %}
