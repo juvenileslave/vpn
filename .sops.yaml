@@ -1,0 +1,9 @@
+# Правила шифрования SOPS + age (этап 0.2 архитектурного плана).
+# Получатели не заданы намеренно: пустой список заставляет `sops -e` завершиться
+# ошибкой «empty key group provided», а не создать нерасшифровываемый файл.
+# Оператор заменяет `age: []` одной строкой со своими публичными ключами
+# (см. docs/SECRETS.md). Закрытые ключи age в репозиторий не попадают.
+creation_rules:
+  - path_regex: (^|/)secrets/[^/]+\.sops\.ya?ml$
+    encrypted_regex: '(?i)^.*(password|passwd|secret|token|key|credential|private|dsn|auth|uuid).*$'
+    age: []
