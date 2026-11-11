@@ -1,0 +1,20 @@
+# Managed by Ansible (cp_backup). Contains no secrets.
+[Unit]
+Description=Encrypted PostgreSQL backup of the control-plane panel
+Documentation=https://github.com/juvenileslave/vpn/blob/master/docs/BACKUP.md
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/cp-backup/cp-backup.env
+ExecStart=/usr/local/sbin/cp-backup
+UMask=0077
+RuntimeDirectory=cp-backup
+RuntimeDirectoryMode=0700
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+NoNewPrivileges=true

@@ -1,0 +1,119 @@
+---
+- name: Validate cp_backup settings
+  ansible.builtin.assert:
+    that:
+      - cp_backup_recipients_file | length > 0
+      - cp_backup_keep_days | int >= 1
+      - cp_backup_keep_count | int >= 1
+      - cp_backup_unsafe_skip_verify | string | lower in ['true', 'false']
+      - cp_backup_timer_enabled | string | lower in ['true', 'false']
+      - cp_backup_dir is match('^/[A-Za-z0-9_./-]+$')
+      - cp_backup_dir not in ['/', '/var', '/var/lib', '/etc', '/root', '/tmp']
+      - cp_backup_db_name is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - cp_backup_db_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - cp_backup_compose_project is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - cp_backup_compose_service is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - cp_backup_container == '' or cp_backup_container is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+    fail_msg: >-
+      cp_backup: set cp_backup_recipients_file and keep names, retention and
+      flags within the documented formats (docs/BACKUP.md).
+    quiet: true
+
+- name: Inspect the recipients file on the controller
+  ansible.builtin.stat:
+    path: "{{ cp_backup_recipients_file }}"
+  delegate_to: localhost
+  become: false
+  register: cp_backup_recipients_stat
+
+- name: Require the recipients file outside the Git checkout
+  ansible.builtin.assert:
+    that:
+      - cp_backup_recipients_stat.stat.exists
+      - cp_backup_recipients_stat.stat.isreg
+      - not ((cp_backup_recipients_stat.stat.path | realpath) ~ '/').startswith(cp_backup_repo_root ~ '/')
+    fail_msg: cp_backup_recipients_file must be an existing regular file outside the repository.
+    quiet: true
+  vars:
+    cp_backup_repo_root: "{{ (role_path ~ '/../../..') | realpath }}"
+
+- name: Require public age recipients only
+  ansible.builtin.assert:
+    that:
+      - "'AGE-SECRET-KEY-' not in cp_backup_recipients_text"
+      - cp_backup_recipients_text | regex_findall('(?m)^\\s*[^#\\s]\\S*') | length >= 1
+    fail_msg: >-
+      The recipients file must list at least one age recipient and must not
+      contain an identity (AGE-SECRET-KEY-).
+    quiet: true
+  vars:
+    cp_backup_recipients_text: "{{ lookup('ansible.builtin.file', cp_backup_recipients_file) }}"
+
+- name: Install the pinned age release
+  ansible.builtin.include_tasks: age.yml
+  when: cp_backup_age_install | bool
+
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: /etc/cp-backup
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Create the artifact directory
+  ansible.builtin.file:
+    path: "{{ cp_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install age recipients
+  ansible.builtin.copy:
+    src: "{{ cp_backup_recipients_file }}"
+    dest: /etc/cp-backup/recipients.txt
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Install the backup settings
+  ansible.builtin.template:
+    src: cp-backup.env.j2
+    dest: /etc/cp-backup/cp-backup.env
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Install the backup script
+  ansible.builtin.copy:
+    src: cp-backup.sh
+    dest: /usr/local/sbin/cp-backup
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install systemd units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - cp-backup.service
+    - cp-backup.timer
+  register: cp_backup_units
+
+- name: Verify systemd units
+  ansible.builtin.command:
+    argv: [systemd-analyze, verify, /etc/systemd/system/cp-backup.service, /etc/systemd/system/cp-backup.timer]
+  changed_when: false
+
+- name: Apply the timer state
+  ansible.builtin.systemd_service:
+    name: cp-backup.timer
+    daemon_reload: "{{ cp_backup_units is changed }}"
+    enabled: "{{ cp_backup_timer_enabled | bool }}"
+    state: "{{ 'started' if cp_backup_timer_enabled | bool else 'stopped' }}"
+  tags: [cp_backup_systemd]

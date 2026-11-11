@@ -1,0 +1,82 @@
+---
+# Validates the exact compose content, in check mode too. The scratch env
+# files carry key names with empty values, so no secret reaches the output.
+- name: Validate the rendered compose file
+  block:
+    - name: Create a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .remnawave
+      register: _remnawave_panel_stage
+      check_mode: false
+      changed_when: false
+
+    - name: Render the compose file into the scratch directory
+      ansible.builtin.template:
+        src: compose.yaml.j2
+        dest: "{{ _remnawave_panel_stage.path }}/compose.yaml"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+      diff: false
+
+    - name: Write key-only env files into the scratch directory
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ _remnawave_panel_stage.path }}/{{ item.name }}"
+        mode: "0600"
+      vars:
+        remnawave_panel_env_render: "{{ dict(item.env_keys | product([''])) }}"
+      loop:
+        - {name: panel.env, env_keys: "{{ _remnawave_panel_panel_env.keys() | list }}"}
+        - {name: db.env, env_keys: "{{ _remnawave_panel_db_env.keys() | list }}"}
+      loop_control:
+        label: "{{ item.name }}"
+      check_mode: false
+      changed_when: false
+      diff: false
+
+    - name: Run docker compose config --quiet
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name={{ remnawave_panel_project }}
+          - --project-directory={{ _remnawave_panel_stage.path }}
+          - --file={{ _remnawave_panel_stage.path }}/compose.yaml
+          - config
+          - --quiet
+      check_mode: false
+      changed_when: false
+
+    - name: Read the normalized compose model
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name={{ remnawave_panel_project }}
+          - --project-directory={{ _remnawave_panel_stage.path }}
+          - --file={{ _remnawave_panel_stage.path }}/compose.yaml
+          - config
+          - --format=json
+      register: _remnawave_panel_model
+      check_mode: false
+      changed_when: false
+
+    - name: Enforce the stack policy on the normalized model
+      vars:
+        _violations: >-
+          {{ _remnawave_panel_model.stdout | from_json
+             | remnawave_panel_compose_violations(remnawave_panel_project, 'remnawave', panel_bind, panel_port) }}
+      ansible.builtin.assert:
+        that: _violations | length == 0
+        fail_msg: "Rendered compose violates the policy: {{ _violations | join('; ') }}"
+        quiet: true
+  always:
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ _remnawave_panel_stage.path }}"
+        state: absent
+      when: _remnawave_panel_stage.path is defined
+      check_mode: false
+      changed_when: false
