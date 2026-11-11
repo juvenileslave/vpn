@@ -1,0 +1,7 @@
+# Managed by Ansible role docker.
+Types: deb
+URIs: {{ docker_apt_repository_base_url }}/{{ docker_apt_distro }}
+Suites: {{ ansible_facts['distribution_release'] }}
+Components: stable
+Architectures: {{ docker_apt_architecture }}
+Signed-By: {{ docker_apt_keyring_path }}
