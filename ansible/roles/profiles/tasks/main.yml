@@ -1,0 +1,6 @@
+---
+- name: Validate profile inputs
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Render profiles
+  ansible.builtin.import_tasks: render.yml

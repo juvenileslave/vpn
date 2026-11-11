@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: cp_backup
+  author: juvenileslave
+  description: Encrypted pg_dump backups of the panel PostgreSQL with a systemd timer and a restore drill.
+  license: none
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Debian
+    - name: Ubuntu
+dependencies: []

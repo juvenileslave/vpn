@@ -1,0 +1,12 @@
+---
+# Local-only render of the exit node Xray profiles (architecture tasks 3.2, 3.3, 3.5).
+# connection: local keeps every task on the control machine: no SSH to the
+# exit host, no panel API, no upload. See docs/PROFILES.md.
+- name: Render exit Xray profiles locally
+  hosts: exit
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  roles:
+    - role: ../roles/profiles

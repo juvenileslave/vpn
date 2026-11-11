@@ -1,0 +1,94 @@
+---
+- name: Require explicit restore confirmation and inputs
+  ansible.builtin.assert:
+    that:
+      - cp_restore_confirm | string | lower == 'true'
+      - cp_restore_replace | string | lower in ['true', 'false']
+      - cp_restore_artifact_src | length > 0
+      - cp_restore_artifact_src | basename is match('^cp-backup-[0-9]{8}T[0-9]{6}Z\.pgcustom\.age$')
+      - cp_restore_identity_file | length > 0
+      - cp_restore_container is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - cp_restore_db_name is match('^[a-z_][a-z0-9_]{0,62}$')
+      - cp_restore_sentinel_table == '' or (cp_restore_sentinel_rows | string) is match('^[0-9]+$')
+    fail_msg: >-
+      Restore requires cp_restore_confirm=true, cp_restore_artifact_src,
+      cp_restore_identity_file, cp_restore_container and a new
+      cp_restore_db_name (docs/BACKUP.md).
+    quiet: true
+
+- name: Inspect restore inputs on the controller
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  delegate_to: localhost
+  become: false
+  loop:
+    - "{{ cp_restore_artifact_src }}"
+    - "{{ cp_restore_identity_file }}"
+  register: cp_restore_inputs
+
+- name: Require the artifact and the identity
+  ansible.builtin.assert:
+    that: item.stat.exists and item.stat.isreg
+    fail_msg: "Missing restore input: {{ item.item | basename }}"
+    quiet: true
+  loop: "{{ cp_restore_inputs.results }}"
+  loop_control:
+    label: "{{ item.item | basename }}"
+
+- name: Install the pinned age release
+  ansible.builtin.include_tasks: age.yml
+  when: cp_backup_age_install | bool
+
+- name: Restore inside a temporary directory
+  block:
+    - name: Create a private working directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: cp-restore.
+      register: cp_restore_tmp
+
+    - name: Copy the identity
+      ansible.builtin.copy:
+        src: "{{ cp_restore_identity_file }}"
+        dest: "{{ cp_restore_tmp.path }}/identity.txt"
+        mode: "0600"
+      no_log: true
+
+    - name: Copy the artifact and the restore script
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ cp_restore_tmp.path }}/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {src: "{{ cp_restore_artifact_src }}", dest: "{{ cp_restore_artifact_src | basename }}", mode: "0600"}
+        - {src: cp-restore.sh, dest: cp-restore, mode: "0700"}
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: Restore the artifact into a new database
+      ansible.builtin.command:
+        argv: ["{{ cp_restore_tmp.path }}/cp-restore"]
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/sbin:/usr/bin:/sbin:/bin') }}"
+        CP_RESTORE_CONFIRM: "true"
+        CP_RESTORE_REPLACE: "{{ cp_restore_replace | string | lower }}"
+        CP_RESTORE_ARTIFACT: "{{ cp_restore_tmp.path }}/{{ cp_restore_artifact_src | basename }}"
+        CP_RESTORE_IDENTITY_FILE: "{{ cp_restore_tmp.path }}/identity.txt"
+        CP_RESTORE_CONTAINER: "{{ cp_restore_container }}"
+        CP_RESTORE_DB_NAME: "{{ cp_restore_db_name }}"
+        CP_RESTORE_DB_USER: "{{ cp_restore_db_user }}"
+        CP_RESTORE_LIVE_PROJECT: "{{ cp_restore_live_project }}"
+        CP_RESTORE_SENTINEL_TABLE: "{{ cp_restore_sentinel_table }}"
+        CP_RESTORE_SENTINEL_ROWS: "{{ cp_restore_sentinel_rows | string }}"
+      register: cp_restore_result
+      changed_when: true
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: "{{ cp_restore_result.stderr_lines }}"
+  always:
+    - name: Remove the identity, artifact copy and script
+      ansible.builtin.file:
+        path: "{{ cp_restore_tmp.path }}"
+        state: absent
+      when: cp_restore_tmp.path is defined

@@ -1,0 +1,69 @@
+---
+# Pure variable checks: run before anything touches the host.
+- name: Validate cp_proxy_server_name (plain lowercase DNS name)
+  ansible.builtin.assert:
+    that:
+      - cp_proxy_server_name is string
+      - cp_proxy_server_name | length <= 253
+      - cp_proxy_server_name is match('^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$')
+    fail_msg: "cp_proxy_server_name must be a lowercase DNS name with a dot; no wildcard, IP, port or trailing dot"
+    quiet: true
+
+- name: Validate cp_proxy_upstream (loopback host:port)
+  ansible.builtin.assert:
+    that:
+      - cp_proxy_upstream is string
+      - cp_proxy_upstream is match('^(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]):[0-9]{1,5}$')
+      - (cp_proxy_upstream.split(':') | last | int) >= 1
+      - (cp_proxy_upstream.split(':') | last | int) <= 65535
+    fail_msg: "cp_proxy_upstream must be 127.x.y.z:port or [::1]:port (panel_bind:panel_port of the panel role)"
+    quiet: true
+
+- name: Validate subscription prefix and upstream path
+  ansible.builtin.assert:
+    that:
+      - cp_proxy_path_prefix is match('^/([A-Za-z0-9._~-]+/)+$')
+      - cp_proxy_upstream_path is match('^/([A-Za-z0-9._~-]+/)*$')
+      - "'/./' not in cp_proxy_path_prefix and '/../' not in cp_proxy_path_prefix"
+      - "'/./' not in cp_proxy_upstream_path and '/../' not in cp_proxy_upstream_path"
+      - not (cp_proxy_path_prefix | lower) is match('^/(api|admin|\.well-known)/')
+    fail_msg: >-
+      cp_proxy_path_prefix must look like /sub/ (starts and ends with '/', no dot segments)
+      and must not expose /api/, /admin/ or /.well-known/; cp_proxy_upstream_path must be '/' or similar
+    quiet: true
+
+- name: Validate proxy limits and paths
+  ansible.builtin.assert:
+    that:
+      - (cp_proxy_client_max_body_size | string) is match('^[0-9]+[kKmM]?$')
+      - (cp_proxy_proxy_connect_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
+      - (cp_proxy_proxy_send_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
+      - (cp_proxy_proxy_read_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
+      - (cp_proxy_hsts_max_age | string) is match('^[0-9]+$')
+      - cp_proxy_acme_webroot is match('^/[A-Za-z0-9._/-]+$')
+    fail_msg: "Invalid body size, timeout, HSTS max-age or ACME webroot"
+    quiet: true
+
+- name: Validate operator-provided certificate mode
+  when: not (cp_proxy_acme | bool)
+  ansible.builtin.assert:
+    that:
+      - cp_proxy_certificate_path is match('^/\S+$')
+      - cp_proxy_key_path is match('^/\S+$')
+    fail_msg: "cp_proxy_acme is false: set absolute cp_proxy_certificate_path and cp_proxy_key_path"
+    quiet: true
+
+- name: Validate ACME mode
+  when: cp_proxy_acme | bool
+  ansible.builtin.assert:
+    that:
+      - cp_proxy_certificate_path | length == 0
+      - cp_proxy_key_path | length == 0
+      - cp_proxy_acme_email is match('^[^@\s]+@[^@\s]+\.[^@\s]+$')
+      - cp_proxy_acme_agree_tos is sameas true
+      - cp_proxy_acme_expected_ipv4 is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+      - cp_proxy_acme_nss_service in ['dns', 'files']
+    fail_msg: >-
+      cp_proxy_acme is true: unset certificate paths, set cp_proxy_acme_email,
+      cp_proxy_acme_agree_tos: true and an IPv4 in cp_proxy_acme_expected_ipv4 (public_ipv4)
+    quiet: true

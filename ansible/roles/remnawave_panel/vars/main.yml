@@ -1,0 +1,42 @@
+---
+# Role constants, not meant to be overridden.
+remnawave_panel_project: remnawave
+remnawave_panel_label_key: io.github.juvenileslave.vpn.managed-by
+remnawave_panel_label_value: remnawave_panel
+
+remnawave_panel_images:
+  remnawave_panel: remnawave/backend
+  postgres: postgres
+  valkey: valkey/valkey
+
+# Exact pins only: full version, optional suffix, optional @sha256 digest.
+# PostgreSQL uses MAJOR.MINOR releases and must be >= 18, because the data
+# volume is mounted at /var/lib/postgresql (layout of the 18+ images).
+remnawave_panel_pin_patterns:
+  remnawave_panel: '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(@sha256:[0-9a-f]{64})?$'
+  postgres: '^(1[89]|[2-9][0-9])\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(@sha256:[0-9a-f]{64})?$'
+  valkey: '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(@sha256:[0-9a-f]{64})?$'
+
+remnawave_panel_db_keys: [POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB]
+remnawave_panel_required_keys: [APP_SECRET, METRICS_USER, METRICS_PASS, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB]
+# Set by the role (compose environment or derived); operators must not supply them.
+remnawave_panel_managed_keys:
+  - APP_PORT
+  - METRICS_PORT
+  - DATABASE_URL
+  - REDIS_HOST
+  - REDIS_PORT
+  - REDIS_SOCKET
+  - FRONT_END_DOMAIN
+  - SUB_PUBLIC_DOMAIN
+
+# Names used by this stack and by the upstream quick-start compose file.
+remnawave_panel_reserved_containers:
+  - remnawave
+  - remnawave-db
+  - remnawave-redis
+  - remnawave-remnawave-1
+  - remnawave-remnawave-db-1
+  - remnawave-remnawave-redis-1
+remnawave_panel_reserved_volumes: [remnawave_db-data, remnawave_valkey-data]
+remnawave_panel_reserved_networks: [remnawave_backend, remnawave_frontend]

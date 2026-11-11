@@ -1,0 +1,41 @@
+---
+# Existing operator files are only inspected; the role never creates keys.
+- name: Inspect certificate and key files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: true
+  loop:
+    - "{{ cp_proxy_certificate_path }}"
+    - "{{ cp_proxy_key_path }}"
+  register: cp_proxy_tls_files
+
+- name: Require sane certificate and key modes
+  vars:
+    cert: "{{ cp_proxy_tls_files.results[0].stat }}"
+    key: "{{ cp_proxy_tls_files.results[1].stat }}"
+  ansible.builtin.assert:
+    that:
+      - cert.exists and cert.isreg and cert.readable
+      - key.exists and key.isreg and key.readable
+      - cert.mode[-1] in '0145' and cert.mode[-2] in '0145'
+      - key.uid == 0
+      - key.mode[-1] == '0' and key.mode[-2] in '04'
+    fail_msg: >-
+      Certificate must be a readable regular file without group/world write;
+      key must be a regular file owned by root with mode 0600 or 0640
+    quiet: true
+
+- name: Check that the certificate has not expired
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ cp_proxy_certificate_path }}", -noout, -checkend, "0"]
+  changed_when: false
+  check_mode: false
+
+# OpenSSL ignores -checkhost when combined with -checkend.
+- name: Check that the certificate covers the server name
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ cp_proxy_certificate_path }}", -noout, -checkhost, "{{ cp_proxy_server_name }}"]
+  register: cp_proxy_cert_host
+  changed_when: false
+  check_mode: false
+  failed_when: cp_proxy_cert_host.rc != 0 or ' does match certificate' not in cp_proxy_cert_host.stdout

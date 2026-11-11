@@ -1,0 +1,50 @@
+---
+# Encrypted PostgreSQL backups of the control-plane panel (architecture task 2.3).
+# See docs/BACKUP.md. No variable here holds a secret.
+
+# Controller path to the age recipients file (public keys only, one per line).
+# Required; must live outside the Git checkout.
+cp_backup_recipients_file: ""
+
+# Panel PostgreSQL container contract (issue #20): compose project `remnawave`,
+# service `postgres`. Set cp_backup_container to bypass label discovery.
+cp_backup_compose_project: remnawave
+cp_backup_compose_service: postgres
+cp_backup_container: ""
+cp_backup_db_name: postgres
+cp_backup_db_user: postgres
+
+# Artifacts and retention.
+cp_backup_dir: /var/lib/cp-backup
+cp_backup_keep_days: 14
+cp_backup_keep_count: 30
+
+# Schedule (systemd OnCalendar) and jitter.
+cp_backup_on_calendar: "*-*-* 03:15:00 UTC"
+cp_backup_randomized_delay: 30min
+# false stops and disables the timer (rollback); artifacts are never removed.
+cp_backup_timer_enabled: true
+
+# Ciphertext verification is mandatory. Skipping it requires this explicit flag.
+cp_backup_unsafe_skip_verify: false
+
+# Pinned age release: SHA-256 of the GitHub release tarballs, cross-checked
+# against their Sigsum proofs (docs/BACKUP.md).
+cp_backup_age_install: true
+cp_backup_age_version: v1.3.2
+cp_backup_age_sha256:
+  amd64: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+  arm64: 6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4
+
+# Restore drill (tasks_from: restore). Identity and artifact paths are on the
+# controller; the identity is copied to a temporary 0700 directory and removed.
+cp_restore_confirm: false
+cp_restore_replace: false
+cp_restore_artifact_src: ""
+cp_restore_identity_file: ""
+cp_restore_container: ""
+cp_restore_db_name: ""
+cp_restore_db_user: postgres
+cp_restore_live_project: "{{ cp_backup_compose_project }}"
+cp_restore_sentinel_table: ""
+cp_restore_sentinel_rows: ""

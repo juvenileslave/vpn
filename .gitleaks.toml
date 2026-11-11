@@ -1,0 +1,9 @@
+# Exact synthetic values used by the Remnawave client tests.
+# The tests assert that these markers never appear in errors or logs.
+# Keep the exception value-scoped: new findings and other files stay visible.
+[allowlist]
+description = "Synthetic Remnawave test constants"
+regexes = [
+  '''trojan-secret-41b2''',
+  '''0f1e2d3c-4b5a-4968-8776-655443322110''',
+]
