@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  role_name: base
+  author: vpn
+  description: Safe, idempotent base configuration for Debian/Ubuntu VPN nodes.
+  license: proprietary
+  min_ansible_version: "2.19"
+  platforms:
+    - name: Debian
+      versions: ["bookworm", "trixie"]
+    - name: Ubuntu
+      versions: ["jammy", "noble"]
+dependencies: []

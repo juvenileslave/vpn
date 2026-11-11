@@ -1,0 +1,42 @@
+---
+- name: Check supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+      - >-
+        (ansible_facts.distribution == 'Debian'
+         and ansible_facts.distribution_major_version is version('12', '>='))
+        or (ansible_facts.distribution == 'Ubuntu'
+         and ansible_facts.distribution_version is version('22.04', '>='))
+    fail_msg: Поддерживаются только Debian 12+ и Ubuntu 22.04+.
+    quiet: true
+
+- name: Validate role variables
+  vars:
+    base_input_errors: >-
+      {{ {
+        'base_admin_users': base_admin_users,
+        'base_admin_sudo_nopasswd': base_admin_sudo_nopasswd,
+        'base_ssh_enabled': base_ssh_enabled,
+        'base_ssh_port': base_ssh_port,
+        'base_ssh_permit_root_login': base_ssh_permit_root_login,
+        'base_ssh_trusted_cidrs': base_ssh_trusted_cidrs,
+        'base_firewall_enabled': base_firewall_enabled,
+        'base_firewall_vpn_ports': base_firewall_vpn_ports,
+        'base_firewall_allow_icmp_echo': base_firewall_allow_icmp_echo,
+        'base_firewall_allow_dhcpv6_client': base_firewall_allow_dhcpv6_client,
+        'base_firewall_acknowledged_closed_ports': base_firewall_acknowledged_closed_ports,
+        'base_chrony_enabled': base_chrony_enabled,
+        'base_chrony_pools': base_chrony_pools,
+        'base_unattended_upgrades_enabled': base_unattended_upgrades_enabled,
+        'base_unattended_origins_patterns': base_unattended_origins_patterns,
+        'base_bbr_enabled': base_bbr_enabled,
+        'base_bbr_qdisc': base_bbr_qdisc,
+        'base_swap_enabled': base_swap_enabled,
+        'base_swap_file': base_swap_file,
+        'base_swap_size_mb': base_swap_size_mb,
+      } | vpn_base_input_errors }}
+  ansible.builtin.assert:
+    that: base_input_errors | length == 0
+    fail_msg: "Некорректные переменные роли base: {{ base_input_errors | join('; ') }}"
+    quiet: true

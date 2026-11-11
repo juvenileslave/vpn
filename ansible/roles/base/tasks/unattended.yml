@@ -1,0 +1,11 @@
+---
+# Sorts after 20auto-upgrades and 50unattended-upgrades, so it overrides them
+# without editing distribution files.
+- name: Configure unattended security updates
+  ansible.builtin.template:
+    src: unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52vpn-base-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/apt-config -c %s dump

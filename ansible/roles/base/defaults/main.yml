@@ -1,0 +1,50 @@
+---
+# Administrative accounts. Existing accounts keep their shell, password,
+# groups and authorized_keys lines; only missing keys are appended.
+#   - name: opsadmin
+#     sudo: true
+#     authorized_keys:
+#       - ssh-ed25519 AAAA... opsadmin@workstation
+base_admin_users: []
+base_admin_shell: /bin/bash
+base_admin_sudo_nopasswd: true
+
+# SSH policy is not touched until explicitly enabled.
+base_ssh_enabled: false
+# Must equal the port sshd already listens on; the role does not change it.
+base_ssh_port: 22
+base_ssh_permit_root_login: "no"
+# Networks allowed to reach SSH when the firewall is enabled.
+base_ssh_trusted_cidrs: []
+
+# Owned nftables table inet vpn_base; not created until explicitly enabled.
+base_firewall_enabled: false
+#   - {proto: tcp, port: 443}
+base_firewall_vpn_ports: []
+base_firewall_allow_icmp_echo: true
+base_firewall_allow_dhcpv6_client: true
+# Non-loopback listeners the operator accepts to be closed, e.g. "tcp/8080".
+base_firewall_acknowledged_closed_ports: []
+
+base_chrony_enabled: true
+# Extra pools in an owned sources.d file; empty keeps distribution sources.
+base_chrony_pools: []
+
+base_unattended_upgrades_enabled: true
+base_unattended_origins_patterns: "{{ base_unattended_default_origins[ansible_facts.distribution] | default([]) }}"
+base_unattended_default_origins:
+  Debian:
+    - origin=Debian,codename=${distro_codename}-security,label=Debian-Security
+  Ubuntu:
+    - origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu
+    - origin=UbuntuESMApps,archive=${distro_codename}-apps-security
+    - origin=UbuntuESM,archive=${distro_codename}-infra-security
+
+base_bbr_enabled: true
+# "fq" recommended for BBR; empty string leaves net.core.default_qdisc alone.
+base_bbr_qdisc: fq
+
+# Created only if enabled and the host has no active swap at all.
+base_swap_enabled: false
+base_swap_file: /swapfile
+base_swap_size_mb: 1024

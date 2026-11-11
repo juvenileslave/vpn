@@ -1,0 +1,5 @@
+# Managed by Ansible role base (vpn). Forwarding is intentionally not set here.
+{% if base_bbr_qdisc %}
+net.core.default_qdisc = {{ base_bbr_qdisc }}
+{% endif %}
+net.ipv4.tcp_congestion_control = bbr

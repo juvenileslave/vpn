@@ -1,0 +1,35 @@
+---
+- name: Create missing administrative accounts
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    shell: "{{ base_admin_shell }}"
+    create_home: true
+    # "*" disables password login without locking key-based access.
+    password: "*"
+    update_password: on_create
+  loop: "{{ base_admin_users | rejectattr('name', 'in', ansible_facts.getent_passwd) | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: base_created_users
+
+- name: Refresh account database
+  ansible.builtin.getent:
+    database: passwd
+  when: base_created_users is changed
+
+- name: Add missing authorized keys
+  ansible.builtin.include_tasks: user_keys.yml
+  loop: "{{ base_admin_users | selectattr('name', 'in', ansible_facts.getent_passwd) | list }}"
+  loop_control:
+    loop_var: base_admin
+    label: "{{ base_admin.name }}"
+
+- name: Configure sudo for administrators
+  ansible.builtin.template:
+    src: sudoers.j2
+    dest: /etc/sudoers.d/vpn-base
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: base_admin_users | length > 0

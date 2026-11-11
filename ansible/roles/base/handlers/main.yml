@@ -1,0 +1,15 @@
+---
+- name: vpn_base reload chrony sources
+  ansible.builtin.command: chronyc reload sources
+  changed_when: true
+
+- name: vpn_base validate full sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  listen: vpn_base ssh changed
+
+# No-op when ssh.service is inactive (socket activation reads config per start).
+- name: vpn_base reload sshd
+  ansible.builtin.command: systemctl try-reload-or-restart ssh.service
+  changed_when: true
+  listen: vpn_base ssh changed

@@ -1,0 +1,176 @@
+---
+# Read-only inspection (except the tmpfs /run/sshd below); failures refuse the run
+# before any mutation.
+- name: Identify the remote login user
+  ansible.builtin.command: id -un
+  become: false
+  register: base_login_user
+  changed_when: false
+  check_mode: false
+
+- name: Read the SSH client address of this connection
+  ansible.builtin.command: printenv SSH_CONNECTION
+  become: false
+  register: base_ssh_connection
+  changed_when: false
+  check_mode: false
+  failed_when: base_ssh_connection.rc not in [0, 1]
+
+- name: Refuse disabling root login while connected as root
+  ansible.builtin.assert:
+    that: base_login_user.stdout != 'root'
+    fail_msg: >-
+      base_ssh_permit_root_login=no при подключении под root отрежет доступ.
+      Подключитесь администратором из base_admin_users.
+    quiet: true
+  when: base_ssh_enabled and base_ssh_permit_root_login == 'no' and base_ssh_connection.rc == 0
+
+- name: Refuse a firewall that would block the current SSH client
+  ansible.builtin.assert:
+    that: >-
+      base_ssh_connection.stdout.split() | first
+      | vpn_base_ssh_source_allowed(base_ssh_trusted_cidrs)
+    fail_msg: Адрес текущего SSH-клиента не входит в base_ssh_trusted_cidrs.
+    quiet: true
+  when: base_firewall_enabled and base_ssh_connection.rc == 0
+
+- name: Gather installed packages
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Refuse replacing another time daemon with chrony
+  vars:
+    base_other_time_daemons: >-
+      {{ ['systemd-timesyncd', 'ntp', 'ntpsec', 'openntpd']
+         | select('in', ansible_facts.packages) | list }}
+  ansible.builtin.assert:
+    that: "'chrony' in ansible_facts.packages or base_other_time_daemons | length == 0"
+    fail_msg: >-
+      Установка chrony удалит {{ base_other_time_daemons | join(', ') }}; роль не удаляет
+      пакеты. Замените службу времени вручную или задайте base_chrony_enabled=false.
+    quiet: true
+  when: base_chrony_enabled
+
+- name: Look up existing accounts
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Refuse turning system accounts into administrators
+  ansible.builtin.assert:
+    that: >-
+      item.name not in ansible_facts.getent_passwd
+      or ansible_facts.getent_passwd[item.name][1] | int >= 1000
+    fail_msg: "Пользователь {{ item.name }} существует и является системным (UID < 1000)."
+    quiet: true
+  loop: "{{ base_admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check for the sshd binary
+  ansible.builtin.stat:
+    path: /usr/sbin/sshd
+  register: base_sshd_binary
+  when: base_ssh_enabled or base_firewall_enabled
+
+# sshd -t/-T need this runtime directory; it can be missing on socket-activated
+# hosts before the first connection. It lives on tmpfs and holds no state.
+- name: Ensure the sshd privilege separation directory exists
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: (base_ssh_enabled or base_firewall_enabled) and base_sshd_binary.stat.exists
+
+- name: Read effective sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: base_sshd_before
+  changed_when: false
+  check_mode: false
+  when: (base_ssh_enabled or base_firewall_enabled) and base_sshd_binary.stat.exists
+
+- name: Refuse a mismatch between base_ssh_port and sshd
+  ansible.builtin.assert:
+    that: >-
+      (base_ssh_port | string)
+      in (base_sshd_before.stdout | vpn_base_sshd_effective).get('port', [])
+    fail_msg: sshd не слушает base_ssh_port; роль не меняет порт SSH.
+    quiet: true
+  when: base_sshd_before is not skipped
+
+- name: Read main sshd_config
+  ansible.builtin.slurp:
+    src: /etc/ssh/sshd_config
+  register: base_sshd_main
+  when: base_ssh_enabled and base_sshd_binary.stat.exists
+
+- name: Refuse sshd configurations the drop-in cannot govern
+  vars:
+    base_sshd_effective: "{{ base_sshd_before.stdout | vpn_base_sshd_effective }}"
+    base_admin_names: "{{ base_admin_users | map(attribute='name') | list }}"
+  ansible.builtin.assert:
+    that:
+      - base_sshd_main.content | b64decode is regex('(?mi)^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$')
+      - base_sshd_effective.get('allowusers', []) | length == 0
+        or base_admin_names | difference(base_sshd_effective.get('allowusers', [])) | length == 0
+      - base_admin_names | intersect(base_sshd_effective.get('denyusers', [])) | length == 0
+      - base_sshd_effective.get('allowgroups', []) | length == 0
+    fail_msg: >-
+      sshd_config должен подключать /etc/ssh/sshd_config.d/*.conf, а AllowUsers/DenyUsers/
+      AllowGroups не должны блокировать администраторов. Исправьте вручную.
+    quiet: true
+  when: base_sshd_main is not skipped
+
+- name: Read UFW configuration
+  ansible.builtin.stat:
+    path: /etc/ufw/ufw.conf
+  register: base_ufw_conf
+  when: base_firewall_enabled
+
+- name: Read UFW enablement
+  ansible.builtin.slurp:
+    src: /etc/ufw/ufw.conf
+  register: base_ufw_conf_content
+  when: base_firewall_enabled and base_ufw_conf.stat.exists
+
+- name: Check whether firewalld is active
+  ansible.builtin.command: systemctl is-active firewalld.service
+  register: base_firewalld_state
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: base_firewall_enabled
+
+- name: Refuse coexisting with an active unmanaged firewall
+  ansible.builtin.assert:
+    that:
+      - base_ufw_conf_content is skipped
+        or not (base_ufw_conf_content.content | b64decode is regex('(?m)^\s*ENABLED\s*=\s*yes\s*$'))
+      - base_firewalld_state.stdout | trim != 'active'
+    fail_msg: >-
+      Активен UFW или firewalld. Роль их не отключает: объедините политику вручную
+      или оставьте base_firewall_enabled=false.
+    quiet: true
+  when: base_firewall_enabled
+
+- name: List listening sockets
+  ansible.builtin.command: ss -H -l -n -t -u
+  register: base_listeners
+  changed_when: false
+  check_mode: false
+  when: base_firewall_enabled
+
+- name: Refuse closing unlisted public listeners
+  vars:
+    base_uncovered: >-
+      {{ base_listeners.stdout | vpn_base_uncovered_listeners(base_ssh_port,
+         base_firewall_vpn_ports, base_firewall_acknowledged_closed_ports,
+         base_firewall_allow_dhcpv6_client) }}
+  ansible.builtin.assert:
+    that: base_uncovered | length == 0
+    fail_msg: >-
+      Firewall закроет слушающие порты {{ base_uncovered | join(', ') }}. Добавьте их в
+      base_firewall_vpn_ports или подтвердите закрытие в base_firewall_acknowledged_closed_ports.
+    quiet: true
+  when: base_firewall_enabled

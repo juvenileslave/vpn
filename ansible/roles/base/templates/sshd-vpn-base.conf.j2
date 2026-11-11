@@ -1,0 +1,7 @@
+# Managed by Ansible role base (vpn). Loaded first from sshd_config.d, so these
+# values take precedence (sshd keeps the first value of each keyword).
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin {{ base_ssh_permit_root_login }}

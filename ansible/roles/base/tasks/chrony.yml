@@ -1,0 +1,38 @@
+---
+- name: Read chrony configuration
+  ansible.builtin.slurp:
+    src: /etc/chrony/chrony.conf
+  register: base_chrony_conf
+  when: base_chrony_pools | length > 0 and 'chrony' in ansible_facts.packages
+
+- name: Refuse pools that chrony would ignore
+  ansible.builtin.assert:
+    that: base_chrony_conf.content | b64decode is regex('(?m)^\s*sourcedir\s+/etc/chrony/sources\.d\s*$')
+    fail_msg: chrony.conf не подключает /etc/chrony/sources.d; base_chrony_pools не применить.
+    quiet: true
+  when: base_chrony_conf is not skipped
+
+- name: Configure owned chrony sources
+  ansible.builtin.template:
+    src: chrony.sources.j2
+    dest: /etc/chrony/sources.d/vpn-base.sources
+    owner: root
+    group: root
+    mode: "0644"
+  when: base_chrony_pools | length > 0
+  notify: vpn_base reload chrony sources
+
+- name: Remove owned chrony sources when no pools are configured
+  ansible.builtin.file:
+    path: /etc/chrony/sources.d/vpn-base.sources
+    state: absent
+  when: base_chrony_pools | length == 0
+  notify: vpn_base reload chrony sources
+
+- name: Enable and start chrony
+  ansible.builtin.systemd_service:
+    name: chrony.service
+    enabled: true
+    state: started
+  # In check mode on a fresh host the package is not installed yet.
+  when: not ansible_check_mode or 'chrony' in ansible_facts.packages

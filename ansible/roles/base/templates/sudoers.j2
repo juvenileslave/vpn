@@ -1,0 +1,4 @@
+# Managed by Ansible role base (vpn). Validated with visudo before install.
+{% for user in base_admin_users if user.sudo | default(true) %}
+{{ user.name }} ALL=(ALL:ALL) {{ 'NOPASSWD: ' if base_admin_sudo_nopasswd else '' }}ALL
+{% endfor %}

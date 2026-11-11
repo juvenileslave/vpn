@@ -1,0 +1,48 @@
+---
+# Every check that can refuse the run happens in validate/preflight, before
+# the first mutating task.
+- name: Validate input and inspect host
+  ansible.builtin.import_tasks: validate.yml
+  tags: [always]
+
+- name: Read-only preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [always]
+
+- name: Install required packages
+  ansible.builtin.import_tasks: packages.yml
+  tags: [base_packages]
+
+- name: Manage administrative users
+  ansible.builtin.import_tasks: users.yml
+  tags: [base_users]
+
+- name: Manage chrony
+  ansible.builtin.import_tasks: chrony.yml
+  when: base_chrony_enabled
+  tags: [base_chrony]
+
+- name: Manage unattended security updates
+  ansible.builtin.import_tasks: unattended.yml
+  when: base_unattended_upgrades_enabled
+  tags: [base_unattended]
+
+- name: Manage BBR congestion control
+  ansible.builtin.import_tasks: bbr.yml
+  when: base_bbr_enabled
+  tags: [base_bbr]
+
+- name: Manage swap
+  ansible.builtin.import_tasks: swap.yml
+  when: base_swap_enabled
+  tags: [base_swap]
+
+- name: Manage SSH policy
+  ansible.builtin.import_tasks: ssh.yml
+  when: base_ssh_enabled
+  tags: [base_ssh]
+
+- name: Manage owned nftables table
+  ansible.builtin.import_tasks: firewall.yml
+  when: base_firewall_enabled
+  tags: [base_firewall]
