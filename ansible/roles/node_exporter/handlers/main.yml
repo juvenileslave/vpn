@@ -1,0 +1,9 @@
+# Skipped when the service was just started with the new unit.
+- name: Restart node_exporter
+  ansible.builtin.systemd_service:
+    name: node_exporter.service
+    state: restarted
+    daemon_reload: true
+  when:
+    - node_exporter_service is not skipped
+    - node_exporter_service is not changed

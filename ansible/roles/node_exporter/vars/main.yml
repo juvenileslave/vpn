@@ -1,0 +1,22 @@
+# Pinned release. SHA256 values are copied from the official
+# https://github.com/prometheus/node_exporter/releases/download/v1.12.1/sha256sums.txt
+# Changing the version requires updating every checksum in the same change.
+node_exporter_version: "1.12.1"
+node_exporter_checksums:
+  amd64: b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63
+  arm64: ad35b605f9954b9f1ffddf5ba054bdc5a98d790b9eae5291e1eeb83f1ecbd0e7
+node_exporter_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+
+node_exporter_user: node_exporter
+node_exporter_group: node_exporter
+node_exporter_base_dir: /opt/node_exporter
+node_exporter_unit_path: /etc/systemd/system/node_exporter.service
+
+node_exporter_arch: "{{ node_exporter_arch_map[ansible_facts.architecture] }}"
+node_exporter_release: node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}
+node_exporter_archive: "{{ node_exporter_base_dir }}/{{ node_exporter_release }}.tar.gz"
+node_exporter_binary: "{{ node_exporter_base_dir }}/{{ node_exporter_release }}/node_exporter"
+node_exporter_url: >-
+  https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/{{ node_exporter_release }}.tar.gz
