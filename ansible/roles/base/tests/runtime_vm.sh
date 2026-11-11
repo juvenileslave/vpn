@@ -138,7 +138,8 @@ printf '%s\n' "${uncovered[@]}" | grep -qx "tcp/$VPN_TCP" || { cat "$WORK/listen
 nft list table inet vpn_base >/dev/null 2>&1 && fail "таблица создана несмотря на отказ"
 ok "незаявленные порты: ${uncovered[*]}"
 # Remaining host listeners are acknowledged as closed for this test.
-ack=$( (printf '%s\n' "${uncovered[@]}" | grep -vx "tcp/$VPN_TCP" || true) | sed 's/.*/"&"/' | paste -sd, -)
+ack=$( { printf '%s\n' "${uncovered[@]}" | grep -vx "tcp/$VPN_TCP" || true; printf '%s\n' "tcp/$CLOSED_TCP"; } \
+  | sort -u | sed 's/.*/"&"/' | paste -sd, -)
 printf '{"base_firewall_acknowledged_closed_ports": [%s]}\n' "$ack" > "$WORK/ack.json"
 
 step "Первое применение (локально)"
