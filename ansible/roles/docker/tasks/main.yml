@@ -1,0 +1,16 @@
+---
+# Preflight is read-only and fails before any mutation.
+- name: Check platform and pre-existing state
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Configure the official Docker apt repository
+  ansible.builtin.import_tasks: repository.yml
+
+- name: Install pinned Docker packages
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Configure the Docker daemon
+  ansible.builtin.import_tasks: daemon.yml
+
+- name: Enable and verify the Docker service
+  ansible.builtin.import_tasks: service.yml

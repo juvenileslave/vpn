@@ -1,0 +1,50 @@
+---
+- name: Build the daemon configuration candidate
+  ansible.builtin.set_fact:
+    docker_daemon_config_candidate: >-
+      {{ docker_daemon_config_current | combine({
+           'log-driver': docker_log_driver,
+           'log-opts': dict(docker_log_opts.keys() | zip(docker_log_opts.values() | map('string')))
+         }) }}
+
+- name: Check for dockerd
+  ansible.builtin.stat:
+    path: "{{ docker_dockerd_path }}"
+  register: docker_dockerd_binary
+
+# Read-only, so it also runs in check mode. Only "log-driver" and "log-opts"
+# are replaced, so any difference is a change of owned settings.
+- name: Validate the daemon configuration candidate
+  ansible.builtin.command:
+    argv: [dockerd, --validate, --config-file, /dev/stdin]
+    stdin: "{{ docker_daemon_config_candidate | to_nice_json(indent=2) }}"
+  changed_when: false
+  check_mode: false
+  when:
+    - docker_daemon_config_candidate != docker_daemon_config_current
+    - docker_dockerd_binary.stat.exists
+
+- name: Report postponed validation in check mode
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: dockerd is not installed yet, the daemon.json candidate is validated
+      during the real run before it is written.
+  when:
+    - ansible_check_mode
+    - docker_daemon_config_candidate != docker_daemon_config_current
+    - not docker_dockerd_binary.stat.exists
+
+# copy validates the exact temporary file and replaces daemon.json only on success.
+- name: Write daemon.json
+  ansible.builtin.copy:
+    content: "{{ docker_daemon_config_candidate | to_nice_json(indent=2) }}\n"
+    dest: "{{ docker_daemon_config_path }}"
+    owner: root
+    group: root
+    mode: "{{ docker_daemon_config_stat.stat.mode | default('0644') }}"
+    backup: true
+    validate: dockerd --validate --config-file %s
+  when:
+    - docker_daemon_config_candidate != docker_daemon_config_current
+    - docker_dockerd_binary.stat.exists or not ansible_check_mode
+  notify: Restart docker

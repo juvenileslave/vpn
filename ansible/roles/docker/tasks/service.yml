@@ -1,0 +1,27 @@
+---
+- name: Enable and start Docker
+  ansible.builtin.systemd_service:
+    name: docker.service
+    enabled: true
+    state: started
+  when: docker_missing_specs | length == 0
+
+- name: Apply pending Docker restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Read running daemon settings
+  ansible.builtin.command:
+    argv: [docker, info, --format, "{{ '{{' }}.ServerVersion{{ '}}' }} {{ '{{' }}.LoggingDriver{{ '}}' }}"]
+  register: docker_info
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the daemon runs the pinned version and logging driver
+  ansible.builtin.assert:
+    that:
+      - docker_info.stdout.split() | length == 2
+      - docker_info.stdout.split()[0] == docker_package_versions['docker-ce'] | regex_replace('^[0-9]+:', '') | regex_replace('-[^-]*$', '')
+      - docker_info.stdout.split()[1] == docker_log_driver
+    fail_msg: "Unexpected daemon state: {{ docker_info.stdout }}"
+    quiet: true
+  when: not ansible_check_mode

@@ -1,0 +1,21 @@
+---
+# Exact package versions from the official Docker apt repository, without the
+# distribution suffix: the role appends "~<distro>.<release>~<codename>" and
+# fails before installing anything if that exact version is not available.
+# Override the whole mapping: Ansible replaces dictionaries, it does not merge.
+docker_package_versions:
+  docker-ce: "5:29.9.3-1"
+  docker-ce-cli: "5:29.9.3-1"
+  containerd.io: "2.4.2-3"
+  docker-buildx-plugin: "0.38.1-1"
+  docker-compose-plugin: "5.7.0-1"
+
+# Installed Docker packages with another version are an existing deployment:
+# the role refuses to upgrade or downgrade them unless this is set to true.
+docker_allow_version_change: false
+
+# Owned daemon.json keys: "log-driver" and "log-opts". Other keys are preserved.
+docker_log_driver: local
+docker_log_opts:
+  max-size: "10m"
+  max-file: "3"

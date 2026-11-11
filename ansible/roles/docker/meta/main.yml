@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: docker
+  description: Docker Engine and Compose plugin from the official signed apt repository.
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble, resolute]
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []
