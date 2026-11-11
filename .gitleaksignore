@@ -1,0 +1,8 @@
+# Точечные исключения Gitleaks: только конкретные находки (commit:file:rule:line),
+# не файлы и не правила. Новые находки сканер продолжает сообщать.
+#
+# PR #15 (issue #6): синтетические тестовые константы, а не учётные данные.
+# Тесты используют их как маркеры, которые клиент не должен раскрывать.
+# Находки остаются в опубликованной истории, которую нельзя переписывать.
+afd829cea3074ba6e30cea40d3fc35e19655f091:vpnctl/internal/remnawave/client_test.go:generic-api-key:22
+afd829cea3074ba6e30cea40d3fc35e19655f091:vpnctl/internal/remnawave/client_test.go:generic-api-key:24
