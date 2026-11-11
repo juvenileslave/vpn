@@ -1,0 +1,33 @@
+---
+- name: Ensure ~/.ssh exists for {{ base_admin.name }}
+  ansible.builtin.file:
+    path: "{{ ansible_facts.getent_passwd[base_admin.name][4] }}/.ssh"
+    state: directory
+    owner: "{{ base_admin.name }}"
+    group: "{{ ansible_facts.getent_passwd[base_admin.name][2] }}"
+    mode: "0700"
+
+- name: Check authorized_keys for {{ base_admin.name }}
+  ansible.builtin.stat:
+    path: "{{ ansible_facts.getent_passwd[base_admin.name][4] }}/.ssh/authorized_keys"
+  register: base_keys_file
+
+- name: Read authorized_keys for {{ base_admin.name }}
+  ansible.builtin.slurp:
+    src: "{{ base_keys_file.stat.path }}"
+  register: base_keys_content
+  when: base_keys_file.stat.exists
+
+- name: Append missing keys for {{ base_admin.name }}
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_facts.getent_passwd[base_admin.name][4] }}/.ssh/authorized_keys"
+    line: "{{ item }}"
+    create: true
+    owner: "{{ base_admin.name }}"
+    group: "{{ ansible_facts.getent_passwd[base_admin.name][2] }}"
+    mode: "0600"
+  loop: >-
+    {{ (base_keys_content.content | b64decode if base_keys_file.stat.exists else '')
+       | vpn_base_missing_keys(base_admin.authorized_keys | default([])) }}
+  loop_control:
+    label: "{{ item.split()[0] }} …"

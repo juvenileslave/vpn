@@ -1,0 +1,17 @@
+---
+- name: Install packages for enabled components
+  vars:
+    base_packages: >-
+      {{ (['chrony'] if base_chrony_enabled else [])
+         + (['unattended-upgrades'] if base_unattended_upgrades_enabled else [])
+         + (['openssh-server'] if base_ssh_enabled else [])
+         + (['nftables'] if base_firewall_enabled else []) }}
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+    # apt --no-remove: never uninstall anything (e.g. a conflicting package).
+    fail_on_autoremove: true
+  when: base_packages | length > 0

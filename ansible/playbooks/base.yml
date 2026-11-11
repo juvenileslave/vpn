@@ -1,0 +1,12 @@
+---
+# Base node configuration (architecture task 1.2). One host at a time; any
+# failure stops the rollout before the next host is touched.
+- name: Apply base node configuration
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  roles:
+    - role: ../roles/base

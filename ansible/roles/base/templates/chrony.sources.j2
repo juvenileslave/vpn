@@ -1,0 +1,4 @@
+# Managed by Ansible role base (vpn).
+{% for pool in base_chrony_pools %}
+pool {{ pool }} iburst
+{% endfor %}

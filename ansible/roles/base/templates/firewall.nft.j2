@@ -1,0 +1,45 @@
+# Managed by Ansible role base (vpn).
+# Replaces only table inet vpn_base atomically; other tables are untouched.
+# The forward and output hooks are not filtered here.
+{% set cidrs = base_ssh_trusted_cidrs | vpn_base_split_cidrs %}
+{% set tcp_ports = base_firewall_vpn_ports | selectattr('proto', 'equalto', 'tcp') | map(attribute='port') | sort | list %}
+{% set udp_ports = base_firewall_vpn_ports | selectattr('proto', 'equalto', 'udp') | map(attribute='port') | sort | list %}
+table inet vpn_base
+delete table inet vpn_base
+
+table inet vpn_base {
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    iif "lo" accept
+    # Neighbor discovery and router advertisements are link-local only.
+    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept
+    icmpv6 type { mld-listener-query, mld-listener-report, mld-listener-done, mld2-listener-report } ip6 saddr fe80::/10 accept
+    ct state established,related accept
+    ct state invalid drop
+
+    # ICMP errors carry PMTU (fragmentation-needed / packet-too-big).
+    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+    icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+{% if base_firewall_allow_icmp_echo %}
+    icmp type echo-request limit rate 20/second burst 50 packets accept
+    icmpv6 type echo-request limit rate 20/second burst 50 packets accept
+{% endif %}
+{% if base_firewall_allow_dhcpv6_client %}
+    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+{% endif %}
+
+{% if cidrs.v4 %}
+    ip saddr { {{ cidrs.v4 | join(', ') }} } tcp dport {{ base_ssh_port }} accept
+{% endif %}
+{% if cidrs.v6 %}
+    ip6 saddr { {{ cidrs.v6 | join(', ') }} } tcp dport {{ base_ssh_port }} accept
+{% endif %}
+{% if tcp_ports %}
+    tcp dport { {{ tcp_ports | join(', ') }} } accept
+{% endif %}
+{% if udp_ports %}
+    udp dport { {{ udp_ports | join(', ') }} } accept
+{% endif %}
+  }
+}

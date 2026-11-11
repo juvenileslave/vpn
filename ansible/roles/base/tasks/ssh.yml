@@ -1,0 +1,39 @@
+---
+# The candidate alone is checked here; the full configuration is checked
+# below and again by the handler right before reload.
+- name: Configure SSH policy drop-in
+  ansible.builtin.template:
+    src: sshd-vpn-base.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-vpn-base.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  register: base_sshd_dropin
+  notify: vpn_base ssh changed
+
+- name: Read effective sshd configuration after the change
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: base_sshd_after
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and base_sshd_dropin is changed)
+
+- name: Verify effective SSH policy before reload
+  vars:
+    base_sshd_effective: "{{ base_sshd_after.stdout | vpn_base_sshd_effective }}"
+  ansible.builtin.assert:
+    that:
+      - base_sshd_effective.pubkeyauthentication == ['yes']
+      - base_sshd_effective.passwordauthentication == ['no']
+      - base_sshd_effective.kbdinteractiveauthentication == ['no']
+      - base_sshd_effective.permitemptypasswords == ['no']
+      - base_sshd_effective.permitrootlogin == [base_ssh_permit_root_login | replace('prohibit-password', 'without-password')]
+    fail_msg: >-
+      Действующая конфигурация sshd не соответствует политике (другой файл задаёт значения
+      раньше 00-vpn-base.conf). sshd не перезагружен; исправьте конфликт вручную.
+    quiet: true
+  when: base_sshd_after is not skipped
+
+- name: Reload sshd if the policy changed
+  ansible.builtin.meta: flush_handlers

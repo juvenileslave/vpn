@@ -1,0 +1,70 @@
+---
+- name: Read available congestion control algorithms
+  ansible.builtin.slurp:
+    src: /proc/sys/net/ipv4/tcp_available_congestion_control
+  register: base_cc_available
+
+- name: Check for the tcp_bbr kernel module
+  ansible.builtin.command: modinfo -n tcp_bbr
+  register: base_bbr_module
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: "'bbr' not in (base_cc_available.content | b64decode).split()"
+
+- name: Decide BBR support
+  ansible.builtin.set_fact:
+    base_bbr_supported: >-
+      {{ 'bbr' in (base_cc_available.content | b64decode).split()
+         or (base_bbr_module is not skipped and base_bbr_module.rc == 0) }}
+
+- name: Report unsupported BBR
+  ansible.builtin.debug:
+    msg: "ВНИМАНИЕ: ядро не поддерживает BBR; sysctl congestion control не изменён."
+  when: not base_bbr_supported
+
+- name: Apply BBR configuration
+  when: base_bbr_supported
+  block:
+    - name: Load tcp_bbr at boot
+      ansible.builtin.copy:
+        content: "# Managed by Ansible role base (vpn).\ntcp_bbr\n"
+        dest: /etc/modules-load.d/vpn-base-bbr.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Load tcp_bbr now
+      ansible.builtin.command: modprobe tcp_bbr
+      changed_when: true
+      when: "'bbr' not in (base_cc_available.content | b64decode).split()"
+
+    - name: Configure BBR sysctl
+      ansible.builtin.template:
+        src: sysctl-bbr.conf.j2
+        dest: /etc/sysctl.d/90-vpn-base-bbr.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: base_bbr_sysctl_file
+
+    - name: Read current congestion control
+      ansible.builtin.slurp:
+        src: /proc/sys/net/ipv4/tcp_congestion_control
+      register: base_cc_current
+
+    - name: Read current default qdisc
+      ansible.builtin.slurp:
+        src: /proc/sys/net/core/default_qdisc
+      register: base_qdisc_current
+      when: base_bbr_qdisc | length > 0
+
+    # Loads only the owned file, never the global sysctl set (forwarding etc.).
+    - name: Apply BBR sysctl values
+      ansible.builtin.command: sysctl -p /etc/sysctl.d/90-vpn-base-bbr.conf
+      changed_when: true
+      when: >-
+        base_bbr_sysctl_file is changed
+        or (base_cc_current.content | b64decode | trim) != 'bbr'
+        or (base_qdisc_current is not skipped
+            and (base_qdisc_current.content | b64decode | trim) != base_bbr_qdisc)

@@ -1,0 +1,38 @@
+name: Ansible base role
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ansible-base-role:
+    name: Ansible base role
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Установить закреплённый ansible-core
+        run: make -C ansible bootstrap
+      - name: Проверить синтаксис playbook на example inventory
+        working-directory: ansible
+        run: ../.venv/bin/ansible-playbook -i inventories/example/hosts.yml playbooks/base.yml --syntax-check
+      - name: Unit-тесты и отказы роли без изменения хоста
+        run: .venv/bin/python -m unittest discover --start-directory ansible/roles/base/tests --verbose
+      # GitHub-hosted runner is a disposable VM destroyed after the job.
+      - name: Проверка роли на одноразовой VM
+        run: sudo VPN_BASE_DISPOSABLE_GUEST=yes bash ansible/roles/base/tests/runtime_vm.sh

@@ -1,0 +1,64 @@
+---
+- name: Create firewall configuration directory
+  ansible.builtin.file:
+    path: /etc/vpn-base
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The file replaces only table inet vpn_base inside one nft transaction; a
+# candidate that fails nft -c is never written, and a failing apply leaves
+# the previous table active.
+- name: Render owned nftables table
+  ansible.builtin.template:
+    src: firewall.nft.j2
+    dest: /etc/vpn-base/firewall.nft
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/nft -c -f %s
+  register: base_firewall_file
+
+- name: Install firewall loader unit
+  ansible.builtin.template:
+    src: vpn-base-firewall.service.j2
+    dest: /etc/systemd/system/vpn-base-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: base_firewall_unit
+
+- name: Reload systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: base_firewall_unit is changed
+
+- name: Check whether the owned table is loaded
+  ansible.builtin.command: nft list table inet vpn_base
+  register: base_firewall_live
+  changed_when: false
+  check_mode: false
+  failed_when: base_firewall_live.rc not in [0, 1]
+  when: not (ansible_check_mode and base_firewall_file is changed)
+
+- name: Enable and start firewall loader
+  ansible.builtin.systemd_service:
+    name: vpn-base-firewall.service
+    enabled: true
+    state: started
+  register: base_firewall_started
+  when: not (ansible_check_mode and base_firewall_unit is changed)
+
+- name: Apply changed or missing owned table
+  ansible.builtin.systemd_service:
+    name: vpn-base-firewall.service
+    state: restarted
+  when:
+    - base_firewall_started is not changed
+    - base_firewall_file is changed or (base_firewall_live is not skipped and base_firewall_live.rc != 0)
+
+- name: Verify owned table is loaded
+  ansible.builtin.command: nft list table inet vpn_base
+  changed_when: false
+  when: not ansible_check_mode

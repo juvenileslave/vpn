@@ -1,0 +1,92 @@
+---
+- name: Read active swap
+  ansible.builtin.slurp:
+    src: /proc/swaps
+  register: base_swaps
+
+- name: Check swap file
+  ansible.builtin.stat:
+    path: "{{ base_swap_file }}"
+  register: base_swap_stat
+
+- name: Classify swap state
+  vars:
+    base_swap_lines: "{{ (base_swaps.content | b64decode).splitlines()[1:] }}"
+  ansible.builtin.set_fact:
+    base_swap_active_paths: "{{ base_swap_lines | map('split') | map('first') | list }}"
+
+- name: Report preserved existing swap
+  ansible.builtin.debug:
+    msg: "Активный swap уже есть ({{ base_swap_active_paths | join(', ') }}); новый swap не создаётся."
+  when: base_swap_active_paths | length > 0 and base_swap_file not in base_swap_active_paths
+
+- name: Create swap file
+  when: base_swap_active_paths | length == 0 and not base_swap_stat.stat.exists
+  block:
+    - name: Check free space for the swap file
+      ansible.builtin.command:
+        argv: [df, --output=avail, -B1M, "{{ base_swap_file | dirname }}"]
+      register: base_swap_df
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse a swap file that leaves under 512 MiB free
+      ansible.builtin.assert:
+        that: (base_swap_df.stdout_lines | last | trim | int) >= base_swap_size_mb + 512
+        fail_msg: Недостаточно места для base_swap_size_mb.
+        quiet: true
+
+    # Written to a temporary name so an interrupted run never leaves a
+    # half-initialised file at base_swap_file.
+    - name: Allocate swap file
+      ansible.builtin.command:
+        argv:
+          - dd
+          - if=/dev/zero
+          - "of={{ base_swap_file }}.vpn-base-tmp"
+          - bs=1M
+          - "count={{ base_swap_size_mb }}"
+          - status=none
+      changed_when: true
+
+    - name: Restrict swap file permissions
+      ansible.builtin.file:
+        path: "{{ base_swap_file }}.vpn-base-tmp"
+        owner: root
+        group: root
+        mode: "0600"
+      when: not ansible_check_mode
+
+    - name: Format swap file
+      ansible.builtin.command:
+        argv: [mkswap, "{{ base_swap_file }}.vpn-base-tmp"]
+      changed_when: true
+
+    - name: Move swap file into place
+      ansible.builtin.command:
+        argv: [mv, --no-clobber, "{{ base_swap_file }}.vpn-base-tmp", "{{ base_swap_file }}"]
+        creates: "{{ base_swap_file }}"
+      changed_when: true
+
+- name: Activate swap file
+  ansible.builtin.command:
+    argv: [swapon, "{{ base_swap_file }}"]
+  changed_when: true
+  # An existing file is only activated, never reformatted.
+  when: >-
+    base_swap_file not in base_swap_active_paths
+    and (base_swap_stat.stat.exists or base_swap_active_paths | length == 0)
+
+- name: Read fstab
+  ansible.builtin.slurp:
+    src: /etc/fstab
+  register: base_fstab
+
+# An existing fstab entry for the same path is kept as is (options, priority).
+- name: Persist swap file in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "{{ base_swap_file }} none swap sw 0 0"
+  when:
+    - base_swap_file in base_swap_active_paths or base_swap_stat.stat.exists or base_swap_active_paths | length == 0
+    - not (base_fstab.content | b64decode is regex('(?m)^\s*' ~ (base_swap_file | regex_escape) ~ '\s'))

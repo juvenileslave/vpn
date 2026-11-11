@@ -1,0 +1,20 @@
+# Managed by Ansible role base (vpn).
+# Loads only table inet vpn_base; never flushes the global ruleset.
+[Unit]
+Description=Owned nftables table inet vpn_base
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+After=local-fs.target nftables.service
+Conflicts=shutdown.target
+# Re-apply the table if nftables.service is restarted and flushes the ruleset.
+PartOf=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/vpn-base/firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/vpn-base/firewall.nft
+
+[Install]
+WantedBy=sysinit.target
