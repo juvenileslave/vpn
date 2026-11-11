@@ -49,6 +49,9 @@ var (
 	ErrUnsupportedSchema = errors.New("store: database schema version is not supported")
 	// ErrCorrupt is returned when a stored row violates the record contract.
 	ErrCorrupt = errors.New("store: stored record is invalid")
+	// ErrOrphanedSidecar is returned when a new database would be created
+	// next to an existing -wal, -shm or -journal file.
+	ErrOrphanedSidecar = errors.New("store: database sidecar file exists without the database")
 )
 
 // Store is an open state database. Its methods are safe for concurrent use;
@@ -59,8 +62,13 @@ type Store struct {
 
 // Open opens the database at path, creating it with mode 0600 if it does not
 // exist, and applies pending schema migrations. The parent directory must
-// exist. If initialization fails, a file created by this call is removed and
-// an existing file is left untouched.
+// exist.
+//
+// Open never removes or rewrites files it did not create. A new database is
+// refused with ErrOrphanedSidecar if a -wal, -shm or -journal file already
+// exists for the path. If initialization fails, only the database file
+// created by this call and sidecar files that did not exist before it are
+// removed.
 func Open(ctx context.Context, path string) (*Store, error) {
 	return open(ctx, path, migrations)
 }
@@ -69,11 +77,14 @@ func open(ctx context.Context, path string, migs []migration) (*Store, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: nil context", ErrInvalidArgument)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	abs, err := cleanPath(path)
 	if err != nil {
 		return nil, err
 	}
-	created, err := createFile(abs)
+	own, err := createFile(abs)
 	if err != nil {
 		return nil, err
 	}
@@ -89,9 +100,7 @@ func open(ctx context.Context, path string, migs []migration) (*Store, error) {
 		}
 		db.Close()
 	}
-	if created {
-		removeCreated(abs)
-	}
+	own.cleanup()
 	return nil, err
 }
 
@@ -111,34 +120,97 @@ func cleanPath(path string) (string, error) {
 	return abs, nil
 }
 
+var sidecarSuffixes = []string{"-journal", "-wal", "-shm"}
+
+// ownership records the files a single Open call created and may remove if
+// initialization fails. The zero value owns nothing.
+type ownership struct {
+	abs  string
+	file fs.FileInfo // identity of the database file created by this call
+}
+
+// cleanup removes the database file only while it is still the inode this
+// call created, and then the sidecars, which did not exist when the file was
+// created (createFile checks) and so were created by SQLite for this file.
+func (o ownership) cleanup() {
+	if o.file == nil {
+		return
+	}
+	cur, err := os.Lstat(o.abs)
+	if err != nil || !os.SameFile(cur, o.file) {
+		return
+	}
+	if os.Remove(o.abs) != nil {
+		return
+	}
+	for _, suffix := range sidecarSuffixes {
+		os.Remove(o.abs + suffix)
+	}
+}
+
+// existingSidecar returns the first sidecar of abs that exists, or "".
+func existingSidecar(abs string) (string, error) {
+	for _, suffix := range sidecarSuffixes {
+		_, err := os.Lstat(abs + suffix)
+		if err == nil {
+			return suffix, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("store: stat database sidecar: %w", err)
+		}
+	}
+	return "", nil
+}
+
 // createFile creates abs exclusively so that SQLite never creates the file
-// with default permissions. It reports whether this call created the file.
-func createFile(abs string) (bool, error) {
+// with default permissions. For an existing regular file it returns zero
+// ownership: such a file and its sidecars are never removed.
+func createFile(abs string) (ownership, error) {
+	// A sidecar without its database belongs to someone else; SQLite could
+	// replay or delete it when opening a fresh file at this path.
+	if suffix, err := existingSidecar(abs); err != nil {
+		return ownership{}, err
+	} else if suffix != "" {
+		if _, err := os.Lstat(abs); errors.Is(err, fs.ErrNotExist) {
+			return ownership{}, fmt.Errorf("%w: %s exists without the database file", ErrOrphanedSidecar, suffix)
+		}
+	}
+
 	f, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
-		if err := f.Close(); err != nil {
-			os.Remove(abs)
-			return false, fmt.Errorf("store: create database file: %w", err)
+		info, statErr := f.Stat()
+		closeErr := f.Close()
+		if statErr != nil || closeErr != nil {
+			if statErr == nil {
+				ownership{abs: abs, file: info}.cleanup()
+			}
+			return ownership{}, fmt.Errorf("store: create database file: %w", errors.Join(statErr, closeErr))
 		}
-		return true, nil
+		// Recheck: a sidecar may have appeared between the first check and
+		// the exclusive create. The database file is ours and still empty.
+		own := ownership{abs: abs, file: info}
+		if suffix, err := existingSidecar(abs); err != nil || suffix != "" {
+			if cur, lerr := os.Lstat(abs); lerr == nil && os.SameFile(cur, info) {
+				os.Remove(abs)
+			}
+			if err != nil {
+				return ownership{}, err
+			}
+			return ownership{}, fmt.Errorf("%w: %s exists without the database file", ErrOrphanedSidecar, suffix)
+		}
+		return own, nil
 	}
 	if !errors.Is(err, fs.ErrExist) {
-		return false, fmt.Errorf("store: create database file: %w", err)
+		return ownership{}, fmt.Errorf("store: create database file: %w", err)
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return false, fmt.Errorf("store: stat database file: %w", err)
+		return ownership{}, fmt.Errorf("store: stat database file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return false, fmt.Errorf("%w: database path is not a regular file", ErrInvalidArgument)
+		return ownership{}, fmt.Errorf("%w: database path is not a regular file", ErrInvalidArgument)
 	}
-	return false, nil
-}
-
-func removeCreated(abs string) {
-	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
-		os.Remove(abs + suffix)
-	}
+	return ownership{}, nil
 }
 
 // dsn builds a SQLite URI. The path is percent-escaped, so characters such as

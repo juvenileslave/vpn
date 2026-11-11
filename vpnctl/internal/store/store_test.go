@@ -359,3 +359,134 @@ func TestCanceledContext(t *testing.T) {
 		t.Errorf("canceled append stored %d probes", len(probes))
 	}
 }
+
+// A sidecar without its database is someone else's data: Open must neither
+// delete nor modify it, whether initialization fails early or not.
+func TestOpenPreservesPreexistingSidecarWithoutDatabase(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	contexts := map[string]context.Context{"live": context.Background(), "canceled": canceled}
+	for _, suffix := range sidecarSuffixes {
+		for ctxName, ctx := range contexts {
+			t.Run(suffix+"/"+ctxName, func(t *testing.T) {
+				path := tempPath(t)
+				content := []byte("synthetic pre-existing sidecar data\n")
+				if err := os.WriteFile(path+suffix, content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+
+				s, err := Open(ctx, path)
+				if err == nil {
+					s.Close()
+					t.Fatal("Open succeeded")
+				}
+				if ctxName == "live" && !errors.Is(err, ErrOrphanedSidecar) {
+					t.Errorf("err = %v, want ErrOrphanedSidecar", err)
+				}
+				got, err := os.ReadFile(path + suffix)
+				if err != nil {
+					t.Fatalf("pre-existing %s removed: %v", suffix, err)
+				}
+				if !bytes.Equal(got, content) {
+					t.Errorf("pre-existing %s contents changed", suffix)
+				}
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Error("database file left behind")
+				}
+				t.Logf("open_failed=true preexisting_sibling_survives=true contents_preserved=%t", bytes.Equal(got, content))
+			})
+		}
+	}
+}
+
+// For an existing database, sidecars belong to that database and SQLite owns
+// their recovery; a failed Open must not lose data still held in the WAL.
+func TestFailedOpenOfExistingDatabaseKeepsWALData(t *testing.T) {
+	ctx := context.Background()
+	path := tempPath(t)
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	writer := rawDB(t, path)
+	writer.SetMaxOpenConns(1)
+	mustExec(t, writer, "PRAGMA wal_autocheckpoint = 0")
+	mustExec(t, writer, "PRAGMA user_version = 99")
+	if _, err := writer.Exec(`INSERT INTO operations (id, kind, state, step, revision, created_at, updated_at)
+		VALUES ('0123456789abcdef0123456789abcdef', 'rotate_ip', 'running', 'poweroff', 3, 1, 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + "-wal"); err != nil {
+		t.Fatalf("WAL not in use: %v", err)
+	}
+
+	if s, err := Open(ctx, path); !errors.Is(err, ErrUnsupportedSchema) {
+		if err == nil {
+			s.Close()
+		}
+		t.Fatalf("Open err = %v, want ErrUnsupportedSchema", err)
+	}
+	for _, name := range []string{path, path + "-wal"} {
+		if _, err := os.Stat(name); err != nil {
+			t.Fatalf("%s removed: %v", filepath.Base(name), err)
+		}
+	}
+	mustExec(t, writer, "PRAGMA user_version = 1")
+	writer.Close()
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	op, err := s.GetOperation(ctx, "0123456789abcdef0123456789abcdef")
+	if err != nil || op.Revision != 3 || op.Step != "poweroff" {
+		t.Errorf("WAL-held operation = %+v, %v", op, err)
+	}
+}
+
+func TestCanceledOpenOfNewPathLeavesNoFiles(t *testing.T) {
+	path := tempPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if s, err := Open(ctx, path); !errors.Is(err, context.Canceled) {
+		if err == nil {
+			s.Close()
+		}
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("files left behind: %v", entries)
+	}
+}
+
+// Cleanup must not remove a file that replaced the one this call created.
+func TestCleanupSkipsReplacedDatabaseFile(t *testing.T) {
+	path := tempPath(t)
+	own, err := createFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := path + ".new"
+	if err := os.WriteFile(replacement, []byte("someone else's file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-wal", []byte("their wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	own.cleanup()
+	for _, name := range []string{path, path + "-wal"} {
+		if _, err := os.Stat(name); err != nil {
+			t.Errorf("%s removed: %v", filepath.Base(name), err)
+		}
+	}
+}
