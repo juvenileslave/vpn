@@ -11,6 +11,8 @@
   нельзя считать реализованными инструментами этого репозитория.
 - [Ansible: контракт inventory](docs/ANSIBLE.md) — синтетическая топология и её
   проверка (`make -C ansible validate`); развёртывание не реализовано.
+- [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
+  (`version`, `config validate`); к панели и узлам не обращается.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
   условия слияния и откат.
 - [Безопасность](SECURITY.md) — приватное сообщение об уязвимости.
@@ -21,7 +23,8 @@
 ## Локальные инструменты
 
 Нужны Python 3.11 или новее с `venv`/`pip`, Git, `make` и доступ к PyPI/GitHub
-для подготовки окружения. Go и Docker для этих команд не требуются.
+для подготовки окружения. Go и Docker для `make bootstrap`, `make hooks` и
+`make check` не требуются; Go нужен только для `make vpnctl-test|vpnctl-build`.
 
 ```sh
 make bootstrap
@@ -34,6 +37,8 @@ make check
 | `make bootstrap` | Устанавливает инструменты закреплённых версий в локальную `.venv`. |
 | `make hooks` | Устанавливает локальные commit hooks после подготовки окружения. |
 | `make check` | Проверяет публичные tracked/staged-файлы репозитория; работает и на `master`. |
+| `make vpnctl-test` | gofmt, `go vet` и `go test` для [vpnctl](vpnctl/README.md); нужен Go, в `make check` не входит. |
+| `make vpnctl-build` | Собирает `vpnctl/bin/vpnctl`; нужен Go. |
 
 Новые публичные файлы добавляйте в индекс перед `make check`; приватные локальные
 материалы не добавляйте. Проверка охватывает правила публикации, YAML/JSON,
