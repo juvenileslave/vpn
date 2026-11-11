@@ -43,8 +43,10 @@ snapshot() {
   swapon --show=NAME --noheadings | sort
   nft list table inet canary
   nft list tables | grep -v 'inet vpn_base' | sort || true
-  for file in /etc/sysctl.conf /etc/ssh/sshd_config /etc/apt/apt.conf.d/20auto-upgrades \
-              /etc/apt/apt.conf.d/50unattended-upgrades /home/legacyop/.ssh/authorized_keys /etc/fstab; do
+  # The unattended-upgrades task owns the apt periodic files; they are not
+  # part of the unrelated-state snapshot.
+  for file in /etc/sysctl.conf /etc/ssh/sshd_config \
+              /home/legacyop/.ssh/authorized_keys /etc/fstab; do
     if [[ -e $file ]]; then sha256sum "$file"; fi
   done
   getent passwd legacyop vpnadmin | cut -d: -f1,7
