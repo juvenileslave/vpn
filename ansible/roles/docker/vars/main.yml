@@ -1,0 +1,38 @@
+---
+# Releases for which the official repository publishes all pinned packages.
+# Values are the version component of Docker's package suffix.
+docker_supported_releases:
+  Ubuntu:
+    jammy: "22.04"
+    noble: "24.04"
+    resolute: "26.04"
+  Debian:
+    bookworm: "12"
+    trixie: "13"
+
+# ansible_architecture -> Debian architecture.
+docker_architecture_map:
+  x86_64: amd64
+  aarch64: arm64
+
+# Distribution packages that conflict with the official ones (Docker docs).
+docker_conflicting_packages:
+  - docker.io
+  - docker-compose
+  - docker-compose-v2
+  - docker-doc
+  - podman-docker
+  - containerd
+  - runc
+
+docker_apt_repository_base_url: https://download.docker.com/linux
+docker_apt_keyring_path: /etc/apt/keyrings/docker.asc
+docker_apt_source_path: /etc/apt/sources.list.d/docker.sources
+docker_daemon_config_path: /etc/docker/daemon.json
+docker_dockerd_path: /usr/bin/dockerd
+
+# Derived after preflight has set docker_package_targets and docker_apt_distro.
+docker_package_specs: >-
+  {{ docker_package_targets.keys() | zip(docker_package_targets.values()) | map('join', '=') | list }}
+docker_madison_source_regex: '\| {{ docker_apt_repository_base_url | regex_escape }}/{{ docker_apt_distro }} '
+docker_madison_line_regex: '^\s*(\S+)\s*\|\s*(\S+)\s*\|.*$'

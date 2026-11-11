@@ -1,0 +1,9 @@
+---
+# Usage: ansible-playbook playbooks/docker.yml -e docker_target_hosts=<group or host>
+# There is deliberately no default target.
+- name: Install Docker Engine and Compose
+  hosts: "{{ docker_target_hosts }}"
+  become: true
+  gather_facts: true
+  roles:
+    - role: ../roles/docker

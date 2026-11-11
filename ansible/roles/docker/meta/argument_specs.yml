@@ -1,0 +1,28 @@
+---
+argument_specs:
+  main:
+    short_description: Install Docker Engine, CLI, containerd, Buildx and Compose.
+    options:
+      docker_package_versions:
+        type: dict
+        description: Exact package versions without the distribution suffix.
+        options:
+          docker-ce: {type: str, required: true}
+          docker-ce-cli: {type: str, required: true}
+          containerd.io: {type: str, required: true}
+          docker-buildx-plugin: {type: str, required: true}
+          docker-compose-plugin: {type: str, required: true}
+      docker_allow_version_change:
+        type: bool
+        description: Allow upgrading or downgrading already installed Docker packages.
+      docker_log_driver:
+        type: str
+        choices: [local, json-file]
+        description: Default logging driver; both rotate by max-size/max-file.
+      docker_log_opts:
+        type: dict
+        description: Options of the default logging driver.
+        options:
+          max-size: {type: str, required: true}
+          max-file: {type: str, required: true}
+          compress: {type: str, choices: ["true", "false"]}

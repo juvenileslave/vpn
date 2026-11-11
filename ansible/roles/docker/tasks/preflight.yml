@@ -1,0 +1,155 @@
+---
+# Every task here is read-only and runs in check mode too.
+
+- name: Assert supported platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['service_mgr'] == 'systemd'
+      - ansible_facts['distribution'] in docker_supported_releases
+      - ansible_facts['distribution_release'] in docker_supported_releases[ansible_facts['distribution']]
+      - ansible_facts['architecture'] in docker_architecture_map
+    fail_msg: >-
+      Unsupported platform: {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_release'] }} {{ ansible_facts['architecture'] }},
+      service manager {{ ansible_facts['service_mgr'] }}. Supported: systemd with
+      {{ docker_supported_releases | to_json }} on {{ docker_architecture_map | to_json }}.
+    quiet: true
+
+- name: Assert bounded logging settings
+  ansible.builtin.assert:
+    that:
+      - docker_log_opts['max-size'] | string is match('^[1-9][0-9]*[kmg]?$')
+      - docker_log_opts['max-file'] | string is match('^[1-9][0-9]*$')
+    fail_msg: >-
+      docker_log_opts must set max-size (for example "10m") and a positive max-file.
+    quiet: true
+
+- name: Derive repository and package parameters
+  ansible.builtin.set_fact:
+    docker_apt_distro: "{{ ansible_facts['distribution'] | lower }}"
+    docker_apt_architecture: "{{ docker_architecture_map[ansible_facts['architecture']] }}"
+    docker_package_targets: >-
+      {{ dict(docker_package_versions.keys()
+              | zip(docker_package_versions.values() | map('string') | map('regex_replace', '$', version_suffix))) }}
+  vars:
+    version_suffix: >-
+      ~{{ ansible_facts['distribution'] | lower }}.{{
+      docker_supported_releases[ansible_facts['distribution']][ansible_facts['distribution_release']]
+      }}~{{ ansible_facts['distribution_release'] }}
+
+- name: Read installed packages
+  ansible.builtin.command:
+    argv: [dpkg-query, --show, --showformat, "${Package}\t${Version}\t${db:Status-Status}\n"]
+  register: docker_dpkg_query
+  changed_when: false
+  check_mode: false
+
+- name: Index installed packages
+  ansible.builtin.set_fact:
+    docker_installed_packages: >-
+      {% set out = {} %}
+      {%- for line in docker_dpkg_query.stdout_lines -%}
+      {%- set fields = line.split('\t') -%}
+      {%- if fields | length == 3 and fields[2] == 'installed' -%}
+      {%- set _ = out.update({fields[0]: fields[1]}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Fail on conflicting distribution packages
+  ansible.builtin.assert:
+    that: conflicting | length == 0
+    fail_msg: >-
+      Conflicting packages are installed: {{ conflicting | join(', ') }}. The role does not
+      remove software; migrate this host manually (see docs/DOCKER.md) and rerun.
+    quiet: true
+  vars:
+    conflicting: "{{ docker_conflicting_packages | select('in', docker_installed_packages) | list }}"
+
+- name: Check for a snap-installed Docker
+  ansible.builtin.stat:
+    path: /snap/bin/docker
+  register: docker_snap_binary
+
+- name: Fail on snap-installed Docker
+  ansible.builtin.assert:
+    that: not docker_snap_binary.stat.exists
+    fail_msg: Docker from snap is installed (/snap/bin/docker); the role does not replace it.
+    quiet: true
+
+- name: Find other apt sources for download.docker.com
+  ansible.builtin.find:
+    paths: [/etc/apt, /etc/apt/sources.list.d]
+    patterns: [sources.list, "*.list", "*.sources"]
+    contains: '.*download\.docker\.com.*'
+    file_type: file
+  register: docker_foreign_sources
+
+- name: Fail on conflicting Docker apt sources
+  ansible.builtin.assert:
+    that: foreign | length == 0
+    fail_msg: >-
+      Docker apt repository is already configured in {{ foreign | join(', ') }}.
+      Duplicate entries with another Signed-By break apt; remove or merge them manually.
+    quiet: true
+  vars:
+    foreign: >-
+      {{ docker_foreign_sources.files | map(attribute='path')
+         | reject('equalto', docker_apt_source_path) | list }}
+
+- name: Fail on unapproved Docker package version changes
+  ansible.builtin.assert:
+    that: docker_allow_version_change or mismatched | length == 0
+    fail_msg: >-
+      Installed versions differ from the pinned ones: {{ mismatched | join('; ') }}.
+      The role does not replace an existing deployment; set docker_allow_version_change=true
+      to upgrade or downgrade deliberately.
+    quiet: true
+  vars:
+    mismatched: >-
+      {% set out = [] %}
+      {%- for name, version in docker_package_targets.items() -%}
+      {%- if name in docker_installed_packages and docker_installed_packages[name] != version -%}
+      {%- set _ = out.append(name ~ ' ' ~ docker_installed_packages[name] ~ ' -> ' ~ version) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Check existing daemon configuration
+  ansible.builtin.stat:
+    path: "{{ docker_daemon_config_path }}"
+  register: docker_daemon_config_stat
+
+- name: Read existing daemon configuration
+  ansible.builtin.slurp:
+    src: "{{ docker_daemon_config_path }}"
+  register: docker_daemon_config_raw
+  when: docker_daemon_config_stat.stat.exists
+
+- name: Parse existing daemon configuration
+  block:
+    - name: Parse daemon.json as JSON
+      ansible.builtin.set_fact:
+        docker_daemon_config_current: >-
+          {{ (docker_daemon_config_raw.content | b64decode | from_json)
+             if docker_daemon_config_stat.stat.exists else {} }}
+
+    - name: Assert daemon.json is a JSON object
+      ansible.builtin.assert:
+        that: docker_daemon_config_current is mapping
+        quiet: true
+  rescue:
+    - name: Report invalid daemon.json
+      ansible.builtin.fail:
+        msg: >-
+          {{ docker_daemon_config_path }} is not a valid JSON object. It was left unchanged;
+          fix it manually and rerun.
+
+- name: Fail on a Docker TCP API in daemon.json
+  ansible.builtin.assert:
+    that: >-
+      docker_daemon_config_current.get('hosts', []) | select('match', '^tcp://') | list | length == 0
+    fail_msg: >-
+      {{ docker_daemon_config_path }} exposes the Docker API over TCP ("hosts"). The role does not
+      manage this setting; remove the tcp:// entry manually.
+    quiet: true

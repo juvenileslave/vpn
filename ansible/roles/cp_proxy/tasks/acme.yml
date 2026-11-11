@@ -1,0 +1,78 @@
+---
+# DNS preflight runs before certbot is installed or called: a mismatch stops
+# the play without contacting the ACME server.
+- name: Resolve IPv4 addresses of the subscription name
+  ansible.builtin.command:
+    argv: [getent, -s, "{{ cp_proxy_acme_nss_service }}", ahostsv4, "{{ cp_proxy_server_name }}"]
+  register: cp_proxy_dns4
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Resolve IPv6 addresses of the subscription name
+  ansible.builtin.command:
+    argv: [getent, -s, "{{ cp_proxy_acme_nss_service }}", ahostsv6, "{{ cp_proxy_server_name }}"]
+  register: cp_proxy_dns6
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Refuse ACME when DNS does not point to this host
+  vars:
+    resolved4: "{{ cp_proxy_dns4.stdout_lines | map('split') | map('first') | unique | list }}"
+    resolved6: "{{ cp_proxy_dns6.stdout_lines | map('split') | map('first') | reject('match', '^::ffff:') | unique | list }}"
+  ansible.builtin.assert:
+    that:
+      - resolved4 == [cp_proxy_acme_expected_ipv4]
+      - resolved6 | length == 0 or resolved6 == [cp_proxy_acme_expected_ipv6]
+    fail_msg: >-
+      DNS preflight failed for {{ cp_proxy_server_name }}: A={{ resolved4 }}, AAAA={{ resolved6 }};
+      expected A=[{{ cp_proxy_acme_expected_ipv4 }}] and AAAA empty or [{{ cp_proxy_acme_expected_ipv6 }}].
+      No certificate was requested.
+    quiet: true
+
+- name: Install certbot from distribution packages
+  ansible.builtin.apt:
+    name: certbot
+    state: present
+
+- name: Check for an existing certificate
+  ansible.builtin.stat:
+    path: "{{ cp_proxy_acme_live_dir }}/fullchain.pem"
+  register: cp_proxy_acme_cert
+
+- name: Bootstrap an HTTP-only site for the challenge
+  when: not cp_proxy_acme_cert.stat.exists
+  block:
+    - name: Render HTTP-only site
+      ansible.builtin.include_tasks:
+        file: site.yml
+      vars:
+        cp_proxy_tls_enabled: false
+
+    - name: Apply the HTTP-only site now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Request the certificate with certbot webroot
+      ansible.builtin.command:
+        argv: "{{ cp_proxy_certbot_argv + (['--test-cert'] if cp_proxy_acme_staging | bool else []) }}"
+        creates: "{{ cp_proxy_acme_live_dir }}/fullchain.pem"
+      vars:
+        cp_proxy_certbot_argv:
+          - certbot
+          - certonly
+          - --webroot
+          - --webroot-path
+          - "{{ cp_proxy_acme_webroot }}"
+          - --cert-name
+          - "{{ cp_proxy_server_name }}"
+          - --domain
+          - "{{ cp_proxy_server_name }}"
+          - --email
+          - "{{ cp_proxy_acme_email }}"
+          - --agree-tos
+          - --no-eff-email
+          - --non-interactive
+          - --keep-until-expiring
+          - --deploy-hook
+          - nginx -t && service nginx reload

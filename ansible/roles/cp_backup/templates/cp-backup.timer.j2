@@ -1,0 +1,13 @@
+# Managed by Ansible (cp_backup). Contains no secrets.
+[Unit]
+Description=Schedule for the encrypted panel PostgreSQL backup
+Documentation=https://github.com/juvenileslave/vpn/blob/master/docs/BACKUP.md
+
+[Timer]
+OnCalendar={{ cp_backup_on_calendar }}
+RandomizedDelaySec={{ cp_backup_randomized_delay }}
+Persistent=true
+Unit=cp-backup.service
+
+[Install]
+WantedBy=timers.target

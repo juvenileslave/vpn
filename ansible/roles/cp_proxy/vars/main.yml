@@ -1,0 +1,11 @@
+---
+cp_proxy_marker: "Managed by Ansible role cp_proxy"
+cp_proxy_site_available: /etc/nginx/sites-available/cp_proxy.conf
+cp_proxy_site_enabled: /etc/nginx/sites-enabled/cp_proxy.conf
+cp_proxy_http_port: 80
+cp_proxy_https_port: 443
+cp_proxy_acme_live_dir: "/etc/letsencrypt/live/{{ cp_proxy_server_name }}"
+cp_proxy_ssl_certificate: "{{ (cp_proxy_acme_live_dir ~ '/fullchain.pem') if cp_proxy_acme | bool else cp_proxy_certificate_path }}"
+cp_proxy_ssl_certificate_key: "{{ (cp_proxy_acme_live_dir ~ '/privkey.pem') if cp_proxy_acme | bool else cp_proxy_key_path }}"
+cp_proxy_tls_ciphers: >-
+  ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305

@@ -1,0 +1,30 @@
+---
+# Restore one cp_backup artifact into a new database on a disposable PostgreSQL
+# (docs/BACKUP.md). Never target the live panel database.
+# Example:
+#   ansible-playbook -i <inventory> playbooks/restore.yml \
+#     -e cp_restore_hosts=<drill-host> -e cp_restore_confirm=true \
+#     -e cp_restore_artifact_src=/path/cp-backup-YYYYmmddTHHMMSSZ.pgcustom.age \
+#     -e cp_restore_identity_file=/path/outside/git/identity.txt \
+#     -e cp_restore_container=<disposable-postgres> -e cp_restore_db_name=panel_restore
+- name: Check restore intent
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require an explicit restore target and confirmation
+      ansible.builtin.assert:
+        that:
+          - cp_restore_hosts | default('') | length > 0
+          - cp_restore_confirm | default(false) | string | lower == 'true'
+        fail_msg: Set cp_restore_hosts and cp_restore_confirm=true to run the restore drill.
+        quiet: true
+
+- name: Restore a backup into a disposable database
+  hosts: "{{ cp_restore_hosts | default('!all') }}"
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Run the restore drill
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/cp_backup"
+        tasks_from: restore

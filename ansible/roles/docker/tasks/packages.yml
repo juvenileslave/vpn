@@ -1,0 +1,9 @@
+---
+# Recommends are skipped: they would pull unpinned docker-ce-rootless-extras.
+- name: Install pinned Docker packages
+  ansible.builtin.apt:
+    name: "{{ docker_package_specs }}"
+    state: present
+    install_recommends: false
+    allow_downgrade: "{{ docker_allow_version_change }}"
+  when: docker_missing_specs | length == 0

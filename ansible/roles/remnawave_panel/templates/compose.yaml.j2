@@ -1,0 +1,101 @@
+# Managed by the Ansible role remnawave_panel; manual edits are overwritten.
+# Secrets live only in panel.env and db.env (mode 0600) next to this file.
+name: {{ remnawave_panel_project }}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: "5"
+
+services:
+  remnawave:
+    image: {{ (remnawave_panel_images.remnawave_panel ~ ':' ~ image_tags.remnawave_panel) | to_json }}
+    restart: unless-stopped
+    env_file: [panel.env]
+    environment:
+      APP_PORT: "3000"
+      METRICS_PORT: "3001"
+      REDIS_HOST: remnawave-redis
+      REDIS_PORT: "6379"
+      FRONT_END_DOMAIN: {{ remnawave_panel_front_end_domain | to_json }}
+      SUB_PUBLIC_DOMAIN: {{ remnawave_panel_sub_public_domain | to_json }}
+    ports:
+      - target: 3000
+        host_ip: {{ panel_bind | to_json }}
+        published: "{{ panel_port }}"
+        protocol: tcp
+    networks: [backend, frontend]
+    depends_on:
+      remnawave-db:
+        condition: service_healthy
+      remnawave-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}
+
+  remnawave-db:
+    image: {{ (remnawave_panel_images.postgres ~ ':' ~ image_tags.postgres) | to_json }}
+    restart: unless-stopped
+    env_file: [db.env]
+    environment:
+      TZ: UTC
+    shm_size: 256mb
+    volumes:
+      - db-data:/var/lib/postgresql
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}
+
+  remnawave-redis:
+    image: {{ (remnawave_panel_images.valkey ~ ':' ~ image_tags.valkey) | to_json }}
+    restart: unless-stopped
+    # Cache and queues only; the panel's state lives in PostgreSQL.
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction", "--loglevel", "warning"]
+    volumes:
+      - valkey-data:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}
+
+networks:
+  # No external connectivity: PostgreSQL and Valkey are reachable only here.
+  backend:
+    internal: true
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}
+  # Panel only: loopback port publishing and egress to node APIs.
+  frontend:
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}
+
+volumes:
+  db-data:
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}
+  valkey-data:
+    labels:
+      {{ remnawave_panel_label_key }}: {{ remnawave_panel_label_value }}

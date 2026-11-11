@@ -1,0 +1,55 @@
+---
+- name: Resolve the age release architecture
+  ansible.builtin.set_fact:
+    cp_backup_age_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] | default('') }}"
+
+- name: Require a supported architecture
+  ansible.builtin.assert:
+    that: cp_backup_age_arch in cp_backup_age_sha256
+    fail_msg: "No pinned age checksum for architecture {{ ansible_facts['architecture'] }}."
+    quiet: true
+
+- name: Create the age directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /var/cache/cp-backup
+    - "/opt/age/{{ cp_backup_age_version }}"
+
+- name: Download the pinned age release
+  ansible.builtin.get_url:
+    url: "https://github.com/FiloSottile/age/releases/download/{{ cp_backup_age_version }}/age-{{ cp_backup_age_version }}-linux-{{ cp_backup_age_arch }}.tar.gz"
+    dest: "/var/cache/cp-backup/age-{{ cp_backup_age_version }}-linux-{{ cp_backup_age_arch }}.tar.gz"
+    checksum: "sha256:{{ cp_backup_age_sha256[cp_backup_age_arch] }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Unpack age
+  ansible.builtin.unarchive:
+    src: "/var/cache/cp-backup/age-{{ cp_backup_age_version }}-linux-{{ cp_backup_age_arch }}.tar.gz"
+    dest: "/opt/age/{{ cp_backup_age_version }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    owner: root
+    group: root
+    creates: "/opt/age/{{ cp_backup_age_version }}/age-keygen"
+
+- name: Link age binaries
+  ansible.builtin.file:
+    src: "/opt/age/{{ cp_backup_age_version }}/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  loop: [age, age-keygen]
+
+- name: Check the installed age version
+  ansible.builtin.command:
+    argv: [/usr/local/bin/age, --version]
+  register: cp_backup_age_installed
+  changed_when: false
+  failed_when: cp_backup_age_installed.stdout | trim != cp_backup_age_version

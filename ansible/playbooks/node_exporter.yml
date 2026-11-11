@@ -1,0 +1,7 @@
+# Installs only node_exporter. Does not touch firewall rules or other services.
+- name: Install pinned node_exporter
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - role: ../roles/node_exporter
