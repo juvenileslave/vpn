@@ -1,0 +1,97 @@
+---
+- name: Require exact image pins
+  ansible.builtin.assert:
+    that:
+      - image_tags is defined
+      - image_tags is mapping
+      - image_tags[item] is defined
+      - image_tags[item] is string
+      - image_tags[item] | length > 0
+      - image_tags[item] != 'latest'
+      - image_tags[item] is regex(remnawave_panel_pin_patterns[item])
+    fail_msg: >-
+      image_tags.{{ item }} must be an exact pin matching
+      {{ remnawave_panel_pin_patterns[item] }}; got
+      {{ (image_tags | default({}))[item] | default('<missing>') | string | to_json }}.
+      No floating default is provided.
+    quiet: true
+  loop: "{{ remnawave_panel_pin_patterns.keys() | list }}"
+
+- name: Require a loopback panel_bind and a valid panel_port
+  ansible.builtin.assert:
+    that:
+      - panel_bind | remnawave_panel_is_loopback
+      - panel_port | string is regex('^[0-9]+$')
+      - panel_port | int >= 1
+      - panel_port | int <= 65535
+    fail_msg: >-
+      panel_bind must be an IP literal in 127.0.0.0/8 or ::1 (got
+      {{ panel_bind | string | to_json }}) and panel_port an integer 1-65535.
+      Public exposure is refused.
+    quiet: true
+
+- name: Require the non-secret panel domains
+  ansible.builtin.assert:
+    that:
+      - remnawave_panel_sub_public_domain is string
+      - remnawave_panel_sub_public_domain is regex('^[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*$')
+      - remnawave_panel_front_end_domain is string
+      - remnawave_panel_front_end_domain is regex('^(\*|[A-Za-z0-9.-]+(:[0-9]+)?)$')
+    fail_msg: >-
+      remnawave_panel_sub_public_domain must be a host[/path] without scheme or
+      trailing slash; remnawave_panel_front_end_domain must be '*' or a host.
+    quiet: true
+
+- name: Require exactly one secrets source
+  ansible.builtin.assert:
+    that:
+      - (remnawave_panel_env_file | length > 0) != (remnawave_panel_env | length > 0)
+    fail_msg: Set exactly one of remnawave_panel_env_file or remnawave_panel_env.
+    quiet: true
+
+- name: Require the env file to be an existing absolute path outside the repository
+  when: remnawave_panel_env_file | length > 0
+  vars:
+    _env_path: "{{ remnawave_panel_env_file | expanduser }}"
+    _repo_root: "{{ (role_path ~ '/../../..') | realpath }}"
+  ansible.builtin.assert:
+    that:
+      - _env_path is abs
+      - _env_path is file
+      - not ((_env_path | realpath) ~ '/').startswith(_repo_root ~ '/')
+    fail_msg: >-
+      remnawave_panel_env_file must be an absolute path to an existing file on
+      the controller outside the repository checkout.
+    quiet: true
+
+- name: Load secrets
+  ansible.builtin.set_fact:
+    _remnawave_panel_secrets: >-
+      {{ (lookup('ansible.builtin.file', remnawave_panel_env_file | expanduser) | remnawave_panel_parse_env)
+         if remnawave_panel_env_file | length > 0
+         else (remnawave_panel_env | remnawave_panel_normalize_env) }}
+  no_log: true
+
+# The result lists key names only, so it is safe to show.
+- name: Find problems in the secret keys
+  ansible.builtin.set_fact:
+    _remnawave_panel_env_problems: >-
+      {{ _remnawave_panel_secrets
+         | remnawave_panel_env_problems(remnawave_panel_required_keys, remnawave_panel_managed_keys) }}
+
+- name: Require valid secret keys
+  ansible.builtin.assert:
+    that: _remnawave_panel_env_problems | length == 0
+    fail_msg: "Secrets are invalid: {{ _remnawave_panel_env_problems | join('; ') }}"
+    quiet: true
+
+- name: Split secrets into panel and database env files
+  ansible.builtin.set_fact:
+    _remnawave_panel_db_env: >-
+      {{ _remnawave_panel_secrets | dict2items | selectattr('key', 'in', remnawave_panel_db_keys) | items2dict }}
+    _remnawave_panel_panel_env: >-
+      {{ _remnawave_panel_secrets | dict2items | rejectattr('key', 'in', remnawave_panel_db_keys) | items2dict
+         | combine({'DATABASE_URL': 'postgresql://' ~ _remnawave_panel_secrets.POSTGRES_USER ~ ':'
+                    ~ _remnawave_panel_secrets.POSTGRES_PASSWORD ~ '@remnawave-db:5432/'
+                    ~ _remnawave_panel_secrets.POSTGRES_DB}) }}
+  no_log: true
