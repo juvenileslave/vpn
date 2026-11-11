@@ -66,7 +66,9 @@ const (
 	// requested server name.
 	OutcomeHostnameMismatch Outcome = "hostname_mismatch"
 	// OutcomeCertificateInvalid covers other verification failures such as
-	// an expired certificate.
+	// an expired certificate, and rejections by a platform verifier (used
+	// with system roots on macOS and Windows) that report no specific
+	// reason.
 	OutcomeCertificateInvalid Outcome = "certificate_invalid"
 	// OutcomeHandshakeFailed covers every other TLS handshake failure:
 	// alerts, resets, non-TLS replies, early close.
@@ -147,8 +149,12 @@ type Observation struct {
 	// TLSVersion is the negotiated version after a successful handshake.
 	TLSVersion uint16 `json:"tls_version,omitempty"`
 
-	// StatusCode is set once an HTTP response header was received.
+	// StatusCode is the status of the final (non-1xx) HTTP response, or 101
+	// when the server switched protocols.
 	StatusCode int `json:"status_code,omitempty"`
+	// InterimResponses counts informational 1xx responses (such as 103
+	// Early Hints) received before the final response.
+	InterimResponses int `json:"interim_responses,omitempty"`
 	// HeaderReceived is when the response header was parsed.
 	HeaderReceived time.Time `json:"header_received,omitzero"`
 	// BytesRead counts response body bytes consumed, at most MaxBytes.
@@ -289,6 +295,7 @@ func classifyTLS(ctx context.Context, err error) Outcome {
 		unknown  x509.UnknownAuthorityError
 		hostname x509.HostnameError
 		invalid  x509.CertificateInvalidError
+		verify   *tls.CertificateVerificationError
 	)
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
@@ -300,6 +307,10 @@ func classifyTLS(ctx context.Context, err error) Outcome {
 	case errors.As(err, &hostname):
 		return OutcomeHostnameMismatch
 	case errors.As(err, &invalid):
+		return OutcomeCertificateInvalid
+	case errors.As(err, &verify):
+		// crypto/tls wraps every failed chain verification in this type;
+		// the platform verifier may return an untyped cause.
 		return OutcomeCertificateInvalid
 	}
 	return OutcomeHandshakeFailed

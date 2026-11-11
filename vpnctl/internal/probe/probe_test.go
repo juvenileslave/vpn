@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -256,13 +257,34 @@ func TestTCPCanceledContext(t *testing.T) {
 }
 
 func TestTCPSourceIPIsBound(t *testing.T) {
-	srv := newRawServer(t, "tcp4", "0.0.0.0:0", nil)
-	tg := target(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), srv.addr.Port()), IPv4)
-	tg.SourceIP = netip.MustParseAddr("127.0.0.2")
+	srv := newRawServer(t, "tcp4", "127.0.0.1:0", nil)
+	tg := target(srv.addr, IPv4)
+	tg.SourceIP = loopback4
 	res := TCP(context.Background(), TCPRequest{tg})
 	expect(t, res, "tcp:success")
 	if peer := srv.peer(t); peer.Addr() != tg.SourceIP || res.Last().LocalAddr != peer {
 		t.Fatalf("server saw %v, probe reported %v, want source %v", peer, res.Last().LocalAddr, tg.SourceIP)
+	}
+}
+
+// Binding a second loopback address proves the source is not just the
+// kernel's default choice. 127.0.0.2 is routable on Linux loopback but is
+// not assigned by default on macOS or BSD.
+func TestTCPSourceIPAliasIsBound(t *testing.T) {
+	alias := netip.MustParseAddr("127.0.0.2")
+	probeLn, err := net.Listen("tcp4", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("loopback alias %v unavailable: net.Listen(\"tcp4\", \"127.0.0.2:0\") failed: %v", alias, err)
+	}
+	_ = probeLn.Close()
+
+	srv := newRawServer(t, "tcp4", "127.0.0.1:0", nil)
+	tg := target(srv.addr, IPv4)
+	tg.SourceIP = alias
+	res := TCP(context.Background(), TCPRequest{tg})
+	expect(t, res, "tcp:success")
+	if peer := srv.peer(t); peer.Addr() != alias || res.Last().LocalAddr != peer {
+		t.Fatalf("server saw %v, probe reported %v, want source %v", peer, res.Last().LocalAddr, alias)
 	}
 }
 
@@ -370,7 +392,6 @@ func TestTLSVerificationFailures(t *testing.T) {
 		want       string
 	}{
 		{"untrusted CA", valid, "probe.test", newPKI(t).pool, "tls:certificate_untrusted"},
-		{"system roots", valid, "probe.test", nil, "tls:certificate_untrusted"},
 		{"hostname mismatch", valid, "other.test", p.pool, "tls:hostname_mismatch"},
 		{"expired", expired, "probe.test", p.pool, "tls:certificate_invalid"},
 	}
@@ -379,6 +400,29 @@ func TestTLSVerificationFailures(t *testing.T) {
 			res := TLS(context.Background(), TLSRequest{Target: target(c.srv.addr, IPv4), ServerName: c.serverName, RootCAs: c.roots})
 			expect(t, res, "tcp:success", c.want)
 		})
+	}
+
+	// With system roots the platform verifier decides: Go's verifier
+	// reports an unknown authority, macOS may report an untyped rejection.
+	t.Run("system roots", func(t *testing.T) {
+		res := TLS(context.Background(), TLSRequest{Target: target(valid.addr, IPv4), ServerName: "probe.test"})
+		if o := res.Last(); len(res.Observations) != 2 || o.Stage != StageTLS ||
+			(o.Outcome != OutcomeCertificateUntrusted && o.Outcome != OutcomeCertificateInvalid) {
+			t.Fatalf("observations = %+v, want tls certificate rejection", res.Observations)
+		}
+	})
+}
+
+func TestClassifyTLSPlatformVerifierError(t *testing.T) {
+	ctx := context.Background()
+	// Shape of the macOS verifier result for an unlisted Security.framework
+	// code, as wrapped by crypto/tls.
+	platform := &tls.CertificateVerificationError{Err: errors.New("x509: “probe.test” certificate is not trusted")}
+	if got := classifyTLS(ctx, fmt.Errorf("handshake: %w", platform)); got != OutcomeCertificateInvalid {
+		t.Fatalf("platform verifier rejection = %s, want %s", got, OutcomeCertificateInvalid)
+	}
+	if got := classifyTLS(ctx, errors.New("tls: first record does not look like a TLS handshake")); got != OutcomeHandshakeFailed {
+		t.Fatalf("non-certificate failure = %s, want %s", got, OutcomeHandshakeFailed)
 	}
 }
 
@@ -471,8 +515,25 @@ func TestHTTPSTrustedStreamsExactLimit(t *testing.T) {
 func TestHTTPSUntrustedStopsBeforeRequest(t *testing.T) {
 	p := newPKI(t)
 	srv := newTLSServer(t, p.leaf(t, time.Now().Add(time.Hour), "probe.test"))
-	res := HTTP(context.Background(), HTTPRequest{Target: target(srv.addr, IPv4), URL: "https://probe.test/", MaxBytes: 1})
+	res := HTTP(context.Background(), HTTPRequest{Target: target(srv.addr, IPv4), URL: "https://probe.test/", RootCAs: newPKI(t).pool, MaxBytes: 1})
 	expect(t, res, "tcp:success", "tls:certificate_untrusted")
+}
+
+func TestHTTPEarlyHintsThenFinalResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", "</style.css>; rel=preload; as=style")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+	res := HTTP(context.Background(), HTTPRequest{Target: target(addrPort(srv.Listener.Addr()), IPv4), URL: "http://probe.test/", MaxBytes: 1024})
+	expect(t, res, "tcp:success", "http:success")
+	if o := res.Last(); o.StatusCode != 200 || o.InterimResponses != 2 || o.BytesRead != 2 || o.LimitReached {
+		t.Fatalf("unexpected observation %+v", o)
+	}
 }
 
 func TestHTTPNon2xx(t *testing.T) {
@@ -501,6 +562,9 @@ func TestHTTPRawResponses(t *testing.T) {
 		{"close-delimited body", "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + strings.Repeat("x", 300), "http:success", 300},
 		{"header too large", "HTTP/1.1 200 OK\r\nX-Pad: " + strings.Repeat("a", 2048) + "\r\n\r\n", "http:http_protocol_error", 0},
 		{"not HTTP", "SSH-2.0-not-http\r\n\r\n", "http:http_protocol_error", 0},
+		{"interim then early EOF", "HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc", "http:early_eof", 3},
+		{"interim headers share limit", strings.Repeat("HTTP/1.1 103 Early Hints\r\nX-Pad: "+strings.Repeat("a", 200)+"\r\n\r\n", 6), "http:http_protocol_error", 0},
+		{"unrequested protocol switch", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n", "http:http_protocol_error", 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

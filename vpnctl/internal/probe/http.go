@@ -96,10 +96,24 @@ func transfer(ctx context.Context, conn net.Conn, u *url.URL, req HTTPRequest, b
 	if headerLimit == 0 {
 		headerLimit = DefaultMaxHeaderBytes
 	}
+	// The budget is shared by all interim 1xx headers and the final header.
 	budget := &budgetReader{r: conn, remaining: headerLimit}
-	resp, err := http.ReadResponse(bufio.NewReader(budget), hreq)
-	if err != nil {
-		return fail(classifyHTTP(ctx, err), err)
+	br := bufio.NewReader(budget)
+	var resp *http.Response
+	for {
+		var err error
+		resp, err = http.ReadResponse(br, hreq)
+		if err != nil {
+			return fail(classifyHTTP(ctx, err), err)
+		}
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			obs.StatusCode = resp.StatusCode
+			return fail(OutcomeHTTPProtocol, errors.New("unrequested protocol switch: "+resp.Status))
+		}
+		if resp.StatusCode >= 200 || resp.StatusCode < 100 {
+			break
+		}
+		obs.InterimResponses++
 	}
 	// resp.Body is deliberately not closed: Body.Close may drain the rest
 	// of the body without limit. Closing the connection releases it.
