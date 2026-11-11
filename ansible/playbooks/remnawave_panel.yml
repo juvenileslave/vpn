@@ -1,0 +1,10 @@
+---
+# Loopback-only Remnawave panel stack (architecture task 2.1). See docs/PANEL.md.
+# With cp_placement: exit, run with -e remnawave_panel_hosts=exit.
+- name: Remnawave panel
+  hosts: "{{ remnawave_panel_hosts | default('cp') }}"
+  gather_facts: false
+  become: true
+  roles:
+    # Project-local path relative to this playbook; no ANSIBLE_ROLES_PATH needed.
+    - role: ../roles/remnawave_panel

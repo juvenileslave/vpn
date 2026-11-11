@@ -1,0 +1,23 @@
+---
+# Operator-facing variables; see docs/PANEL.md. `image_tags` deliberately has
+# no default: pins come from the inventory (group_vars/all).
+
+# Loopback address and host port for the panel (inventory contract: `cp`).
+panel_bind: 127.0.0.1
+panel_port: 3000
+
+# Project directory on the target host (compose.yaml, panel.env, db.env).
+remnawave_panel_dir: /opt/remnawave
+
+# Secrets: exactly one of these must be set.
+# Absolute path on the controller, outside the repository (dotenv format).
+remnawave_panel_env_file: ""
+# Mapping KEY -> value, e.g. loaded from an encrypted vars file.
+remnawave_panel_env: {}
+
+# Non-secret panel settings (values of FRONT_END_DOMAIN / SUB_PUBLIC_DOMAIN).
+remnawave_panel_front_end_domain: "*"
+remnawave_panel_sub_public_domain: ""
+
+# Seconds `docker compose up --wait` waits for healthy containers.
+remnawave_panel_up_timeout: 300

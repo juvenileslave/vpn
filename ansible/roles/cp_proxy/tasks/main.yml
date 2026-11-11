@@ -1,0 +1,48 @@
+---
+- name: Validate variables
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Install nginx from distribution packages
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+
+- name: Check operator-provided certificate files
+  when: not (cp_proxy_acme | bool)
+  ansible.builtin.import_tasks: certificate.yml
+
+- name: Detect conflicts with other nginx vhosts
+  cp_proxy_nginx_preflight:
+    server_name: "{{ cp_proxy_server_name }}"
+    owned_paths:
+      - "{{ cp_proxy_site_available }}"
+      - "{{ cp_proxy_site_enabled }}"
+    marker: "{{ cp_proxy_marker }}"
+    http_port: "{{ cp_proxy_http_port }}"
+    https_port: "{{ cp_proxy_https_port }}"
+
+- name: Create ACME challenge webroot
+  ansible.builtin.file:
+    path: "{{ cp_proxy_acme_webroot }}/.well-known/acme-challenge"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure nginx is running
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Obtain the certificate via ACME webroot
+  when: cp_proxy_acme | bool
+  ansible.builtin.include_tasks: acme.yml
+
+- name: Render and activate the TLS site
+  ansible.builtin.include_tasks:
+    file: site.yml
+  vars:
+    cp_proxy_tls_enabled: true
