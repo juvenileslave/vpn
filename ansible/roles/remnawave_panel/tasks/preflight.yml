@@ -1,0 +1,59 @@
+---
+- name: Check that the Docker daemon is reachable
+  ansible.builtin.command:
+    argv: [docker, version, --format, "{{ '{{' }}.Server.Version{{ '}}' }}"]
+  check_mode: false
+  changed_when: false
+
+- name: List containers, volumes and networks with their labels
+  ansible.builtin.command:
+    argv: "{{ ['docker', item.kind, 'ls'] + item.extra + ['--format=' ~ item.name_field ~ _labels] }}"
+  vars:
+    _labels: >-
+      |{{ '{{' }}.Label "com.docker.compose.project"{{ '}}' }}|{{ '{{' }}.Label "{{ remnawave_panel_label_key }}"{{ '}}' }}
+  loop:
+    - {kind: container, extra: [--all], name_field: "{{ '{{' }}.Names{{ '}}' }}"}
+    - {kind: volume, extra: [], name_field: "{{ '{{' }}.Name{{ '}}' }}"}
+    - {kind: network, extra: [], name_field: "{{ '{{' }}.Name{{ '}}' }}"}
+  loop_control:
+    label: "{{ item.kind }}"
+  register: _remnawave_panel_objects
+  check_mode: false
+  changed_when: false
+
+- name: Read the existing compose file, if any
+  ansible.builtin.slurp:
+    src: "{{ remnawave_panel_dir }}/compose.yaml"
+  register: _remnawave_panel_existing
+  failed_when: false
+
+- name: Refuse to take over unmanaged objects
+  vars:
+    _reserved:
+      container: "{{ remnawave_panel_reserved_containers }}"
+      volume: "{{ remnawave_panel_reserved_volumes }}"
+      network: "{{ remnawave_panel_reserved_networks }}"
+    _conflicts: >-
+      {%- set found = [] -%}
+      {%- for result in _remnawave_panel_objects.results -%}
+      {%-   for line in result.stdout_lines -%}
+      {%-     set fields = (line ~ '||').split('|') -%}
+      {%-     if (fields[1] == remnawave_panel_project or fields[0] in _reserved[result.item.kind])
+                 and fields[2] != remnawave_panel_label_value -%}
+      {%-       set _ = found.append(result.item.kind ~ ' ' ~ fields[0]) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- if _remnawave_panel_existing.content is defined
+             and 'Managed by the Ansible role remnawave_panel'
+                 not in (_remnawave_panel_existing.content | b64decode) -%}
+      {%-   set _ = found.append('file ' ~ remnawave_panel_dir ~ '/compose.yaml') -%}
+      {%- endif -%}
+      {{ found }}
+  ansible.builtin.assert:
+    that: _conflicts | length == 0
+    fail_msg: >-
+      Refusing to take over objects not created by this role:
+      {{ _conflicts | join(', ') }}. Nothing was changed; migrate or remove
+      them manually (see docs/PANEL.md).
+    quiet: true
