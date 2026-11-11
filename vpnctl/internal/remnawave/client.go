@@ -91,6 +91,12 @@ func New(baseURL *url.URL, token string, httpClient *http.Client, opts ...Option
 	}
 
 	hc := *httpClient
+	transport := hc.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	hc.Transport = redirectGuard{next: transport}
+	// Defence in depth; redirectGuard already stops every 3xx.
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 	base := *baseURL
@@ -213,6 +219,20 @@ func (c *Client) get(ctx context.Context, op string, query url.Values, elem ...s
 		return nil, fmt.Errorf("remnawave: %s: %w (limit %d bytes)", op, ErrResponseTooLarge, c.maxBytes)
 	}
 	return body, nil
+}
+
+// redirectGuard turns every 3xx response into an *APIError inside the
+// transport. http.Client parses Location before calling CheckRedirect and
+// quotes a malformed Location in its error, which could echo credentials.
+type redirectGuard struct{ next http.RoundTripper }
+
+func (g redirectGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := g.next.RoundTrip(req)
+	if err != nil || resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return resp, err
+	}
+	_ = resp.Body.Close()
+	return nil, &APIError{StatusCode: resp.StatusCode}
 }
 
 func newAPIError(resp *http.Response) *APIError {

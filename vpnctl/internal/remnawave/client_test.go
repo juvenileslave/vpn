@@ -482,6 +482,32 @@ func TestRedirectIsRefused(t *testing.T) {
 	}
 }
 
+// net/http rejects a malformed Location before CheckRedirect runs and quotes
+// it in its error; the client must not surface that value.
+func TestMalformedRedirectLocationDoesNotLeak(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			c, _ := newServer(t, "", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", "https://example.test/%zz?token="+
+					strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+				w.WriteHeader(status)
+			})
+			_, err := c.ListNodes(context.Background())
+			if !errors.Is(err, ErrRedirect) {
+				t.Fatalf("err = %v, want ErrRedirect", err)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != status {
+				t.Fatalf("APIError = %+v", apiErr)
+			}
+			if strings.Contains(err.Error(), "example.test") || strings.Contains(err.Error(), "%zz") {
+				t.Errorf("error repeats Location: %v", err)
+			}
+			assertNoLeak(t, err.Error())
+		})
+	}
+}
+
 func TestTLSVerification(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, `{"response":[]}`)
