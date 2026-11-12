@@ -10,18 +10,32 @@ if [[ "${VPN_BASE_DISPOSABLE_GUEST:-}" != "yes" ]]; then
 fi
 [[ $EUID -eq 0 ]] || { echo "Нужен root." >&2; exit 2; }
 [[ -d /run/systemd/system ]] || { echo "Нужен systemd." >&2; exit 2; }
+[[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted ]] \
+  || { echo "Нужен явно обозначенный одноразовый GitHub-hosted Linux guest." >&2; exit 2; }
+[[ $(uname -s) == Linux ]] || { echo "Нужен Linux." >&2; exit 2; }
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 ANSIBLE_DIR=$ROOT/ansible
 PLAYBOOK=$ANSIBLE_DIR/playbooks/base.yml
 AP=$ROOT/.venv/bin/ansible-playbook
 WORK=$(mktemp -d)
+SERVICE=$ROOT/ansible/roles/base/tests/runtime_service.py
+PIDS=()
+cleanup() {
+  for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for ns in trusted untrusted nated pmtu-router pmtu-client; do ip netns delete "$ns" 2>/dev/null || true; done
+  # A fault-injection wrapper must never survive the scenario.
+  if [[ -e $WORK/nft.real ]]; then mv "$WORK/nft.real" /usr/sbin/nft; fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 export ANSIBLE_CONFIG=$ANSIBLE_DIR/ansible.cfg ANSIBLE_NOCOLOR=1 DEBIAN_FRONTEND=noninteractive
 
 # Documentation ranges only (RFC 5737 / RFC 3849).
 HOST4=198.51.100.1 TRUST4=198.51.100.2 UNTRUST4=198.51.100.3
 HOST6=2001:db8:100::1 TRUST6=2001:db8:100::2 UNTRUST6=2001:db8:100::3
-VPN_TCP=18080 CLOSED_TCP=19090
+VPN_TCP=18080 CLOSED_TCP=19090 SOURCE_TCP=18443 SOURCE_UDP=18444 V4_ONLY_TCP=18445
+NAT4=198.51.100.5 NAT6=2001:db8:100::5
 
 step() { printf '\n=== %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -35,6 +49,23 @@ expect_changed() {  # log, expected changed count
 local_play() { "$AP" -i localhost, -c local -e ansible_python_interpreter=/usr/bin/python3 "$@" "$PLAYBOOK"; }
 in_ns() { ip netns exec "$@"; }
 tcp_open() { in_ns "$1" timeout 5 bash -c "exec 3<>/dev/tcp/$2/$3" 2>/dev/null; }
+http_get() { in_ns "$1" python3 "$SERVICE" get "$2" "$3" >/dev/null 2>&1; }
+udp_get() { in_ns "$1" python3 "$SERVICE" udp "$2" "$3" >/dev/null 2>&1; }
+assert_access() {
+  local addr
+  for addr in "$HOST4" "$HOST6"; do
+    http_get trusted "$addr" "$SOURCE_TCP" || fail "restricted TCP denied allowed source"
+    http_get untrusted "$addr" "$SOURCE_TCP" && fail "restricted TCP exposed"
+    udp_get trusted "$addr" "$SOURCE_UDP" || fail "restricted UDP denied allowed source"
+    udp_get untrusted "$addr" "$SOURCE_UDP" && fail "restricted UDP exposed"
+    http_get untrusted "$addr" "$VPN_TCP" || fail "public listener denied"
+    tcp_open trusted "$addr" 22 || fail "trusted SSH denied"
+    tcp_open untrusted "$addr" 22 && fail "untrusted SSH exposed"
+  done
+  http_get trusted "$HOST4" "$V4_ONLY_TCP" || fail "IPv4-only ACL denied IPv4"
+  http_get trusted "$HOST6" "$V4_ONLY_TCP" && fail "IPv4-only ACL opened IPv6"
+  ok "real TCP/UDP IPv4/IPv6 ACLs, public listener and SSH"
+}
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes
           -o UserKnownHostsFile="$WORK/known_hosts" -o StrictHostKeyChecking=yes)
 
@@ -59,7 +90,7 @@ step "Подготовка тестовой VM"
 . /etc/os-release
 echo "Гость: $PRETTY_NAME, ядро $(uname -r)"
 apt-get update -q
-apt-get install -y -q openssh-server iproute2 iputils-ping >/dev/null
+apt-get install -y -q openssh-server iproute2 iputils-ping nftables tcpdump ethtool >/dev/null
 systemctl start ssh.service
 ssh-keygen -q -t ed25519 -N '' -C ci-new -f "$WORK/admin_new"
 ssh-keygen -q -t ed25519 -N '' -C ci-old -f "$WORK/admin_old"
@@ -96,8 +127,10 @@ for _ in $(seq 20); do
 done
 in_ns trusted ssh-keyscan -T 5 "$HOST4" "$HOST6" > "$WORK/known_hosts" 2>/dev/null
 [[ -s $WORK/known_hosts ]] || fail "ssh-keyscan не получил host key"
-python3 -m http.server "$VPN_TCP" --bind :: --directory "$WORK" >/dev/null 2>&1 &
-sleep 1
+python3 "$SERVICE" serve --tcp "$VPN_TCP" "$SOURCE_TCP" "$V4_ONLY_TCP" --udp "$SOURCE_UDP" >/dev/null 2>&1 &
+PIDS+=("$!")
+for _ in {1..20}; do http_get trusted "$HOST4" "$VPN_TCP" && break; sleep 0.2; done
+http_get trusted "$HOST4" "$SOURCE_TCP" || fail "restricted listener did not start"
 snapshot > "$WORK/state.before"
 # Preserving existing swap is only testable when the guest already has swap.
 SWAP_PRESENT=false
@@ -111,6 +144,11 @@ cat > "$WORK/vars.json" <<EOF
   "base_firewall_enabled": true,
   "base_ssh_trusted_cidrs": ["$TRUST4/32", "$TRUST6/128"],
   "base_firewall_vpn_ports": [{"proto": "tcp", "port": $VPN_TCP}, {"proto": "udp", "port": 51820}],
+  "base_firewall_source_ports": [
+    {"proto": "tcp", "port": $SOURCE_TCP, "source_cidrs": ["$TRUST4/32", "$TRUST6/128", "$NAT4/32", "$NAT6/128"]},
+    {"proto": "udp", "port": $SOURCE_UDP, "source_cidrs": ["$TRUST4/32", "$TRUST6/128"]},
+    {"proto": "tcp", "port": $V4_ONLY_TCP, "source_cidrs": ["$TRUST4/32"]}
+  ],
   "base_swap_enabled": $SWAP_PRESENT
 }
 EOF
@@ -129,7 +167,7 @@ else
 fi
 
 step "Отказ закрыть незаявленные слушающие порты"
-local_play -e @"$WORK/vars.json" -e '{"base_firewall_vpn_ports": []}' > "$WORK/listeners.log" 2>&1 \
+local_play -e @"$WORK/vars.json" -e '{"base_firewall_vpn_ports": [], "base_firewall_source_ports": []}' > "$WORK/listeners.log" 2>&1 \
   && { cat "$WORK/listeners.log"; fail "роль не отказала при незаявленном порте"; }
 recap "$WORK/listeners.log" | grep -q 'changed=0' || fail "отказ после изменений"
 mapfile -t uncovered < <(grep -o 'слушающие порты [^.]*' "$WORK/listeners.log" | head -1 \
@@ -138,13 +176,14 @@ printf '%s\n' "${uncovered[@]}" | grep -qx "tcp/$VPN_TCP" || { cat "$WORK/listen
 nft list table inet vpn_base >/dev/null 2>&1 && fail "таблица создана несмотря на отказ"
 ok "незаявленные порты: ${uncovered[*]}"
 # Remaining host listeners are acknowledged as closed for this test.
-ack=$( { printf '%s\n' "${uncovered[@]}" | grep -vx "tcp/$VPN_TCP" || true; printf '%s\n' "tcp/$CLOSED_TCP"; } \
+ack=$( { printf '%s\n' "${uncovered[@]}" | grep -Ev "^(tcp/($VPN_TCP|$SOURCE_TCP|$V4_ONLY_TCP)|udp/$SOURCE_UDP)$" || true; printf '%s\n' "tcp/$CLOSED_TCP"; } \
   | sort -u | sed 's/.*/"&"/' | paste -sd, -)
 printf '{"base_firewall_acknowledged_closed_ports": [%s]}\n' "$ack" > "$WORK/ack.json"
 
 step "Первое применение (локально)"
 local_play -e @"$WORK/vars.json" -e @"$WORK/ack.json" > "$WORK/apply1.log" 2>&1 \
   || { cat "$WORK/apply1.log"; fail "первое применение"; }
+assert_access
 grep -q 'Активный swap уже есть' "$WORK/apply1.log" && echo "Существующий swap сохранён без создания нового."
 ok "$(recap "$WORK/apply1.log")"
 
@@ -186,7 +225,9 @@ ok "sshd предлагает только publickey"
 sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|permitrootlogin|permitemptypasswords) '
 
 step "Поведение firewall IPv4/IPv6"
-python3 -m http.server "$CLOSED_TCP" --bind :: --directory "$WORK" >/dev/null 2>&1 &
+mkdir "$WORK/public-empty"
+python3 -m http.server "$CLOSED_TCP" --bind :: --directory "$WORK/public-empty" >/dev/null 2>&1 &
+PIDS+=("$!")
 sleep 1
 for addr in "$HOST4" "$HOST6"; do
   tcp_open untrusted "$addr" 22 && fail "SSH открыт недоверенному адресу ($addr)"
@@ -200,6 +241,41 @@ ip -n untrusted neigh flush all
 in_ns untrusted ping -c2 -W2 "$HOST4" >/dev/null || fail "ICMPv4 echo"
 in_ns untrusted ping -c2 -W2 "$HOST6" >/dev/null || fail "ICMPv6 echo/ND после сброса neighbor cache"
 ok "ICMPv4 и ICMPv6 (включая ND) проходят"
+assert_access
+
+step "Проверка заявленного NAT egress реальными источниками соединений"
+ip netns add nated
+ip link add v-nated type veth peer name eth0 netns nated
+ip link set v-nated master vbr-test up
+ip -n nated link set lo up
+ip -n nated link set eth0 up
+ip -n nated addr add 198.51.100.4/24 dev eth0
+ip -n nated addr add "$NAT4/24" dev eth0
+ip -n nated -6 addr add 2001:db8:100::4/64 dev eth0 nodad
+ip -n nated -6 addr add "$NAT6/64" dev eth0 nodad
+for addr in "$HOST4" "$HOST6"; do
+  http_get nated "$addr" "$SOURCE_TCP" && fail "undeclared pre-NAT source admitted"
+done
+in_ns nated python3 "$SERVICE" peer "$HOST4" "$VPN_TCP" 198.51.100.4
+in_ns nated python3 "$SERVICE" peer "$HOST6" "$VPN_TCP" 2001:db8:100::4
+in_ns nated nft -f - <<EOF
+table ip relay_nat {
+  chain postrouting { type nat hook postrouting priority srcnat; policy accept;
+    ip saddr 198.51.100.4 snat to $NAT4
+  }
+}
+table ip6 relay_nat {
+  chain postrouting { type nat hook postrouting priority srcnat; policy accept;
+    ip6 saddr 2001:db8:100::4 snat to $NAT6
+  }
+}
+EOF
+in_ns nated python3 "$SERVICE" peer "$HOST4" "$SOURCE_TCP" "$NAT4"
+in_ns nated python3 "$SERVICE" peer "$HOST6" "$SOURCE_TCP" "$NAT6"
+ok "наблюдаемые NAT egress совпадают с явно заявленными /32 и /128"
+
+step "Реальный IPv4/IPv6 PMTU и передача данных через уменьшенный MTU"
+bash "$ROOT/ansible/roles/base/tests/runtime_pmtu.sh" "$WORK" "$VPN_TCP" "$SERVICE"
 
 step "Сохранение постороннего состояния"
 snapshot > "$WORK/state.after"
@@ -219,24 +295,129 @@ unattended-upgrade --dry-run --debug > "$WORK/unattended.log" 2>&1 || true
 grep -m1 'Allowed origins are' "$WORK/unattended.log" || fail "нет Allowed origins"
 apt-config dump APT::Periodic::Unattended-Upgrade
 
-step "Некорректный кандидат не меняет активную таблицу"
+step "Некорректный кандидат и ошибка применения сохраняют рабочее состояние"
+cp /etc/vpn-base/firewall.nft "$WORK/previous.nft"
 before=$(nft list table inet vpn_base | sha256sum)
-sed 's/policy drop;/policy bogus;/' /etc/vpn-base/firewall.nft > "$WORK/bad.nft"
-nft -c -f "$WORK/bad.nft" 2>/dev/null && fail "nft -c принял некорректный кандидат"
-nft -f "$WORK/bad.nft" 2>/dev/null && fail "nft применил некорректный кандидат"
-[[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "таблица изменилась"
-ok "предыдущая таблица осталась активной"
+file_before=$(sha256sum /etc/vpn-base/firewall.nft)
+cat > "$WORK/bad.nft" <<'EOF'
+table inet vpn_base
+delete table inet vpn_base
+table inet vpn_base { chain input { type filter hook input priority filter; policy bogus; } }
+EOF
+nft -c -f "$WORK/bad.nft" 2>/dev/null && fail "nft -c accepted invalid candidate"
+nft -f "$WORK/bad.nft" 2>/dev/null && fail "nft applied invalid candidate"
+[[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "active policy changed"
+[[ $(sha256sum /etc/vpn-base/firewall.nft) == "$file_before" ]] || fail "persistent policy changed"
+assert_access
 
-step "Перезапуск nftables.service не теряет таблицу"
+step "Неверные ACL и nft-кандидат отклоняются до замены конфигурации"
+for invalid in \
+  '{"base_firewall_source_ports": [{"proto": "tcp", "port": 18443, "source_cidrs": []}]}' \
+  '{"base_firewall_source_ports": [{"proto": "tcp", "port": 18443, "source_cidrs": ["198.51.100.77/24"]}]}' \
+  '{"base_firewall_source_ports": [{"proto": "tcp", "port": 18080, "source_cidrs": ["198.51.100.77/32"]}]}'; do
+  if local_play -e @"$WORK/vars.json" -e @"$WORK/ack.json" -e "$invalid" > "$WORK/invalid-input.log" 2>&1; then
+    fail "invalid ACL accepted"
+  fi
+  recap "$WORK/invalid-input.log" | grep -q 'changed=0' || fail "invalid ACL mutated host"
+  grep -q '198.51.100.77' "$WORK/invalid-input.log" && fail "operator source leaked"
+  [[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "invalid ACL changed live policy"
+  [[ $(sha256sum /etc/vpn-base/firewall.nft) == "$file_before" ]] || fail "invalid ACL changed file"
+done
+# A temporary copy changes only the test candidate. All transaction tasks and
+# real nft validation are the production role's implementation.
+cp -a "$ANSIBLE_DIR/roles/base" "$WORK/invalid-role"
+cp "$WORK/bad.nft" "$WORK/invalid-role/templates/firewall.nft.j2"
+cat > "$WORK/invalid-candidate.yml" <<EOF
+---
+- hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: $WORK/invalid-role
+        tasks_from: firewall
+EOF
+if "$AP" -i localhost, -c local -e @"$WORK/vars.json" "$WORK/invalid-candidate.yml" > "$WORK/invalid-candidate.log" 2>&1; then
+  fail "role accepted invalid nft candidate"
+fi
+recap "$WORK/invalid-candidate.log" | grep -q 'changed=0' || fail "invalid candidate changed persistent state"
+[[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "invalid candidate changed live policy"
+[[ $(sha256sum /etc/vpn-base/firewall.nft) == "$file_before" ]] || fail "invalid candidate changed file"
+assert_access
+
+# Exercise the real role transaction with one real nft failure AFTER a valid
+# nft -c. The wrapper delegates all commands to the installed nft binary; only
+# the first candidate apply is sent an invalid batch. This is fault injection,
+# not a substitute firewall implementation or a passing mocked nft result.
+cat > "$WORK/firewall-only.yml" <<EOF
+---
+- hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: $ANSIBLE_DIR/roles/base
+        tasks_from: firewall
+EOF
+printf '{"base_firewall_allow_icmp_echo": false}\n' > "$WORK/change.json"
+mv /usr/sbin/nft "$WORK/nft.real"
+cat > /usr/sbin/nft <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ \$# == 2 && \$1 == -f && \$2 == /run/vpn-base-firewall-*/candidate.nft && ! -e $WORK/failed-once ]]; then
+  touch $WORK/failed-once
+  exec $WORK/nft.real -f $WORK/bad.nft
+fi
+exec $WORK/nft.real "\$@"
+EOF
+chmod 755 /usr/sbin/nft
+if "$AP" -i localhost, -c local -e @"$WORK/vars.json" -e @"$WORK/change.json" "$WORK/firewall-only.yml" > "$WORK/apply-failure.log" 2>&1; then
+  fail "role ignored candidate application failure"
+fi
+mv "$WORK/nft.real" /usr/sbin/nft
+[[ -e $WORK/failed-once ]] || { cat "$WORK/apply-failure.log"; fail "application fault not exercised"; }
+[[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "rollback lost live policy"
+[[ $(sha256sum /etc/vpn-base/firewall.nft) == "$file_before" ]] || fail "rollback lost configuration"
+assert_access
+
+step "Изменение ACL и восстановление предыдущей собственной политики"
+python3 - "$WORK/vars.json" "$WORK/alternate.json" "$UNTRUST4" "$UNTRUST6" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+config['base_firewall_source_ports'][0]['source_cidrs'] = [sys.argv[3] + '/32', sys.argv[4] + '/128']
+with open(sys.argv[2], 'w') as output:
+    json.dump(config, output)
+PY
+local_play -e @"$WORK/alternate.json" -e @"$WORK/ack.json" > "$WORK/alternate.log" 2>&1 \
+  || { cat "$WORK/alternate.log"; fail "alternate ACL apply"; }
+for addr in "$HOST4" "$HOST6"; do
+  http_get untrusted "$addr" "$SOURCE_TCP" || fail "alternate allowed source denied"
+  http_get trusted "$addr" "$SOURCE_TCP" && fail "previous source still allowed"
+done
+nft -c -f "$WORK/previous.nft"
+nft -f "$WORK/previous.nft"
+install -m 644 "$WORK/previous.nft" /etc/vpn-base/firewall.nft
+assert_access
+remote_play > "$WORK/restored.log" 2>&1 || { cat "$WORK/restored.log"; fail "restored policy idempotence"; }
+expect_changed "$WORK/restored.log" 0
+
+step "Reload/restart сохраняют исходную политику доступа"
+systemctl reload vpn-base-firewall.service
+assert_access
+systemctl restart vpn-base-firewall.service
+assert_access
 systemctl restart nftables.service
 # PartOf propagation starts the owned unit asynchronously after nftables.
 for _ in {1..20}; do
   nft list table inet vpn_base >/dev/null 2>&1 && break
   sleep 0.5
 done
-nft list table inet vpn_base >/dev/null || fail "таблица потеряна после flush ruleset"
-in_ns trusted ssh "${SSH_OPTS[@]}" -i "$WORK/admin_new" "vpnadmin@$HOST4" true || fail "SSH после restart nftables"
-ok "таблица восстановлена, SSH работает"
+nft list table inet vpn_base >/dev/null || fail "owned table lost after nftables restart"
+assert_access
+for addr in "$HOST4" "$HOST6"; do
+  in_ns trusted ssh "${SSH_OPTS[@]}" -i "$WORK/admin_new" "vpnadmin@$addr" 'sudo -n true' || fail "fresh SSH after restart"
+done
+ok "packet access and fresh SSH survive reload/restart"
 
 step "Создание swap-файла при отсутствии swap"
 swapoff -a

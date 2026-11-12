@@ -34,5 +34,8 @@ jobs:
       - name: Unit-тесты и отказы роли без изменения хоста
         run: .venv/bin/python -m unittest discover --start-directory ansible/roles/base/tests --verbose
       # GitHub-hosted runner is a disposable VM destroyed after the job.
-      - name: Проверка роли на одноразовой VM
-        run: sudo VPN_BASE_DISPOSABLE_GUEST=yes bash ansible/roles/base/tests/runtime_vm.sh
+      - name: IPv4/IPv6 source ACL, SSH, NAT egress, PMTU и rollback на одноразовой VM
+        run: >-
+          sudo VPN_BASE_DISPOSABLE_GUEST=yes
+          GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"
+          bash ansible/roles/base/tests/runtime_vm.sh

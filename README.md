@@ -18,6 +18,8 @@
   способы проверки.
 - [Ansible: контракт inventory](docs/ANSIBLE.md) — синтетическая топология и её
   проверка (`make -C ansible validate`); развёртывание не реализовано.
+- [Source ACL в роли base](docs/BASE_ROLE.md) — публичные и source-restricted
+  порты, SSH/IPv6 и транзакционная собственная таблица nftables.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
   (`version`, `config validate`); к панели и узлам не обращается.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
@@ -57,6 +59,11 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 защиту GitHub. `make check` **не сканирует всю историю Git** и не заменяет
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
+
+Runtime-сценарий [base](.github/workflows/base.yml) запускается только на
+одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
+компонента, фактические результаты — в его PR. Production-rollout и российский
+пилот этим не выполняются.
 
 ## Управление изменениями
 

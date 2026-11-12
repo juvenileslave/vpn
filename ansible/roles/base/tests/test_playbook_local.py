@@ -40,6 +40,22 @@ OWNED_PATHS = [
 ]
 
 
+def setUpModule():
+    if sys.platform != "linux":
+        raise unittest.SkipTest("Local Ansible scenarios require a Debian/Ubuntu Linux host")
+    release = dict(line.split("=", 1) for line in Path("/etc/os-release").read_text().splitlines()
+                   if "=" in line)
+    if release.get("ID", "").strip('"') not in ("debian", "ubuntu"):
+        raise unittest.SkipTest("Local Ansible scenarios require Debian or Ubuntu")
+    if os.geteuid() != 0:
+        try:
+            result = subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            raise unittest.SkipTest("Local Ansible scenarios require root or passwordless sudo")
+        if result.returncode != 0:
+            raise unittest.SkipTest("Local Ansible scenarios require root or passwordless sudo")
+
+
 def run_playbook(extra_vars: dict, *args: str) -> tuple[int, str, tuple[int, ...]]:
     with tempfile.TemporaryDirectory() as tmp:
         vars_file = Path(tmp) / "vars.json"
@@ -105,11 +121,27 @@ class RejectionTest(unittest.TestCase):
     def test_string_toggle(self):
         self.assert_rejected({"base_firewall_enabled": "false"}, "base_firewall_enabled")
 
+    def test_invalid_restricted_ports_fail_before_mutation_without_echo(self):
+        for cidr in ("198.51.100.77/24", "0.0.0.0/0", "2001:db8::/31", "invalid"):
+            with self.subTest(cidr=cidr):
+                output = self.assert_rejected({"base_firewall_source_ports": [
+                    {"proto": "tcp", "port": 8443, "source_cidrs": [cidr]}]},
+                    "base_firewall_source_ports[0].source_cidrs[0]")
+                self.assertNotIn(cidr, output)
+        self.assert_rejected({"base_firewall_source_ports": [
+            {"proto": "tcp", "port": 8443, "source_cidrs": []}]}, "source_cidrs")
+        self.assert_rejected({
+            "base_firewall_source_ports": [{"proto": "tcp", "port": 8443,
+                                            "source_cidrs": ["198.51.100.77/32"]}],
+            "base_firewall_vpn_ports": [{"proto": "tcp", "port": 8443}],
+        }, "конфликт")
+
 
 class DisabledManagementTest(unittest.TestCase):
     def test_all_management_disabled_is_a_no_op(self):
         before = {path: os.path.exists(path) for path in OWNED_PATHS}
-        rc, output, recap = run_playbook(dict(DISABLED))
+        rc, output, recap = run_playbook(dict(DISABLED, base_firewall_source_ports=[
+            {"proto": "tcp", "port": 8443, "source_cidrs": ["192.0.2.2/32"]}]))
         self.assertEqual(rc, 0, output)
         self.assertEqual(recap[1:], (0, 0, 0), output)
         self.assertEqual({path: os.path.exists(path) for path in OWNED_PATHS}, before)

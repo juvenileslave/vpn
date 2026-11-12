@@ -1,0 +1,92 @@
+---
+- name: Save previous owned configuration inside the transaction
+  ansible.builtin.copy:
+    src: /etc/vpn-base/firewall.nft
+    dest: "{{ base_firewall_transaction.path }}/previous.nft"
+    remote_src: true
+    mode: "0600"
+  when: base_firewall_previous.stat.exists
+  changed_when: false
+  no_log: true
+
+- name: Save exact live owned policy for rollback
+  ansible.builtin.copy:
+    content: "table inet vpn_base\ndelete table inet vpn_base\n{{ base_firewall_live.stdout }}\n"
+    dest: "{{ base_firewall_transaction.path }}/rollback.nft"
+    mode: "0600"
+  when: base_firewall_live.rc == 0
+  changed_when: false
+  no_log: true
+  diff: false
+
+- name: Apply and persist the validated candidate
+  block:
+    - name: Validate candidate again immediately before application
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, -c, -f, "{{ base_firewall_transaction.path }}/candidate.nft"]
+      changed_when: false
+      no_log: true
+
+    # nft -f replaces only the owned table in one kernel transaction. Persist
+    # only AFTER successful application, so a failed nft call cannot publish
+    # a broken boot/reload configuration.
+    - name: Apply the candidate as one nftables transaction
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, -f, "{{ base_firewall_transaction.path }}/candidate.nft"]
+      changed_when: true
+      no_log: true
+
+    - name: Atomically persist successfully applied policy
+      ansible.builtin.copy:
+        src: "{{ base_firewall_transaction.path }}/candidate.nft"
+        dest: /etc/vpn-base/firewall.nft
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      no_log: true
+      diff: false
+  rescue:
+    - name: Restore previously loaded owned policy
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, -f, "{{ base_firewall_transaction.path }}/rollback.nft"]
+      when: base_firewall_live.rc == 0
+      changed_when: true
+      no_log: true
+
+    - name: Inspect first-application failure state
+      ansible.builtin.command: /usr/sbin/nft list table inet vpn_base
+      register: base_firewall_failed_live
+      when: base_firewall_live.rc != 0
+      changed_when: false
+      failed_when: base_firewall_failed_live.rc not in [0, 1]
+      no_log: true
+
+    - name: Remove only newly created owned table after first-application failure
+      ansible.builtin.command: /usr/sbin/nft delete table inet vpn_base
+      when:
+        - base_firewall_live.rc != 0
+        - base_firewall_failed_live.rc == 0
+      changed_when: true
+
+    - name: Restore previous persistent owned configuration
+      ansible.builtin.copy:
+        src: "{{ base_firewall_transaction.path }}/previous.nft"
+        dest: /etc/vpn-base/firewall.nft
+        remote_src: true
+        owner: root
+        group: root
+        mode: "{{ base_firewall_previous.stat.mode }}"
+      when: base_firewall_previous.stat.exists
+      no_log: true
+      diff: false
+
+    - name: Remove only newly created configuration after first-application failure
+      ansible.builtin.file:
+        path: /etc/vpn-base/firewall.nft
+        state: absent
+      when: not base_firewall_previous.stat.exists
+
+    - name: Stop serial application after restoration
+      ansible.builtin.fail:
+        msg: Ошибка применения firewall; предыдущая собственная политика и конфигурация восстановлены.

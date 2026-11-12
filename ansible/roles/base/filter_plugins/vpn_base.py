@@ -42,6 +42,7 @@ SWAP_FILE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 LISTENER = re.compile(r"^(tcp|udp)/([0-9]{1,5})$")
 USER_FIELDS = {"name", "authorized_keys", "sudo"}
 PORT_FIELDS = {"proto", "port"}
+SOURCE_PORT_FIELDS = PORT_FIELDS | {"source_cidrs"}
 
 
 def _is_int(value) -> bool:
@@ -130,11 +131,25 @@ def cidr_error(value) -> str | None:
     if network.prefixlen < MIN_PREFIX[network.version]:
         return (f"слишком широкая сеть: префикс короче /{MIN_PREFIX[network.version]}"
                 f" для IPv{network.version}")
-    if network.is_multicast or network.is_unspecified or network.is_loopback:
+    if (network.is_multicast or network.is_unspecified or network.is_loopback
+            or network.network_address.is_unspecified):
         return "multicast, loopback и unspecified сети недопустимы"
     if network.version == 6 and network.network_address.ipv4_mapped is not None:
         return "IPv4-mapped IPv6 недопустим, укажите IPv4 CIDR"
     return None
+
+
+def source_cidr_error(value) -> str | None:
+    """Source ACLs may declare the exact colocated loopback control plane."""
+    reason = cidr_error(value)
+    if reason and isinstance(value, str) and "/" in value:
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError:
+            return reason
+        if str(network) in ("127.0.0.1/32", "::1/128"):
+            return None
+    return reason
 
 
 def split_cidrs(cidrs) -> dict:
@@ -184,10 +199,11 @@ def _parse_listeners(ss_output: str) -> set[tuple[str, int]]:
 
 
 def uncovered_listeners(ss_output, ssh_port, vpn_ports, acknowledged,
-                        allow_dhcpv6_client=True) -> list[str]:
+                        allow_dhcpv6_client=True, source_ports=None) -> list[str]:
     """Non-loopback listeners that the firewall would block unexpectedly."""
     covered = {("tcp", int(ssh_port))}
     covered |= {(item["proto"], int(item["port"])) for item in vpn_ports or []}
+    covered |= {(item["proto"], item["port"]) for item in source_ports or []}
     # DHCPv4 replies arrive as established traffic or through packet sockets.
     covered.add(("udp", 68))
     if allow_dhcpv6_client:
@@ -296,8 +312,9 @@ def input_errors(cfg) -> list[str]:
         if not isinstance(item, dict) or set(item) != PORT_FIELDS:
             errors.append(f"{path}: ожидается mapping с полями proto и port")
             continue
-        if item["proto"] not in ("tcp", "udp"):
+        if not isinstance(item["proto"], str) or item["proto"] not in ("tcp", "udp"):
             errors.append(f"{path}.proto: допустимо tcp или udp")
+            continue
         if not _is_int(item["port"]) or not 1 <= item["port"] <= 65535:
             errors.append(f"{path}.port: ожидается целое 1–65535")
             continue
@@ -306,6 +323,44 @@ def input_errors(cfg) -> list[str]:
         if (item["proto"], item["port"]) in seen:
             errors.append(f"{path}: повтор порта")
         seen.add((item["proto"], item["port"]))
+
+    source_ports = cfg.get("base_firewall_source_ports", [])
+    if not isinstance(source_ports, list):
+        errors.append("base_firewall_source_ports: ожидается список")
+        source_ports = []
+    for index, item in enumerate(source_ports):
+        path = f"base_firewall_source_ports[{index}]"
+        if not isinstance(item, dict) or set(item) != SOURCE_PORT_FIELDS:
+            errors.append(f"{path}: ожидается mapping с полями proto, port и source_cidrs")
+            continue
+        proto, port = item["proto"], item["port"]
+        valid_proto = isinstance(proto, str) and proto in ("tcp", "udp")
+        valid_port = _is_int(port) and 1 <= port <= 65535
+        if not valid_proto:
+            errors.append(f"{path}.proto: допустимо tcp или udp")
+        if not valid_port:
+            errors.append(f"{path}.port: ожидается целое 1–65535")
+        if valid_proto and valid_port:
+            if proto == "tcp" and port == ssh_port:
+                errors.append(f"{path}: SSH регулируется только base_ssh_trusted_cidrs")
+            if (proto, port) in seen:
+                errors.append(f"{path}: повтор или конфликт с публичным портом")
+            seen.add((proto, port))
+        sources = item["source_cidrs"]
+        if not isinstance(sources, list) or not sources:
+            errors.append(f"{path}.source_cidrs: ожидается непустой список CIDR")
+            continue
+        normalized = set()
+        for source_index, source in enumerate(sources):
+            source_path = f"{path}.source_cidrs[{source_index}]"
+            reason = source_cidr_error(source)
+            if reason:
+                errors.append(f"{source_path}: {reason}")
+                continue
+            network = ipaddress.ip_network(source, strict=True)
+            if str(network) in normalized:
+                errors.append(f"{source_path}: повтор CIDR")
+            normalized.add(str(network))
 
     acknowledged = cfg.get("base_firewall_acknowledged_closed_ports")
     if not isinstance(acknowledged, list) or not all(
