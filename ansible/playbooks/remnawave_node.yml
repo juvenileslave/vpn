@@ -1,0 +1,9 @@
+---
+# Host-network node only; base ACL and Docker must already be installed.
+- name: Remnawave node
+  hosts: "{{ remnawave_node_hosts | default('exit:relay') }}"
+  gather_facts: false
+  become: true
+  serial: 1
+  roles:
+    - role: ../roles/remnawave_node

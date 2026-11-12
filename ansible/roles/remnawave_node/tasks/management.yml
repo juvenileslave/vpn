@@ -1,0 +1,44 @@
+---
+- name: Allocate management probe on the actual control-plane host
+  ansible.builtin.tempfile:
+    state: directory
+    path: /run
+    prefix: vpn-node-cp-
+  register: _remnawave_node_cp_stage
+  delegate_to: "{{ remnawave_node_management_delegate }}"
+  changed_when: false
+
+- name: Exercise the intended authenticated control path
+  block:
+    - name: Stage the public API client on the CP
+      ansible.builtin.copy:
+        src: lifecycle.py
+        dest: "{{ _remnawave_node_cp_stage.path }}/lifecycle.py"
+        mode: "0600"
+      delegate_to: "{{ remnawave_node_management_delegate }}"
+      changed_when: false
+
+    - name: Stage transient CP credentials
+      ansible.builtin.copy:
+        content: "{{ {'secret': _remnawave_node_secret, 'credentials': _remnawave_node_credentials, 'address': remnawave_node_management_address, 'source': remnawave_node_management_source, 'port': remnawave_node_api_port, 'require_xray': _remnawave_node_config | length > 0} | to_json }}"
+        dest: "{{ _remnawave_node_cp_stage.path }}/input.json"
+        mode: "0600"
+      delegate_to: "{{ remnawave_node_management_delegate }}"
+      changed_when: false
+      no_log: true
+      diff: false
+
+    - name: Perform genuine mTLS and JWT health operation from the CP source
+      ansible.builtin.command:
+        argv: [python3, "{{ _remnawave_node_cp_stage.path }}/lifecycle.py", probe, "{{ _remnawave_node_cp_stage.path }}"]
+      delegate_to: "{{ remnawave_node_management_delegate }}"
+      changed_when: false
+      no_log: true
+  always:
+    - name: Erase CP probe credentials
+      ansible.builtin.file:
+        path: "{{ _remnawave_node_cp_stage.path }}"
+        state: absent
+      delegate_to: "{{ remnawave_node_management_delegate }}"
+      changed_when: false
+      no_log: true

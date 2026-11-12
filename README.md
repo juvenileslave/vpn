@@ -18,6 +18,8 @@
   способы проверки.
 - [Ansible: контракт inventory](docs/ANSIBLE.md) — синтетическая топология и её
   проверка (`make -C ansible validate`); развёртывание не реализовано.
+- [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
+  management-путь с mTLS/JWT и source ACL роли base.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
   (`version`, `config validate`); к панели и узлам не обращается.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
@@ -57,6 +59,11 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 защиту GitHub. `make check` **не сканирует всю историю Git** и не заменяет
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
+
+Runtime-сценарий [RemnaNode](.github/workflows/remnawave-node.yml) запускается только на
+одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
+компонента, фактические результаты — в его PR. Production-rollout и российский
+пилот этим не выполняются.
 
 ## Управление изменениями
 

@@ -1,0 +1,119 @@
+---
+- name: Validate node inputs before host mutation
+  ansible.builtin.assert:
+    that:
+      - cp_placement in ['exit', 'dedicated']
+      - remnawave_node_state in ['present', 'restarted', 'rollback']
+      - remnawave_node_image == 'ghcr.io/remnawave/node:3.4.5@sha256:8f5a41708dfa86acc2561a520c9b40e2ff30812a16c28cf6bba6c365ca0f7d65'
+      - remnawave_node_dir is match('^/opt/[a-zA-Z0-9_-]+$')
+      - remnawave_node_timeout is integer and remnawave_node_timeout is not boolean and remnawave_node_timeout >= 30
+      - remnawave_node_secret_key_file | length > 0 or remnawave_node_secret_key | length > 0
+      - not (remnawave_node_secret_key_file | length > 0 and remnawave_node_secret_key | length > 0)
+      - remnawave_node_management_credentials_file is match('^/')
+      - remnawave_node_management_delegate | length > 0
+      - remnawave_node_management_address | length > 0
+      - remnawave_node_management_source | length > 0
+      - remnawave_node_xray_config is mapping
+      - not (remnawave_node_xray_config | length > 0 and remnawave_node_xray_config_file | length > 0)
+      - node_port_allow | remnawave_node_acl_valid(base_firewall_source_ports, remnawave_node_api_port, base_firewall_vpn_ports, base_ssh_port, cp_placement, remnawave_node_management_source, remnawave_node_management_address)
+    fail_msg: Invalid node input or management path; see REMNAWAVE_NODE.md.
+    quiet: true
+  no_log: true
+
+- name: Load controller-owned credentials and optional configuration
+  ansible.builtin.set_fact:
+    _remnawave_node_secret: "{{ lookup('ansible.builtin.file', remnawave_node_secret_key_file) | trim if remnawave_node_secret_key_file | length else remnawave_node_secret_key }}"
+    _remnawave_node_credentials: "{{ lookup('ansible.builtin.file', remnawave_node_management_credentials_file) | from_json }}"
+    _remnawave_node_config: "{{ lookup('ansible.builtin.file', remnawave_node_xray_config_file) | from_json if remnawave_node_xray_config_file | length else remnawave_node_xray_config }}"
+  no_log: true
+
+- name: Allocate private transaction directory
+  ansible.builtin.tempfile:
+    state: directory
+    path: /run
+    prefix: vpn-node-
+  register: _remnawave_node_stage
+  check_mode: false
+  changed_when: false
+
+- name: Prevalidate and apply only the owned deployment
+  block:
+    - name: Stage executable transaction and authenticated health probe
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ _remnawave_node_stage.path }}/{{ item }}"
+        mode: "0600"
+      loop: [lifecycle.py, health.cjs]
+      check_mode: false
+      changed_when: false
+
+    - name: Stage the candidate compose model
+      ansible.builtin.template:
+        src: compose.yaml.j2
+        dest: "{{ _remnawave_node_stage.path }}/compose.yaml"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+      diff: false
+
+    - name: Stage secret inputs without logs or diffs
+      ansible.builtin.copy:
+        content: "{{ {'secret': _remnawave_node_secret, 'credentials': _remnawave_node_credentials, 'config': _remnawave_node_config, 'port': remnawave_node_api_port, 'sources': node_port_allow, 'directory': remnawave_node_dir, 'timeout': remnawave_node_timeout, 'state': remnawave_node_state} | to_json }}"
+        dest: "{{ _remnawave_node_stage.path }}/input.json"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+      no_log: true
+      diff: false
+
+    - name: Validate candidate PKI compose and active base ACL
+      ansible.builtin.command:
+        argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", validate, "{{ _remnawave_node_stage.path }}"]
+      check_mode: false
+      changed_when: false
+      no_log: true
+
+    - name: Roll out with authenticated health gate and credential-safe restoration
+      ansible.builtin.command:
+        argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", deploy, "{{ _remnawave_node_stage.path }}"]
+      register: _remnawave_node_result
+      changed_when: (_remnawave_node_result.stdout | from_json).changed
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Verify intended CP path with current credentials
+      ansible.builtin.include_tasks: management.yml
+      when: not ansible_check_mode
+    - name: Commit only after the intended control-plane path succeeds
+      ansible.builtin.command:
+        argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", commit, "{{ _remnawave_node_stage.path }}"]
+      changed_when: false
+      when: not ansible_check_mode
+      no_log: true
+
+  rescue:
+    - name: Restore checked deployment without undoing credential revocation
+      ansible.builtin.command:
+        argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", abort, "{{ _remnawave_node_stage.path }}"]
+      register: _remnawave_node_abort
+      changed_when: (_remnawave_node_abort.stdout | from_json).changed
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Verify restored control-plane access with current credentials
+      ansible.builtin.include_tasks: management.yml
+      when:
+        - not ansible_check_mode
+        - (_remnawave_node_abort.stdout | from_json).restored | default(false)
+
+    - name: Stop rollout after a failed gate even when restoration succeeded
+      ansible.builtin.fail:
+        msg: Node rollout failed; checked deployment restoration was attempted. No successful deployment is reported.
+  always:
+    - name: Remove transaction credentials
+      ansible.builtin.file:
+        path: "{{ _remnawave_node_stage.path }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+      no_log: true
