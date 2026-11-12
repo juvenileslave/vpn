@@ -16,6 +16,19 @@ cleanup() {
   ip link delete v-pmtu 2>/dev/null || true
 }
 trap cleanup EXIT
+diagnose() {
+  printf '[DEBUG-pmtu] failing line %s\n' "$1" >&2
+  ip -n pmtu-client route get 192.0.2.1 >&2 || true
+  ip -n pmtu-client -6 route get 2001:db8:200::1 >&2 || true
+  ip -n pmtu-router route get 203.0.113.2 >&2 || true
+  ip -n pmtu-router -6 route get 2001:db8:201::2 >&2 || true
+  ip route get 203.0.113.2 >&2 || true
+  ip -6 route get 2001:db8:201::2 >&2 || true
+  ip -n pmtu-client neigh show >&2 || true
+  ip -n pmtu-router neigh show >&2 || true
+  ip neigh show dev v-pmtu >&2 || true
+}
+trap 'diagnose "$LINENO"' ERR
 ip netns add pmtu-router
 ip netns add pmtu-client
 ip link add v-pmtu type veth peer name upstream netns pmtu-router
@@ -43,8 +56,8 @@ ip netns exec pmtu-router sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.for
 # Disable black-hole fallback on the HOST: transfer must depend on ICMP PMTU.
 # The original setting is restored by the exit trap; forwarding is never changed.
 sysctl -qw net.ipv4.tcp_mtu_probing=0
-ip netns exec pmtu-client ping -c1 -W2 192.0.2.1 >/dev/null
-ip netns exec pmtu-client ping -c1 -W2 2001:db8:200::1 >/dev/null
+ip netns exec pmtu-client ping -c1 -W2 192.0.2.1
+ip netns exec pmtu-client ping -c1 -W2 2001:db8:200::1
 # Disable segmentation offload on the test veths so tcpdump and the router see
 # real MTU-sized packets, not oversized local GSO aggregates.
 ethtool -K v-pmtu tso off gso off gro off >/dev/null
