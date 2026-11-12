@@ -4,7 +4,7 @@
 [архитектурного плана](ARCHITECTURE_PLAN.md): перенос уроков в «инварианты»).
 Решения архитектуры собраны в [реестре решений](DECISIONS.md).
 
-- **Статус:** действующий; дата: 2026-11-10.
+- **Статус:** действующий; дата: 2026-11-12.
 - **Источник истины:** [docs/ARCHITECTURE_PLAN.md](ARCHITECTURE_PLAN.md),
   [AGENTS.md](../AGENTS.md), [CONTRIBUTING.md](../CONTRIBUTING.md) и
   [README.md](../README.md). При расхождении правы они.
@@ -17,14 +17,16 @@
 ## Репозиторий и публикация
 
 1. **Нет прямых коммитов в `master`.**
-   - Правило: изменения идут только через feature-ветку форка и PR в
-     `juvenileslave/vpn:master`; нужны успешные `Repository checks` и
-     `Secret scan`, актуальная база, разрешённые обсуждения и approval
-     CODEOWNER `juvenileslave`. Force push, удаление ветки и административный
-     bypass запрещены; рабочий агент не одобряет и не сливает PR.
-   - Почему: каждое изменение проходит review владельца и обязательные проверки.
-   - Проверка: ruleset `master` в GitHub ([декларация](../.github/rulesets/master.json)),
-     локальный hook `no-commit-to-branch`, review владельца. Подробно —
+   - Правило целевой политики: изменения идут под `juvenileslave` через
+     feature-ветку основного репозитория и PR в `juvenileslave/vpn:master`.
+     Нужны успешные `Repository checks` и `Secret scan` и актуальная база;
+     review рекомендован, но не обязателен для слияния. Force push, удаление
+     ветки и административный bypass запрещены; агент не сливает PR без
+     отдельного явного поручения владельца.
+   - Почему: единый рабочий аккаунт использует PR и CI без самоодобрения.
+   - Проверка: обязательные CI jobs, локальный hook `no-commit-to-branch` и
+     фактический ruleset `master` в GitHub ([декларация](../.github/rulesets/master.json)).
+     Снятие review-gate подготовлено локально, не применено к серверу. Подробно —
      [CONTRIBUTING.md](../CONTRIBUTING.md), [AGENTS.md](../AGENTS.md),
      [README.md](../README.md).
 
@@ -43,7 +45,7 @@
    - Правило: план не переписывается и не форматируется; изменение требует
      отдельного явного поручения владельца.
    - Почему: план — исходный документ и источник истины для реестра решений.
-   - Проверка: `git diff upstream/master -- docs/ARCHITECTURE_PLAN.md` пуст;
+   - Проверка: `git diff origin/master -- docs/ARCHITECTURE_PLAN.md` пуст;
      whitespace/EOF hooks исключают файл; пункт шаблона PR; review владельца.
      См. [AGENTS.md](../AGENTS.md), [README.md](../README.md).
 

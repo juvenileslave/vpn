@@ -60,13 +60,19 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 
 ## Управление изменениями
 
-Разработка выполняется в [форке popularhono/vpn](https://github.com/popularhono/vpn):
-`origin` — форк, `upstream` — `juvenileslave/vpn`. Feature-ветка из форка →
-PR в основной `master` → успешные `Repository checks` и `Secret scan` →
-approval и squash merge от `juvenileslave`.
+Разработка, коммиты, push, issues и PR выполняются только под основным аккаунтом
+`juvenileslave` в [juvenileslave/vpn](https://github.com/juvenileslave/vpn).
+`origin` — основной репозиторий. Feature-ветка от `origin/master` → PR в `master` →
+успешные `Repository checks` и `Secret scan` →
+squash merge владельцем. Рабочий аккаунт `popularhono` и его форк не используются.
 
-Обязателен один approval от владельца CODEOWNERS. Перед слиянием база должна
-быть актуальна, обсуждения разрешены, последний push одобрен другим аккаунтом.
+В целевой политике review рекомендован, но не является обязательным merge-gate.
+PR, актуальная база и успешные обязательные проверки сохраняются.
+
+Отмена обязательных approvals и разрешения review threads подготовлена в
+`.github/rulesets/master.json`, но не применена к GitHub. Локальная правка
+файлов не отключает действующие серверные требования.
+
 [Защита master активна в GitHub](https://github.com/juvenileslave/vpn/rules/26988307),
 без bypass, force-push и удаления ветки. Подробности — в
 [CONTRIBUTING.md](CONTRIBUTING.md).
