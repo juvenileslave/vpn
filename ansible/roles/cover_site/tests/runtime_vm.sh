@@ -13,7 +13,8 @@ done
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 AP=$ROOT/.venv/bin/ansible-playbook
 [[ -x $AP ]] || { echo 'Run make -C ansible bootstrap first.' >&2; exit 2; }
-WORK=$(mktemp -d /var/tmp/vpn-cover-ci.XXXXXX)
+# The real renewal unit has PrivateTmp=true; its test CA must remain visible.
+WORK=$(mktemp -d /var/lib/vpn-cover-ci.XXXXXX)
 chmod 755 "$WORK"
 export ANSIBLE_CONFIG=$ROOT/ansible/ansible.cfg ANSIBLE_NOCOLOR=1 DEBIAN_FRONTEND=noninteractive
 HOST=cover.example.test PORT=18443
@@ -229,7 +230,10 @@ expect_failure "$LIFECYCLE" renew --force-renewal
 [[ $(active) == "$AFTER_RENEW" ]] || fail 'Failed ACME renewal changed active release'
 healthy
 chmod 755 /var/www/cover-site-acme/.well-known/acme-challenge
-systemctl start cover-site-renew.service
+if ! systemctl start cover-site-renew.service; then
+  journalctl --unit=cover-site-renew.service --no-pager --lines=20 --output=cat
+  fail 'Renewal service failed inside its actual sandbox'
+fi
 systemctl is-enabled cover-site-renew.timer
 systemctl is-active cover-site-renew.timer
 
