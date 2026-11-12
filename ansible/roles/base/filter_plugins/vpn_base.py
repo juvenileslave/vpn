@@ -343,6 +343,8 @@ def input_errors(cfg) -> list[str]:
         if valid_proto and valid_port:
             if proto == "tcp" and port == ssh_port:
                 errors.append(f"{path}: SSH регулируется только base_ssh_trusted_cidrs")
+            if proto == "udp" and port == 546 and cfg.get("base_firewall_allow_dhcpv6_client") is True:
+                errors.append(f"{path}: UDP/546 несовместим с base_firewall_allow_dhcpv6_client=true")
             if (proto, port) in seen:
                 errors.append(f"{path}: повтор или конфликт с публичным портом")
             seen.add((proto, port))

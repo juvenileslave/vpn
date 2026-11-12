@@ -26,6 +26,7 @@ cleanup() {
   for ns in trusted untrusted nated pmtu-router pmtu-client; do ip netns delete "$ns" 2>/dev/null || true; done
   # A fault-injection wrapper must never survive the scenario.
   if [[ -e $WORK/nft.real ]]; then mv "$WORK/nft.real" /usr/sbin/nft; fi
+  if [[ -e $WORK/systemctl.real ]]; then mv "$WORK/systemctl.real" /usr/bin/systemctl; fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -49,7 +50,7 @@ expect_changed() {  # log, expected changed count
 local_play() { "$AP" -i localhost, -c local -e ansible_python_interpreter=/usr/bin/python3 "$@" "$PLAYBOOK"; }
 in_ns() { ip netns exec "$@"; }
 tcp_open() { in_ns "$1" timeout 5 bash -c "exec 3<>/dev/tcp/$2/$3" 2>/dev/null; }
-http_get() { in_ns "$1" python3 "$SERVICE" get "$2" "$3" >/dev/null 2>&1; }
+http_get() { in_ns "$1" python3 "$SERVICE" get "$2" "$3" "${@:4}" >/dev/null 2>&1; }
 udp_get() { in_ns "$1" python3 "$SERVICE" udp "$2" "$3" >/dev/null 2>&1; }
 assert_access() {
   local addr
@@ -180,6 +181,65 @@ ack=$( { printf '%s\n' "${uncovered[@]}" | grep -Ev "^(tcp/($VPN_TCP|$SOURCE_TCP
   | sort -u | sed 's/.*/"&"/' | paste -sd, -)
 printf '{"base_firewall_acknowledged_closed_ports": [%s]}\n' "$ack" > "$WORK/ack.json"
 
+# Use the real firewall role without unrelated package/user changes for faults.
+cat > "$WORK/firewall-only.yml" <<EOF
+---
+- hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: $ANSIBLE_DIR/roles/base
+        tasks_from: firewall
+EOF
+
+step "Ошибка настоящего loader при первом применении удаляет только новое состояние"
+[[ ! -e /etc/systemd/system/vpn-base-firewall.service && ! -L /etc/systemd/system/vpn-base-firewall.service ]] \
+  || fail "одноразовый стенд уже содержит owned loader"
+[[ ! -e /etc/vpn-base/firewall.nft ]] || fail "одноразовый стенд уже содержит owned policy file"
+cat > "$WORK/loader-bad.nft" <<'EOF'
+table inet vpn_base { chain input { type filter hook input priority filter; policy bogus; } }
+EOF
+cp -a "$ANSIBLE_DIR/roles/base" "$WORK/loader-failure-role"
+cat >> "$WORK/loader-failure-role/templates/vpn-base-firewall.service.j2" <<EOF
+
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/nft -f $WORK/loader-bad.nft
+EOF
+cat > "$WORK/loader-failure.yml" <<EOF
+---
+- hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: $WORK/loader-failure-role
+        tasks_from: firewall
+EOF
+loader_since=$(date '+%Y-%m-%d %H:%M:%S')
+if "$AP" -i localhost, -c local -e @"$WORK/vars.json" "$WORK/loader-failure.yml" > "$WORK/first-loader-failure.log" 2>&1; then
+  fail "роль проигнорировала реальную ошибку ExecStart loader"
+fi
+grep -q 'Ошибка firewall на этапе Enable and start firewall loader' "$WORK/first-loader-failure.log" \
+  || { cat "$WORK/first-loader-failure.log"; fail "отказ не достиг старта loader"; }
+journalctl -u vpn-base-firewall.service --since "$loader_since" --no-pager > "$WORK/first-loader-journal.log"
+grep -q 'status=1/FAILURE' "$WORK/first-loader-journal.log" \
+  || { cat "$WORK/first-loader-journal.log"; fail "нет реального отказа процесса nft в loader"; }
+nft list table inet vpn_base >/dev/null 2>&1 && fail "новая owned table осталась после отказа loader"
+[[ ! -e /etc/vpn-base/firewall.nft ]] || fail "новый owned policy file остался после отказа loader"
+[[ ! -e /etc/systemd/system/vpn-base-firewall.service && ! -L /etc/systemd/system/vpn-base-firewall.service ]] \
+  || fail "новый owned loader остался после отказа"
+systemctl is-active --quiet vpn-base-firewall.service && fail "новый loader остался активным"
+systemctl is-enabled --quiet vpn-base-firewall.service && fail "новый loader остался enabled"
+for addr in "$HOST4" "$HOST6"; do
+  http_get untrusted "$addr" "$SOURCE_TCP" || fail "после first-loader rollback осталась ограничивающая политика"
+  in_ns trusted ssh "${SSH_OPTS[@]}" -i "$WORK/admin_old" "vpnadmin@$addr" true || fail "SSH потерян после first-loader rollback"
+done
+snapshot > "$WORK/first-loader-state.after"
+diff -u "$WORK/state.before" "$WORK/first-loader-state.after" || fail "loader failure изменил постороннее состояние"
+ok "настоящий ExecStart отказал; новое состояние удалено, прежний доступ и SSH сохранены"
+
 step "Первое применение (локально)"
 local_play -e @"$WORK/vars.json" -e @"$WORK/ack.json" > "$WORK/apply1.log" 2>&1 \
   || { cat "$WORK/apply1.log"; fail "первое применение"; }
@@ -253,11 +313,10 @@ ip -n nated addr add 198.51.100.4/24 dev eth0
 ip -n nated addr add "$NAT4/24" dev eth0
 ip -n nated -6 addr add 2001:db8:100::4/64 dev eth0 nodad
 ip -n nated -6 addr add "$NAT6/64" dev eth0 nodad
-for addr in "$HOST4" "$HOST6"; do
-  http_get nated "$addr" "$SOURCE_TCP" && fail "undeclared pre-NAT source admitted"
-done
-in_ns nated python3 "$SERVICE" peer "$HOST4" "$VPN_TCP" 198.51.100.4
-in_ns nated python3 "$SERVICE" peer "$HOST6" "$VPN_TCP" 2001:db8:100::4
+http_get nated "$HOST4" "$SOURCE_TCP" --source-address 198.51.100.4 && fail "undeclared pre-NAT IPv4 source admitted"
+http_get nated "$HOST6" "$SOURCE_TCP" --source-address 2001:db8:100::4 && fail "undeclared pre-NAT IPv6 source admitted"
+in_ns nated python3 "$SERVICE" peer "$HOST4" "$VPN_TCP" 198.51.100.4 --source-address 198.51.100.4
+in_ns nated python3 "$SERVICE" peer "$HOST6" "$VPN_TCP" 2001:db8:100::4 --source-address 2001:db8:100::4
 in_ns nated nft -f - <<EOF
 table ip relay_nat {
   chain postrouting { type nat hook postrouting priority srcnat; policy accept;
@@ -270,8 +329,8 @@ table ip6 relay_nat {
   }
 }
 EOF
-in_ns nated python3 "$SERVICE" peer "$HOST4" "$SOURCE_TCP" "$NAT4"
-in_ns nated python3 "$SERVICE" peer "$HOST6" "$SOURCE_TCP" "$NAT6"
+in_ns nated python3 "$SERVICE" peer "$HOST4" "$SOURCE_TCP" "$NAT4" --source-address 198.51.100.4
+in_ns nated python3 "$SERVICE" peer "$HOST6" "$SOURCE_TCP" "$NAT6" --source-address 2001:db8:100::4
 ok "наблюдаемые NAT egress совпадают с явно заявленными /32 и /128"
 
 step "Реальный IPv4/IPv6 PMTU и передача данных через уменьшенный MTU"
@@ -349,16 +408,6 @@ assert_access
 # nft -c. The wrapper delegates all commands to the installed nft binary; only
 # the first candidate apply is sent an invalid batch. This is fault injection,
 # not a substitute firewall implementation or a passing mocked nft result.
-cat > "$WORK/firewall-only.yml" <<EOF
----
-- hosts: localhost
-  gather_facts: false
-  become: true
-  tasks:
-    - ansible.builtin.include_role:
-        name: $ANSIBLE_DIR/roles/base
-        tasks_from: firewall
-EOF
 printf '{"base_firewall_allow_icmp_echo": false}\n' > "$WORK/change.json"
 mv /usr/sbin/nft "$WORK/nft.real"
 cat > /usr/sbin/nft <<EOF
@@ -379,6 +428,108 @@ mv "$WORK/nft.real" /usr/sbin/nft
 [[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "rollback lost live policy"
 [[ $(sha256sum /etc/vpn-base/firewall.nft) == "$file_before" ]] || fail "rollback lost configuration"
 assert_access
+
+step "Отказ reload loader восстанавливает предыдущую active/enabled политику"
+cp -a "$ANSIBLE_DIR/roles/base" "$WORK/reload-failure-role"
+printf '\n# Disposable loader revision for the real daemon-reload fault.\n' >> "$WORK/reload-failure-role/templates/vpn-base-firewall.service.j2"
+cat > "$WORK/reload-failure.yml" <<EOF
+---
+- hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: $WORK/reload-failure-role
+        tasks_from: firewall
+EOF
+cp -p /etc/systemd/system/vpn-base-firewall.service "$WORK/previous.service"
+# Like the nft fault, this delegates to the real installed binary. Only the
+# first daemon-reload executes a genuinely invalid systemctl command; rescue
+# must perform a successful real daemon-reload, not receive a fake status.
+inject_reload_failure() {
+  rm -f "$WORK/reload-failed-once"
+  mv /usr/bin/systemctl "$WORK/systemctl.real"
+  cat > /usr/bin/systemctl <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ \$# == 1 && \$1 == daemon-reload && ! -e $WORK/reload-failed-once ]]; then
+  touch $WORK/reload-failed-once
+  exec $WORK/systemctl.real vpn-base-invalid-reload-verb
+fi
+exec $WORK/systemctl.real "\$@"
+EOF
+  chmod 755 /usr/bin/systemctl
+}
+for policy in "$WORK/change.json" "$WORK/vars.json"; do
+  inject_reload_failure
+  if "$AP" -i localhost, -c local -e @"$WORK/vars.json" -e @"$policy" "$WORK/reload-failure.yml" > "$WORK/reload-failure.log" 2>&1; then
+    fail "роль проигнорировала реальную ошибку daemon-reload"
+  fi
+  mv "$WORK/systemctl.real" /usr/bin/systemctl
+  [[ -e $WORK/reload-failed-once ]] || { cat "$WORK/reload-failure.log"; fail "reload fault не был выполнен"; }
+  grep -q 'Ошибка firewall на этапе Reload systemd units' "$WORK/reload-failure.log" \
+    || { cat "$WORK/reload-failure.log"; fail "отказ не достиг daemon-reload"; }
+  [[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "loader rollback потерял предыдущую live policy"
+  [[ $(sha256sum /etc/vpn-base/firewall.nft) == "$file_before" ]] || fail "loader rollback потерял предыдущую persistent policy"
+  cmp "$WORK/previous.service" /etc/systemd/system/vpn-base-firewall.service || fail "loader rollback потерял прежний unit"
+  systemctl is-active --quiet vpn-base-firewall.service || fail "loader rollback потерял active state"
+  systemctl is-enabled --quiet vpn-base-firewall.service || fail "loader rollback потерял enabled state"
+  assert_access
+  for addr in "$HOST4" "$HOST6"; do
+    in_ns trusted ssh "${SSH_OPTS[@]}" -i "$WORK/admin_new" "vpnadmin@$addr" 'sudo -n true' || fail "свежий SSH после loader rollback"
+  done
+done
+ok "изменение policy и loader-only отказ сохраняют прежние unit, active/enabled, ACL и SSH"
+
+step "UDP/546: source ACL не обходится unconditional DHCPv6 allowance"
+# A real UDP echo listener exercises the input policy, not a DHCP client.
+python3 "$SERVICE" serve-udp 546 > "$WORK/udp546-server.log" 2>&1 &
+UDP546_PID=$!
+PIDS+=("$UDP546_PID")
+ip -6 addr add fe80::1/64 dev vbr-test nodad
+ip -n untrusted -6 addr add fe80::3/64 dev eth0 nodad
+udp546_linklocal() {
+  in_ns untrusted python3 "$SERVICE" udp fe80::1%eth0 546 --source-address "${1:-fe80::3%eth0}" --source-port 547 >/dev/null 2>&1
+}
+for _ in {1..20}; do udp546_linklocal && break; sleep 0.2; done
+udp546_linklocal || fail "исходный DHCPv6 allowance не пропускает настоящий link-local UDP/547→546"
+for family in "$TRUST4/32" "$TRUST6/128"; do
+  if local_play -e @"$WORK/vars.json" -e @"$WORK/ack.json" \
+      -e "{\"base_firewall_allow_dhcpv6_client\":true,\"base_firewall_source_ports\":[{\"proto\":\"udp\",\"port\":546,\"source_cidrs\":[\"$family\"]}]}" \
+      > "$WORK/udp546-invalid.log" 2>&1; then
+    fail "source-restricted UDP/546 принят при unconditional DHCPv6 allowance"
+  fi
+  recap "$WORK/udp546-invalid.log" | grep -q 'changed=0' || fail "UDP/546 conflict изменил хост"
+  grep -q 'base_firewall_allow_dhcpv6_client' "$WORK/udp546-invalid.log" || fail "нет сообщения о DHCPv6 conflict"
+  grep -Fq "$family" "$WORK/udp546-invalid.log" && fail "UDP/546 source попал в журнал"
+  [[ $(nft list table inet vpn_base | sha256sum) == "$before" ]] || fail "UDP/546 conflict изменил live policy"
+  udp546_linklocal || fail "UDP/546 conflict удалил прежний DHCPv6 allowance"
+done
+python3 - "$WORK/vars.json" "$WORK/udp546-safe.json" "$TRUST4" <<'PY'
+import json, sys
+with open(sys.argv[1]) as source:
+    config = json.load(source)
+config["base_firewall_allow_dhcpv6_client"] = False
+config["base_firewall_source_ports"].append({"proto": "udp", "port": 546,
+                                          "source_cidrs": [sys.argv[3] + "/32"]})
+with open(sys.argv[2], "w") as output:
+    json.dump(config, output)
+PY
+"$AP" -i localhost, -c local -e @"$WORK/udp546-safe.json" "$WORK/firewall-only.yml" > "$WORK/udp546-safe.log" 2>&1 \
+  || { cat "$WORK/udp546-safe.log"; fail "safe UDP/546 при DHCPv6 allowance=false отклонён"; }
+udp_get trusted "$HOST4" 546 || fail "IPv4 source UDP/546 не разрешён"
+udp_get untrusted "$HOST4" 546 && fail "IPv4 UDP/546 открыт undeclared source"
+udp_get trusted "$HOST6" 546 && fail "IPv4-only UDP/546 открыл IPv6"
+# Use a fresh source tuple: established/related is intentionally preserved.
+ip -n untrusted -6 addr add fe80::4/64 dev eth0 nodad
+udp546_linklocal fe80::4%eth0 && fail "новый link-local UDP/547→546 обошёл IPv4-only source ACL при allowance=false"
+"$AP" -i localhost, -c local -e @"$WORK/vars.json" "$WORK/firewall-only.yml" > "$WORK/udp546-restored.log" 2>&1 \
+  || { cat "$WORK/udp546-restored.log"; fail "восстановление исходного DHCPv6 allowance"; }
+udp546_linklocal fe80::4%eth0 || fail "исходный DHCPv6 allowance не восстановлен"
+kill "$UDP546_PID"
+wait "$UDP546_PID" 2>/dev/null || true
+assert_access
+ok "DHCPv6 precedence конфликт отклонён до изменений; allowance=false сохраняет family-specific ACL"
 
 step "Изменение ACL и восстановление предыдущей собственной политики"
 python3 - "$WORK/vars.json" "$WORK/alternate.json" "$UNTRUST4" "$UNTRUST6" <<'PY'

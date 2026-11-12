@@ -164,7 +164,6 @@ class InputTest(unittest.TestCase):
             {"proto": "udp", "port": 22, "source_cidrs": ["198.51.100.2/32"]},
         ], base_firewall_vpn_ports=[{"proto": "udp", "port": 8443}])
         self.assertEqual(vpn_base.input_errors(config), [])
-        self.assertFalse(config["base_firewall_enabled"])
 
     def test_colocated_loopback_is_only_a_source_acl_exception(self):
         for cidr in ("127.0.0.1/32", "::1/128"):
@@ -173,6 +172,28 @@ class InputTest(unittest.TestCase):
         self.assertEqual(vpn_base.input_errors(valid_config(base_firewall_source_ports=[
             {"proto": "tcp", "port": 2222, "source_cidrs": ["127.0.0.1/32", "::1/128"]}
         ])), [])
+
+    def test_restricted_dhcpv6_conflict_is_rejected_for_each_declared_family(self):
+        for sources in (["198.51.100.77/32"], ["2001:db8:100::77/128"],
+                        ["198.51.100.77/32", "2001:db8:100::77/128"]):
+            for enabled in (False, True):
+                with self.subTest(sources=sources, firewall_enabled=enabled):
+                    config = valid_config(
+                        base_firewall_enabled=enabled,
+                        base_ssh_trusted_cidrs=["192.0.2.0/24"],
+                        base_firewall_allow_dhcpv6_client=True,
+                        base_firewall_source_ports=[
+                            {"proto": "udp", "port": 546, "source_cidrs": sources}])
+                    errors = vpn_base.input_errors(config)
+                    self.assertTrue(any("base_firewall_source_ports[0]" in error
+                                        and "base_firewall_allow_dhcpv6_client" in error
+                                        for error in errors))
+                    self.assertFalse(any(source in error for source in sources for error in errors))
+                    config["base_firewall_allow_dhcpv6_client"] = False
+                    self.assertEqual(vpn_base.input_errors(config), [])
+                    config["base_firewall_allow_dhcpv6_client"] = True
+                    config["base_firewall_source_ports"][0]["proto"] = "tcp"
+                    self.assertEqual(vpn_base.input_errors(config), [])
 
     def test_source_port_rejections_do_not_echo_sources(self):
         source = "198.51.100.77/32"

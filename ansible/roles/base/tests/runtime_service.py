@@ -47,6 +47,10 @@ def serve(tcp_ports, udp_port):
     for port in tcp_ports:
         server = DualStackHTTP(("::", port), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+    serve_udp(udp_port)
+
+
+def serve_udp(udp_port):
     with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as udp:
         udp.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         udp.bind(("::", udp_port))
@@ -55,8 +59,9 @@ def serve(tcp_ports, udp_port):
             udp.sendto(payload, peer)
 
 
-def request(address, port, path, expected_peer):
-    connection = http.client.HTTPConnection(address, port, timeout=10)
+def request(address, port, path, expected_peer, source_address=None):
+    source = (source_address, 0) if source_address is not None else None
+    connection = http.client.HTTPConnection(address, port, timeout=10, source_address=source)
     try:
         connection.request("GET", path, headers={"Connection": "close"})
         response = connection.getresponse()
@@ -70,10 +75,12 @@ def request(address, port, path, expected_peer):
         connection.close()
 
 
-def udp_request(address, port):
+def udp_request(address, port, source_address=None, source_port=0):
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     with socket.socket(family, socket.SOCK_DGRAM) as client:
         client.settimeout(2)
+        if source_address is not None or source_port:
+            client.bind((source_address or ("::" if family == socket.AF_INET6 else "0.0.0.0"), source_port))
         payload = b"vpn-base-disposable-udp"
         client.sendto(payload, (address, port))
         received, _peer = client.recvfrom(4096)
@@ -86,20 +93,27 @@ def main():
     server = sub.add_parser("serve")
     server.add_argument("--tcp", nargs="+", required=True, type=int)
     server.add_argument("--udp", required=True, type=int)
+    udp_server = sub.add_parser("serve-udp")
+    udp_server.add_argument("port", type=int)
     for operation in ("get", "peer", "udp"):
         client = sub.add_parser(operation)
         client.add_argument("address")
         client.add_argument("port", type=int)
         if operation == "peer":
             client.add_argument("expected_peer")
+        client.add_argument("--source-address")
+        if operation == "udp":
+            client.add_argument("--source-port", type=int, default=0)
     args = parser.parse_args()
     if args.operation == "serve":
         serve(args.tcp, args.udp)
+    elif args.operation == "serve-udp":
+        serve_udp(args.port)
     elif args.operation == "udp":
-        udp_request(args.address, args.port)
+        udp_request(args.address, args.port, args.source_address, args.source_port)
     else:
         request(args.address, args.port, "/peer" if args.operation == "peer" else "/payload",
-                getattr(args, "expected_peer", None))
+                getattr(args, "expected_peer", None), args.source_address)
 
 
 if __name__ == "__main__":

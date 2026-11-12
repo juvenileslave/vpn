@@ -1,4 +1,12 @@
 ---
+- name: Initialize firewall recovery boundary
+  ansible.builtin.set_fact:
+    base_firewall_retain_snapshots: false
+    base_firewall_unit: {}
+    base_firewall_loader_start: {}
+    base_firewall_failure_task: ""
+  changed_when: false
+
 - name: Save previous owned configuration inside the transaction
   ansible.builtin.copy:
     src: /etc/vpn-base/firewall.nft
@@ -8,6 +16,7 @@
   when: base_firewall_previous.stat.exists
   changed_when: false
   no_log: true
+  diff: false
 
 - name: Save exact live owned policy for rollback
   ansible.builtin.copy:
@@ -19,20 +28,72 @@
   no_log: true
   diff: false
 
-- name: Apply and persist the validated candidate
-  block:
-    - name: Validate candidate again immediately before application
-      ansible.builtin.command:
-        argv: [/usr/sbin/nft, -c, -f, "{{ base_firewall_transaction.path }}/candidate.nft"]
-      changed_when: false
-      no_log: true
+- name: Read previous owned loader metadata without following links
+  ansible.builtin.stat:
+    path: /etc/systemd/system/vpn-base-firewall.service
+    follow: false
+  register: base_firewall_previous_unit
 
-    # nft -f replaces only the owned table in one kernel transaction. Persist
-    # only AFTER successful application, so a failed nft call cannot publish
-    # a broken boot/reload configuration.
+- name: Save previous regular loader configuration
+  ansible.builtin.copy:
+    src: /etc/systemd/system/vpn-base-firewall.service
+    dest: "{{ base_firewall_transaction.path }}/previous.service"
+    remote_src: true
+    mode: "0600"
+  when: base_firewall_previous_unit.stat.isreg | default(false)
+  changed_when: false
+  no_log: true
+  diff: false
+
+- name: Read previous loader activation and enablement
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - vpn-base-firewall.service
+      - --property=LoadState
+      - --property=ActiveState
+      - --property=UnitFileState
+  register: base_firewall_previous_loader
+  changed_when: false
+
+- name: Decode previous loader state
+  ansible.builtin.set_fact:
+    base_firewall_previous_loader_state: "{{ dict(base_firewall_previous_loader.stdout_lines | map('split', '=')) }}"
+  changed_when: false
+
+- name: Validate candidate again immediately before application
+  ansible.builtin.command:
+    argv: [/usr/sbin/nft, -c, -f, "{{ base_firewall_transaction.path }}/candidate.nft"]
+  changed_when: false
+  no_log: true
+
+- name: Retain snapshots until policy and loader gates complete
+  ansible.builtin.set_fact:
+    base_firewall_retain_snapshots: true
+  changed_when: false
+
+- name: Apply policy and the complete loader lifecycle as one recoverable boundary
+  block:
+    # nft -f replaces only the owned table in one kernel transaction. Publish
+    # the boot/reload file only after that succeeds; loader gates still belong
+    # to this transaction, including when only the loader needs to change.
+    - name: Create only an absent owned configuration directory
+      ansible.builtin.file:
+        path: /etc/vpn-base
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: not base_firewall_previous_directory.stat.exists
+
     - name: Apply the candidate as one nftables transaction
       ansible.builtin.command:
         argv: [/usr/sbin/nft, -f, "{{ base_firewall_transaction.path }}/candidate.nft"]
+      when: >-
+        not base_firewall_previous.stat.exists
+        or base_firewall_previous.stat.checksum != base_firewall_candidate.stat.checksum
+        or base_firewall_live.rc != 0
       changed_when: true
       no_log: true
 
@@ -44,49 +105,38 @@
         owner: root
         group: root
         mode: "0644"
+      when: >-
+        not base_firewall_previous.stat.exists
+        or base_firewall_previous.stat.checksum != base_firewall_candidate.stat.checksum
+        or base_firewall_live.rc != 0
       no_log: true
       diff: false
-  rescue:
-    - name: Restore previously loaded owned policy
-      ansible.builtin.command:
-        argv: [/usr/sbin/nft, -f, "{{ base_firewall_transaction.path }}/rollback.nft"]
-      when: base_firewall_live.rc == 0
-      changed_when: true
-      no_log: true
 
-    - name: Inspect first-application failure state
-      ansible.builtin.command: /usr/sbin/nft list table inet vpn_base
-      register: base_firewall_failed_live
-      when: base_firewall_live.rc != 0
+    - name: Install reload start and verify the owned loader
+      ansible.builtin.include_tasks: firewall_loader.yml
+
+    - name: Complete firewall policy and loader transaction
+      ansible.builtin.set_fact:
+        base_firewall_retain_snapshots: false
       changed_when: false
-      failed_when: base_firewall_failed_live.rc not in [0, 1]
+  rescue:
+    - name: Preserve the original failed firewall stage
+      ansible.builtin.set_fact:
+        base_firewall_failure_task: "{{ ansible_failed_task.name }}"
+        base_firewall_failure_rc: "{{ ansible_failed_result.rc | default('не указан') }}"
+      changed_when: false
       no_log: true
 
-    - name: Remove only newly created owned table after first-application failure
-      ansible.builtin.command: /usr/sbin/nft delete table inet vpn_base
-      when:
-        - base_firewall_live.rc != 0
-        - base_firewall_failed_live.rc == 0
-      changed_when: true
+    - name: Restore previous policy configuration and loader state
+      ansible.builtin.include_tasks: firewall_restore.yml
 
-    - name: Restore previous persistent owned configuration
-      ansible.builtin.copy:
-        src: "{{ base_firewall_transaction.path }}/previous.nft"
-        dest: /etc/vpn-base/firewall.nft
-        remote_src: true
-        owner: root
-        group: root
-        mode: "{{ base_firewall_previous.stat.mode }}"
-      when: base_firewall_previous.stat.exists
-      no_log: true
-      diff: false
-
-    - name: Remove only newly created configuration after first-application failure
-      ansible.builtin.file:
-        path: /etc/vpn-base/firewall.nft
-        state: absent
-      when: not base_firewall_previous.stat.exists
+    - name: Release snapshots after complete restoration
+      ansible.builtin.set_fact:
+        base_firewall_retain_snapshots: false
+      changed_when: false
 
     - name: Stop serial application after restoration
       ansible.builtin.fail:
-        msg: Ошибка применения firewall; предыдущая собственная политика и конфигурация восстановлены.
+        msg: >-
+          Ошибка firewall на этапе {{ base_firewall_failure_task }} (rc={{ base_firewall_failure_rc }});
+          предыдущая собственная политика, конфигурация и состояние loader восстановлены.

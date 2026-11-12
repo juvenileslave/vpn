@@ -136,6 +136,17 @@ class RejectionTest(unittest.TestCase):
             "base_firewall_vpn_ports": [{"proto": "tcp", "port": 8443}],
         }, "конфликт")
 
+    def test_restricted_udp546_conflicts_with_unconditional_dhcpv6_allowance(self):
+        for sources in (["198.51.100.77/32"], ["2001:db8:100::77/128"]):
+            with self.subTest(sources=sources):
+                output = self.assert_rejected({
+                    "base_firewall_allow_dhcpv6_client": True,
+                    "base_firewall_source_ports": [
+                        {"proto": "udp", "port": 546, "source_cidrs": sources}],
+                }, "base_firewall_allow_dhcpv6_client")
+                for source in sources:
+                    self.assertNotIn(source, output)
+
 
 class DisabledManagementTest(unittest.TestCase):
     def test_all_management_disabled_is_a_no_op(self):

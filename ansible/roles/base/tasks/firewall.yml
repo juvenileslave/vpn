@@ -1,12 +1,5 @@
 ---
 # Render/validate in a private tmpfs directory before replacing persistent state.
-- name: Create firewall configuration directory
-  ansible.builtin.file:
-    path: /etc/vpn-base
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
 
 - name: Allocate private firewall transaction directory
   ansible.builtin.tempfile:
@@ -15,6 +8,12 @@
     prefix: vpn-base-firewall-
   register: base_firewall_transaction
   check_mode: false
+  changed_when: false
+
+- name: Initialize snapshot retention for this firewall attempt
+  ansible.builtin.set_fact:
+    base_firewall_retain_snapshots: false
+    base_firewall_failure_task: ""
   changed_when: false
 
 - name: Validate and commit owned firewall policy
@@ -31,6 +30,11 @@
       changed_when: false
       no_log: true
       diff: false
+
+    - name: Read previous owned configuration directory metadata
+      ansible.builtin.stat:
+        path: /etc/vpn-base
+      register: base_firewall_previous_directory
 
     - name: Read previous owned configuration metadata
       ansible.builtin.stat:
@@ -50,13 +54,9 @@
       failed_when: base_firewall_live.rc not in [0, 1]
       no_log: true
 
-    - name: Commit changed configuration and table with restoration on failure
+    - name: Commit owned policy and loader with restoration on failure
       ansible.builtin.include_tasks: firewall_transaction.yml
-      when:
-        - not ansible_check_mode
-        - not base_firewall_previous.stat.exists
-          or base_firewall_previous.stat.checksum != base_firewall_candidate.stat.checksum
-          or base_firewall_live.rc != 0
+      when: not ansible_check_mode
 
     - name: Report firewall changes in check mode without applying the candidate
       ansible.builtin.debug:
@@ -68,36 +68,19 @@
           or base_firewall_previous.stat.checksum != base_firewall_candidate.stat.checksum
           or base_firewall_live.rc != 0
 
-    - name: Install firewall loader unit
-      ansible.builtin.template:
-        src: vpn-base-firewall.service.j2
-        dest: /etc/systemd/system/vpn-base-firewall.service
-        owner: root
-        group: root
-        mode: "0644"
-      register: base_firewall_unit
-
-    - name: Reload systemd units
-      ansible.builtin.systemd_service:
-        daemon_reload: true
-      when: base_firewall_unit is changed
-
-    - name: Enable and start firewall loader
-      ansible.builtin.systemd_service:
-        name: vpn-base-firewall.service
-        enabled: true
-        state: started
-      when: not (ansible_check_mode and base_firewall_unit is changed)
-
-    - name: Verify owned table is loaded
-      ansible.builtin.command: /usr/sbin/nft list table inet vpn_base
-      changed_when: false
-      no_log: true
-      when: not ansible_check_mode
+    - name: Predict firewall loader changes in check mode
+      ansible.builtin.include_tasks: firewall_loader.yml
+      when: ansible_check_mode
   rescue:
     - name: Propagate firewall validation or application failure
       ansible.builtin.fail:
-        msg: Ошибка проверки или применения firewall; последовательное применение остановлено.
+        msg: >-
+          Ошибка firewall на этапе {{ base_firewall_failure_task | default(ansible_failed_task.name, true) }}
+          (rc={{ base_firewall_failure_rc if base_firewall_failure_task | length > 0 else ansible_failed_result.rc | default('не указан') }});
+          последовательное применение остановлено.
+          {% if base_firewall_retain_snapshots | default(false) %}
+          Восстановление не завершено; закрытые резервные копии сохранены в {{ base_firewall_transaction.path }}.
+          {% endif %}
   always:
     - name: Remove private firewall transaction files
       ansible.builtin.file:
@@ -105,3 +88,4 @@
         state: absent
       check_mode: false
       changed_when: false
+      when: not (base_firewall_retain_snapshots | default(false))
