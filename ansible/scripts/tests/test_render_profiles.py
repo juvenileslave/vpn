@@ -72,6 +72,7 @@ class BundleConsumerTest(unittest.TestCase):
             ("exit", "base_firewall_source_ports", []),
             (None, "slot_fanout", "sni"), (None, "s2s_family", "v4_only"),
         ]
+        cases.extend((None, "profiles_probe_url", "http://probe.example.com:" + invalid + "/generate_204") for invalid in ("wrong", "0", "70000", ""))
         for host, key, value in cases:
             with self.subTest(key=key):
                 topology = copy.deepcopy(self.topology)
@@ -80,6 +81,40 @@ class BundleConsumerTest(unittest.TestCase):
                 self.assertEqual((self.output / "current").resolve(), checked)
                 self.assertEqual((self.output / "candidate").resolve(), checked)
                 self.assertEqual(len(list((self.output / "versions").iterdir())), 1)
+
+    def test_loopback_upstream_preserves_usable_candidate(self):
+        self.assertEqual(self.play().returncode, 0)
+        checked = (self.output / "candidate").resolve()
+        (self.output / "current").symlink_to(checked)
+        previous = {str(path.relative_to(checked)): path.read_bytes() for path in checked.rglob("*") if path.is_file()}
+        for address in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "proxy.localhost."):
+            secret = copy.deepcopy(self.secret)
+            secret["profiles_upstreams"] = {"1": {"protocol": "socks", "settings": {"servers": [{"address": address, "port": 1080}]}}}
+            self.assertNotEqual(self.play(secret=secret).returncode, 0)
+            self.assertEqual((self.output / "current").resolve(), checked)
+            self.assertEqual((self.output / "candidate").resolve(), checked)
+            self.assertEqual(len(list((self.output / "versions").iterdir())), 1)
+            self.assertEqual(previous, {str(path.relative_to(checked)): path.read_bytes() for path in checked.rglob("*") if path.is_file()})
+
+    def test_permission_repair_is_consumer_visible_and_idempotent(self):
+        self.assertEqual(self.play().returncode, 0)
+        checked = (self.output / "candidate").resolve()
+        (self.output / "current").symlink_to(checked)
+        private = checked / "inputs.private.json"
+        previous = private.read_bytes()
+        private.chmod(0o644)
+        (checked / "clients").chmod(0o755)
+        self.output.chmod(0o755)
+        repaired = self.play()
+        self.assertEqual(repaired.returncode, 0)
+        self.assertRegex(repaired.stdout, r"exit-test\s*:\s*ok=\d+\s+changed=1\b")
+        self.assertEqual(private.read_bytes(), previous)
+        self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((checked / "clients").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.output / "current").resolve(), checked)
+        self.assertEqual((self.output / "candidate").resolve(), checked)
+        self.assertRegex(self.play().stdout, r"exit-test\s*:\s*ok=\d+\s+changed=0\b")
 
     def test_credentials_rejected_before_writes(self):
         for key, value in (("private_key", "invalid"), ("public_key", "invalid"), ("short_ids", ["abcd"])):

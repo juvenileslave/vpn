@@ -23,10 +23,10 @@ XHTTP + REALITY. Она заменяет два самостоятельных e
 | `cover_tls_port` | отдельный порт приватного host-loopback origin |
 | `reality_target` | необязательная проверка совместимости входа: только производное `127.0.0.1:<cover_tls_port>`; внешний/другой target отвергается |
 | `reality_max_time_diff_ms` | положительное целое; исходная политика — **300000** |
-| `relay_egress_ipv4`, `relay_egress_ipv6` | явно объявленный фактический адрес выхода relay; NAT-адрес не выводится из public IP |
+| `relay_egress_ipv4`, `relay_egress_ipv6` | явно объявленный фактический адрес выхода relay; валидный IP нужной семьи, нормализуемый для сравнения, без loopback/link-local/multicast/unspecified/IPv4-mapped; NAT-адрес не выводится из public IP |
 | `base_firewall_vpn_ports` | публичные TCP-listeners direct/relay; не transit/API/origin |
 | `base_firewall_source_ports` | transit TCP только от **точно** relay `/32` и `/128`; API TCP в точности `node_port_allow` |
-| `profiles_probe_url` | явный URL HTTP(S), доступный через exit slot0; без credentials |
+| `profiles_probe_url` | явный URL HTTP(S), доступный через exit slot0; без credentials; явно заданный порт — целое 1…65535, не пустой/некорректный |
 | `slot_fanout` | **явно `ports`**; `sni` отвергается, не переключается автоматически |
 | `s2s_family` | `v6_prefer` для этого фиксированного профиля |
 | `egress_family` | `v4_prefer`, `v6_prefer`, `v4_only` — внешний выход exit |
@@ -43,6 +43,10 @@ XHTTP + REALITY. Она заменяет два самостоятельных e
 - `profiles_upstreams`: mapping третьего слота → **настоящий proxy outbound**.
   Тег renderer задаёт сам. Нет acquisition/selection, freedom, loopback или
   неявного chained outbound. Отсутствующий слот — blackhole, не exit freedom.
+  Проверка до записи запрещает также IPv4-mapped loopback, числовые loopback
+  формы системного dialer и `localhost`/`.localhost`/локальные имена loopback.
+  DNS-имя настоящего upstream не резолвится offline: его фактический адрес и
+  proxy authentication остаются отдельным runtime gate, без freedom fallback.
 - `profiles_revoked_client_ids`: текущий независимый список отозванных UUID;
   его накладывают и при восстановлении старого bundle. Renderer не вращает keys.
 
@@ -94,7 +98,11 @@ profiles/
 
 Файлы версии immutable; изменение уже записанной версии отвергается. Новая
 полная версия и `candidate` публикуются atomic rename. Повтор идентичных входов
-не меняет bytes/link и даёт `changed=0`. Ошибка не заменяет ранее usable output.
+без mode drift не меняет bytes/link и даёт `changed=0`. Если права каталогов
+или файлов стали шире/уже `0700`/`0600`, reapply восстанавливает именно эти
+права с `changed=1`, не переписывая bytes/usable pointer; `--check` только
+сообщает drift. Следующий reapply снова `changed=0`. Небезопасные symlink-пути
+и content tampering отвергаются. Ошибка не заменяет ранее usable output.
 `current` и runtime receipt **не создаются offline playbook**: manifest прямо
 помечен `candidate-not-runtime-validated`. Driver одноразового стенда создаёт
 `receipts/<bundle_id>.json` и атомарный `current` только после реальных gates.
@@ -161,9 +169,24 @@ RFC1918/ULA/link-local/loopback остаются blocked. Production routing/fin
 не ослабляются; geodata/core SHA256 записываются. Это предел fixture, а не
 доказательство всех stock reserved-IP правил production. Core не заменяется.
 
+Для наблюдений driver добавляет **только в одноразовую effective-конфигурацию**
+`log.access: /dev/stdout`. Immutable `exit.json`/`relay.json`, production logging,
+routing и `finalRules` не меняются. Receipt содержит исходный file SHA256,
+canonical effective-config SHA256 и точное описание overlay для каждого
+bundle/node; instrumented config отдельно проходит настоящий `xray -test`.
+Route gate связывает один случайный flow ID с измеренными sink bytes/SHA256,
+реальными access observations `[inbound → outbound]` к application port 18080
+на обоих stock cores и уникальными TCP payload sequence bytes того же
+второго hop. HTTP204 observatory использует отдельный порт 18081. Победитель
+должен нести ≥1 MiB в каждом направлении на socket, реально `ESTABLISHED`
+и у relay, и у принимающего exit; альтернативная семья ограничена <64 KiB
+probe-трафика. SYN, повторные пакеты, простое наличие адреса в pcap и один
+external IP этот gate не проходят. Ограничение 64 KiB относится к доказательству
+одноразового сценария, не добавляет production timeout или fallback cutoff.
+
 Scenario включает wrong keys/shortIds/VLESS, malformed и TCP-fragmented
 handshake, timestamp ±301 s, fresh/expired replay (реальный wait 302 s),
-same-exit failover/recovery/dual-down с pcap/socket observations, configured и
+same-exit failover/recovery/dual-down с коррелированными application/core/socket/pcap observations, configured и
 empty slots, 20 пользователей × четыре concurrent flow, bidirectional 1 MiB
 на пользователя, отдельные 20 MiB, idle/reconnect/data integrity, отсутствие
 relay/direct leaks, idempotence и actual prior-site/profile/ACL restoration
@@ -173,10 +196,19 @@ relay/direct leaks, idempotence и actual prior-site/profile/ACL restoration
 
 Fresh replay без TLS Finished/VLESS может получить ответ и характерный timing.
 `maxTimeDiff` — time budget, **не полный replay cache** и не обещание отсутствия
-blacklisting. Timestamp probe — отдельный generated uTLS Firefox client,
-зафиксированный по dependency Xray; он проверяет REALITY authentication, но
-никогда не отправляет VLESS или application payload. Настоящие туннели/load
-используют stock embedded core. Unknown runtime результат не объявляется PASS.
+blacklisting. Отдельный generated uTLS Firefox helper сохраняет exact Hello и
+необходимые ephemeral X25519/ML-KEM secrets только в guarded временных `0600`
+файлах под настоящим `0700` каталогом. Replay создаёт новую uTLS connection
+через публичные parser/key-share APIs: нет unsafe-копирования TLS state,
+самодельного TLS decryptor или обхода CertificateVerify/Finished. Сначала
+тот же записанный Hello обязан дать положительное REALITY authentication и
+завершённый TLS; после реального ожидания 302 s он обязан дать отрицательное
+REALITY authentication и проверенный chain/SAN/expiry настоящего cover origin.
+Hello и TLS record SHA256 обязаны совпасть с original capture в обоих случаях.
+Timeout, ошибка handshake, длина ответа или hardcoded `application_transfer`
+не являются отрицательным authentication verdict. Helper не отправляет VLESS
+или application payload; реальные туннели/load использует stock embedded core.
+Unknown runtime результат не объявляется PASS.
 
 ## Проверки и публикация в панели
 
@@ -190,6 +222,15 @@ Unit/consumer tests проверяют контракт, atomic сохранен
 redaction и idempotence actual playbook, но **не runtime equivalence**. Driver
 явно вызывает real `xray run -test` и Node API start/health; отсутствие image,
 CA, core, H2, namespace или разрешённого path — ошибка, не `skipped`/mock.
+
+Обязательные внешние gates — принятые [PR #50](https://github.com/juvenileslave/vpn/pull/50)
+(cover) и [PR #51](https://github.com/juvenileslave/vpn/pull/51) (Node), причём Node
+требует [PR #49](https://github.com/juvenileslave/vpn/pull/49) с реальным source ACL.
+Их реализации не копируются в profiles PR. Отсутствующий prerequisite даёт
+ошибку на `accepted-runtime-role-contracts` с номером обязательного PR **до**
+установки пакетов/изменения сети; прямой Python entry сохраняет этот gate в
+FAIL report. Успешный offline render или сборка helper не снимают runtime gate.
+
 
 Позднейшая разрешённая публикация требует coherent exit/relay Config Profiles,
 действительных inbound tags, отдельного Host direct и Host на каждый fixed

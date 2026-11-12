@@ -9,6 +9,11 @@ set -euo pipefail
 [[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || { echo 'Ubuntu 24.04 required.' >&2; exit 2; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 [[ -x $ROOT/.venv/bin/python ]] || { echo 'Run make -C ansible bootstrap first.' >&2; exit 2; }
+for required in '50:ansible/roles/cover_site/tasks/main.yml' '51:ansible/roles/remnawave_node/files/lifecycle.py' '51:ansible/roles/remnawave_node/tests/runtime_vm.py' '49:ansible/roles/base/tasks/firewall.yml'; do
+  pr=${required%%:*}
+  path=${required#*:}
+  [[ -f $ROOT/$path ]] || { echo "Profile acceptance blocked at accepted-runtime-role-contracts: required accepted PR #$pr ($path)." >&2; exit 2; }
+done
 export VPN_COVER_SITE_DISPOSABLE_GUEST=yes VPN_REMNAWAVE_NODE_DISPOSABLE_GUEST=yes
 export ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg" ANSIBLE_NOCOLOR=1 DEBIAN_FRONTEND=noninteractive
 for path in /etc/cover-site /var/lib/cover-site /etc/nginx/sites-enabled/cover-site.conf; do

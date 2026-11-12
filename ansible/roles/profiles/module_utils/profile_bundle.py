@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
+import socket
 import tempfile
 import uuid
 from urllib.parse import urlsplit
@@ -94,6 +96,23 @@ def ids(value, name):
     return value
 
 
+def upstream_address(value):
+    require(isinstance(value, str) and bool(value), "upstream endpoint address missing")
+    name = value.lower().rstrip(".")
+    require(name not in ("localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback") and not name.endswith(".localhost"), "upstream loopback endpoints are forbidden")
+    try:
+        address = ipaddress.ip_address(value.strip("[]").rstrip("."))
+    except ValueError:
+        try:
+            # inet_aton is an offline numeric parser, not a DNS lookup. OS
+            # dialers also accept legacy numeric forms such as 127.1/0x7f000001.
+            address = ipaddress.IPv4Address(socket.inet_aton(name))
+        except OSError:
+            return
+    mapped = address.ipv4_mapped if address.version == 6 else None
+    require(not address.is_loopback and not (mapped is not None and mapped.is_loopback), "upstream loopback endpoints are forbidden")
+
+
 def validate_upstream(outbound):
     """Syntax/credential gates before writes; actual upstream auth is runtime-only."""
     def walk(value):
@@ -101,6 +120,15 @@ def validate_upstream(outbound):
             for key, item in value.items():
                 if key == "port":
                     port(item, "upstream port")
+                if key in ("address", "endpoint"):
+                    require(isinstance(item, str), "upstream endpoint must be a string")
+                    # WireGuard uses host:port endpoint strings; other explicit
+                    # address fields are plain IP/DNS names, never resolved here.
+                    if key == "endpoint":
+                        endpoint = urlsplit("//" + item)
+                        upstream_address(endpoint.hostname or "")
+                    else:
+                        upstream_address(item)
                 if key in ("password", "pass", "privateKey", "publicKey", "secretKey"):
                     require(isinstance(item, str) and bool(item), "upstream credential must be a nonempty string")
                 walk(item)
@@ -113,7 +141,8 @@ def validate_upstream(outbound):
     if protocol in ("vless", "vmess", "socks", "http", "trojan", "shadowsocks"):
         require(isinstance(records, list) and bool(records), "upstream requires explicit endpoints")
         for record in records:
-            require(isinstance(record, dict) and isinstance(record.get("address"), str) and bool(record["address"]), "upstream endpoint address missing")
+            require(isinstance(record, dict), "upstream endpoint must be a mapping")
+            upstream_address(record.get("address"))
             port(record.get("port"), "upstream endpoint port")
             if protocol in ("vless", "vmess"):
                 users = record.get("users")
@@ -165,10 +194,46 @@ def validate_host(host, kind):
     return rules
 
 
+def validate_probe_url(value):
+    require(isinstance(value, str), "profiles_probe_url must be a string")
+    try:
+        probe = urlsplit(value)
+        parsed_port = probe.port
+        valid = probe.scheme in ("http", "https") and probe.hostname and not probe.username and not probe.password
+    except ValueError:
+        raise Invalid("profiles_probe_url contains an invalid authority or port") from None
+    require(valid, "profiles_probe_url must be an explicit credential-free HTTP(S) URL")
+    if parsed_port is not None:
+        port(parsed_port, "profiles_probe_url port")
+    require(not probe.netloc.endswith(":"), "profiles_probe_url explicit port must not be empty")
+
+
+def validate_addresses(exit_host, relay):
+    """One explicit address/transit-source contract shared with inventory."""
+    sources = set()
+    for version in (4, 6):
+        for host, key in ((exit_host, "public_ipv" + str(version)), (relay, "public_ipv" + str(version)), (relay, "relay_egress_ipv" + str(version))):
+            value = host.get(key)
+            try:
+                address = ipaddress.ip_address(value) if isinstance(value, str) else None
+            except ValueError:
+                address = None
+            usable = address is not None and address.version == version
+            require(usable and not address.is_unspecified and not address.is_multicast and not address.is_loopback and not address.is_link_local, key + " must be an explicit usable address")
+            require(version != 6 or address.ipv4_mapped is None, key + " rejects IPv4-mapped addresses")
+            if key.startswith("relay_egress_"):
+                sources.add(str(address) + ("/32" if version == 4 else "/128"))
+        require(ipaddress.ip_address(exit_host["public_ipv" + str(version)]) != ipaddress.ip_address(relay["public_ipv" + str(version)]), "exit and relay public addresses must differ")
+    rules = exit_host.get("base_firewall_source_ports", [])
+    transit = [item for item in rules if isinstance(item, dict) and item.get("proto") == "tcp" and item.get("port") == exit_host.get("transit_port")] if isinstance(rules, list) else []
+    require(len(transit) == 1 and set(cidrs(transit[0].get("source_cidrs"), "transit source_cidrs")) == sources, "transit source ACL must equal declared relay egress /32 and /128")
+    return sources
+
+
 def validate(topology, secret):
     require(isinstance(topology, dict) and isinstance(secret, dict), "bundle inputs must be mappings")
     exit_host, relay = topology.get("exit"), topology.get("relay")
-    exit_rules = validate_host(exit_host, "exit")
+    validate_host(exit_host, "exit")
     validate_host(relay, "relay")
     require(topology.get("slot_fanout") == "ports", "slot_fanout sni cannot distinguish slots with the single REALITY SNI; choose ports explicitly after feasibility test")
     n = topology.get("egress_slots")
@@ -178,21 +243,8 @@ def validate(topology, secret):
     require(topology.get("s2s_family") == "v6_prefer", "self-steal relay requires s2s_family v6_prefer")
     require(topology.get("xhttp_mode") == "stream-one", "xhttp_mode must be stream-one")
     require(isinstance(topology.get("xhttp_path"), str) and re.fullmatch(r"/[^\s?#]*", topology["xhttp_path"]), "invalid xhttp_path")
-    probe = urlsplit(topology.get("profiles_probe_url", ""))
-    require(probe.scheme in ("http", "https") and probe.hostname and not probe.username and not probe.password, "profiles_probe_url must be an explicit credential-free HTTP(S) URL")
-    sources = set()
-    for version in (4, 6):
-        for host, key in ((exit_host, "public_ipv" + str(version)), (relay, "public_ipv" + str(version)), (relay, "relay_egress_ipv" + str(version))):
-            try:
-                require(isinstance(host.get(key), str), key + " must be an address string")
-                ip = ipaddress.ip_address(host.get(key, ""))
-            except ValueError:
-                ip = None
-            require(ip is not None and ip.version == version and not ip.is_unspecified and not ip.is_multicast and not ip.is_loopback and not ip.is_link_local, key + " must be an explicit usable address")
-            if key.startswith("relay_egress_"):
-                sources.add(str(ip) + ("/32" if version == 4 else "/128"))
-        require(ipaddress.ip_address(exit_host["public_ipv" + str(version)]) != ipaddress.ip_address(relay["public_ipv" + str(version)]), "exit and relay public addresses must differ")
-    require(exit_rules.get(("tcp", exit_host["transit_port"])) == sources, "transit ACL must equal declared relay egress /32 and /128")
+    validate_probe_url(topology.get("profiles_probe_url", ""))
+    validate_addresses(exit_host, relay)
     creds = secret.get("profiles_credentials")
     require(isinstance(creds, dict) and set(creds) == {"exit", "relay"}, "profiles_credentials requires exit and relay identities")
     for kind in ("exit", "relay"):
@@ -311,7 +363,14 @@ def write_bundle(output, identity, files, check=False):
     if target.exists():
         require(target.is_dir() and not target.is_symlink(), "bundle version path is unsafe")
         require(all((target / name).is_file() and not (target / name).is_symlink() and (target / name).read_text() == content for name, content in files.items()), "immutable bundle has changed")
-    changed = not target.exists() or not (root / "candidate").is_symlink() or os.readlink(root / "candidate") != "versions/" + identity
+    directories = {root, root / "versions", target}
+    directories.update((target / name).parent for name in files)
+    for directory in directories:
+        require(not directory.is_symlink() and (not directory.exists() or directory.is_dir()), "bundle directory path is unsafe")
+    mode_drift = any(directory.exists() and stat.S_IMODE(directory.stat().st_mode) != 0o700 for directory in directories)
+    if target.exists():
+        mode_drift |= any(stat.S_IMODE((target / name).stat().st_mode) != 0o600 for name in files)
+    changed = mode_drift or not target.exists() or not (root / "candidate").is_symlink() or os.readlink(root / "candidate") != "versions/" + identity
     if check or not changed:
         return changed
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -319,6 +378,14 @@ def write_bundle(output, identity, files, check=False):
     versions = root / "versions"
     require(not versions.is_symlink(), "versions path cannot be a symlink")
     versions.mkdir(mode=0o700, exist_ok=True)
+    for directory in directories:
+        if directory.exists():
+            directory.chmod(0o700)
+    if target.exists():
+        for name in files:
+            (target / name).chmod(0o600)
+        if (root / "candidate").is_symlink() and os.readlink(root / "candidate") == "versions/" + identity:
+            return True
     staging = Path(tempfile.mkdtemp(prefix=".candidate-", dir=root))
     try:
         for name, content in files.items():

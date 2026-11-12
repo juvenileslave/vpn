@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import json
 from pathlib import Path
+import secrets
 import socket
 import socketserver
 import struct
@@ -44,17 +45,22 @@ def socks(port, address, target):
 
 def transfer(port, size, address="192.0.2.100", target=18080):
     data = (bytes(range(256)) * ((size + 255) // 256))[:size]
+    flow = secrets.token_bytes(16)
+    digest = hashlib.sha256(data).hexdigest()
     start = time.monotonic()
     with socks(port, address, target) as sock:
-        sock.sendall(struct.pack("!I", size))
+        sock.sendall(flow + struct.pack("!I", size))
         # Full-duplex reader prevents echo backpressure from serial send/recv.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             receiving = pool.submit(exact, sock, size)
             sock.sendall(data)
             returned = receiving.result(timeout=180)
-    if hashlib.sha256(returned).digest() != hashlib.sha256(data).digest():
-        raise AssertionError("bidirectional integrity mismatch")
-    return {"bytes_each_direction": size, "seconds": time.monotonic() - start}
+        if hashlib.sha256(returned).hexdigest() != digest:
+            raise AssertionError("bidirectional integrity mismatch")
+        # The sink's measured receipt is written before this acknowledgement.
+        if exact(sock, 16) != flow:
+            raise AssertionError("application flow acknowledgement mismatch")
+    return {"flow_id": flow.hex(), "payload_sha256": digest, "bytes_each_direction": size, "seconds": time.monotonic() - start}
 
 
 def load(ports):
@@ -73,17 +79,21 @@ def serve(logfile):
     class Echo(socketserver.BaseRequestHandler):
         def handle(self):
             self.request.settimeout(180)
-            with lock:
-                with open(logfile, "a") as output:
-                    output.write(json.dumps({"source": self.client_address[0], "port": self.client_address[1]}) + "\n")
+            flow = exact(self.request, 16)
             size = struct.unpack("!I", exact(self.request, 4))[0]
             remaining = size
+            digest = hashlib.sha256()
             while remaining:
                 part = self.request.recv(min(65536, remaining))
                 if not part:
                     raise OSError("truncated upload")
+                digest.update(part)
                 self.request.sendall(part)
                 remaining -= len(part)
+            with lock:
+                with open(logfile, "a") as output:
+                    output.write(json.dumps({"source": self.client_address[0], "port": self.client_address[1], "flow_id": flow.hex(), "bytes_each_direction": size, "payload_sha256": digest.hexdigest()}) + "\n")
+            self.request.sendall(flow)
 
     class HTTP(BaseHTTPRequestHandler):
         def do_GET(self):

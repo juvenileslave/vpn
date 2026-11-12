@@ -23,7 +23,8 @@ ansible/
 
 `hosts.yml` содержит только `all.children.{exit,relay,cp}`. В exit/relay ровно
 по одному хосту. `cp_placement: dedicated` требует один отдельный cp;
-`cp_placement: exit` — пустую cp группу и host-namespace путь к colocated panel.
+`cp_placement: exit` — пустую cp группу и явный реальный путь от bridge-networked
+colocated panel к разрешённому приватному host gateway, не только self-probe.
 Хост не принадлежит двум группам. `node_role`: `exit`, `relay`, `control_plane`.
 `ansible_host`, `public_ipv4`, `public_ipv6` обязательны и адреса уникальны.
 
@@ -61,6 +62,10 @@ SSH host key verification включена; неизвестный inventory ф�
 Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одним
 портом на fixed slot, `relay_egress_ipv4`, `relay_egress_ipv6` с явно объявленным
 фактическим источником второго hop. Не выводите NAT egress из `public_ipv*`.
+Один общий validator renderer/inventory нормализует валидные IPv4/IPv6 нужной
+семьи, запрещает loopback/link-local/multicast/unspecified/IPv4-mapped и
+сопоставляет exact transit source `/32`/`/128`. Ограничение documentation ranges
+остаётся отдельным example-only правилом, не вторым вариантом валидатора.
 
 Единственные firewall authority:
 
@@ -76,8 +81,9 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
   source TCP rule должен в точности совпадать с `node_port_allow`.
 - `node_port_allow`: safe CIDRs; допустимы также только exact management
   loopback `127.0.0.1/32`, `::1/128`. SSH trust policy этим не ослабляется.
-  Для colocated panel — настоящий host-loopback путь. Dedicated CP — реально
-  объявленный permitted source/path; local probe требует явного loopback.
+  Для colocated panel — реальный bridge → private host-gateway путь с явно
+  разрешённой подсетью. Dedicated CP — реально объявленный source/path;
+  локальный служебный probe дополнительно требует явного loopback разрешения.
 - SSH, API, direct/transit/relay и cover listener ports не пересекаются. Origin
   host-loopback не имеет ни public, ни source-exposed alternate port.
 
@@ -88,7 +94,9 @@ Management address/source/delegate — обязательный реальный
 предполагаемый localhost. SECRET_KEY — panel PKI export, а не случайный пароль;
 management probe использует mTLS/TLS1.3 + RS256 JWT. Секреты не входят в inventory.
 
-`profiles_probe_url` — explicit HTTP(S) endpoint через exit slot0; synthetic
+`profiles_probe_url` — explicit credential-free HTTP(S) endpoint через exit slot0;
+явно указанный port должен быть целым 1…65535. Некорректный, нулевой, пустой
+или out-of-range port отвергается до записи/активации candidate. Synthetic
 `probe.example.com` в example не является работающим сервисом. Offline schema
 не подтверждает DNS, ACME issuance, SAN/chain/expiry, H2, namespace или client
 transfer: это отдельные real runtime gates.
@@ -146,3 +154,10 @@ synthetic isolated netns, visitor/adversarial/replay/slot/failover/load/rollback
 не silent skip и не fake static equivalence. CI jobs/entrypoints описывают
 проверки; actual результаты интегратор публикует отдельно. Финальный `make check`
 не заменяет runtime, Secret scan или отдельно разрешённый российский AC-12 pilot.
+
+Profiles runtime требует принятых PR #50/#51 и source ACL из #49. Отсутствие
+их файлов — явный FAIL на `accepted-runtime-role-contracts` с required PR,
+не статическая замена runtime. При проверке parent применяет роли с их
+daemon-wide resource ownership и реальным CP probe/commit; profiles не вызывает
+внутренний `deploy` в обход registry lock. Test-only access-log overlay отдельно
+привязан к исходному bundle и effective-config SHA256 в receipt (см. PROFILES.md).

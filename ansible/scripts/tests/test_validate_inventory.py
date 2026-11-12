@@ -117,6 +117,20 @@ class ValidateInventoryTest(unittest.TestCase):
         self.hosts["exit-a"]["public_ipv6"] = "192.0.2.11"
         self.assertInvalid("must be an IPv6 address")
 
+    def test_regular_inventory_rejects_unusable_relay_sources(self) -> None:
+        original = copy.deepcopy(self.group_vars)
+        for key, address in (("relay_egress_ipv4", "127.0.0.1"), ("relay_egress_ipv4", "169.254.1.1"), ("relay_egress_ipv4", "224.0.0.1"), ("relay_egress_ipv4", "0.0.0.0"), ("relay_egress_ipv6", "::1"), ("relay_egress_ipv6", "fe80::1"), ("relay_egress_ipv6", "ff02::1"), ("relay_egress_ipv6", "::"), ("relay_egress_ipv6", "::ffff:192.0.2.20"), ("relay_egress_ipv6", "192.0.2.20")):
+            with self.subTest(key=key, address=address):
+                self.group_vars = copy.deepcopy(original)
+                self.group_vars["relay"][key] = address
+                self.assertInvalid(key, "private")
+
+    def test_observatory_ports_rejected_by_inventory(self) -> None:
+        for explicit in ("wrong", "0", "70000", ""):
+            with self.subTest(port=explicit):
+                self.all_vars["profiles_probe_url"] = "http://probe.example.com:" + explicit + "/generate_204"
+                self.assertInvalid("profiles_probe_url")
+
     def test_invalid_enum(self) -> None:
         self.group_vars["relay"]["s2s_family"] = "v6_always"
         self.assertInvalid("s2s_family: must be one of v6_prefer, v4_only, v6_only")

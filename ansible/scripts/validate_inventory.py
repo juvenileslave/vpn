@@ -357,6 +357,7 @@ class Inventory:
             nodes[group] = values
             try:
                 contract.validate_host(values, group)
+                contract.validate_probe_url(values.get("profiles_probe_url", ""))
             except contract.Invalid as error:
                 self.error(f"host {host}: {error}")
             except (TypeError, ValueError):
@@ -368,30 +369,16 @@ class Inventory:
         if set(nodes) != {"exit", "relay"}:
             return
         exit_host, relay = nodes["exit"], nodes["relay"]
-        sources = set()
-        for version, suffix in ((4, "/32"), (6, "/128")):
-            key = f"relay_egress_ipv{version}"
-            try:
-                if not isinstance(relay.get(key), str):
-                    raise ValueError
-                address = ipaddress.ip_address(relay.get(key, ""))
-                if address.version != version or address.is_multicast or address.is_unspecified:
-                    raise ValueError
-                sources.add(str(address) + suffix)
-                if self.example and not in_networks(address, DOCUMENTATION_NETWORKS):
-                    raise ValueError
-            except ValueError:
-                self.error(f"relay: {key} requires an explicit IPv{version} egress address")
-        rules = exit_host.get("base_firewall_source_ports", [])
-        transit = [item for item in rules if isinstance(item, dict) and item.get("proto") == "tcp" and item.get("port") == exit_host.get("transit_port")] if isinstance(rules, list) else []
-        actual_sources = None
-        if len(transit) == 1:
-            try:
-                actual_sources = set(contract.cidrs(transit[0].get("source_cidrs"), "transit source_cidrs"))
-            except contract.Invalid:
-                pass
-        if actual_sources != sources:
-            self.error("exit: transit source ACL must exactly match declared relay egress /32 and /128")
+        try:
+            contract.validate_addresses(exit_host, relay)
+        except contract.Invalid as error:
+            self.error(f"profiles: {error}")
+        if self.example:
+            for version in (4, 6):
+                key = f"relay_egress_ipv{version}"
+                address = ip_or_none(relay.get(key, "")) if isinstance(relay.get(key), str) else None
+                if address is not None and not in_networks(address, DOCUMENTATION_NETWORKS):
+                    self.error(f"relay: {key} example egress must be in documentation ranges")
         ports = relay.get("relay_slot_ports")
         if not isinstance(ports, list) or len(ports) != exit_host.get("egress_slots"):
             self.error("relay: relay_slot_ports must contain one port per fixed slot")
