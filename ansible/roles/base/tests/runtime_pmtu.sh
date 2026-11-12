@@ -18,6 +18,11 @@ cleanup() {
 trap cleanup EXIT
 diagnose() {
   printf '[DEBUG-pmtu] failing line %s\n' "$1" >&2
+  if [[ -n $capture_pid ]]; then
+    kill -INT "$capture_pid" 2>/dev/null || true
+    wait "$capture_pid" 2>/dev/null || true
+    capture_pid=
+  fi
   ip -n pmtu-client route get 192.0.2.1 >&2 || true
   ip -n pmtu-client -6 route get 2001:db8:200::1 >&2 || true
   ip -n pmtu-router route get 203.0.113.2 >&2 || true
@@ -27,6 +32,9 @@ diagnose() {
   ip -n pmtu-client neigh show >&2 || true
   ip -n pmtu-router neigh show >&2 || true
   ip neigh show dev v-pmtu >&2 || true
+  ip -6 addr show dev v-pmtu >&2 || true
+  nft list table inet vpn_base >&2 || true
+  [[ ! -e $WORK/nd-pmtu.log ]] || cat "$WORK/nd-pmtu.log" >&2
 }
 trap 'diagnose "$LINENO"' ERR
 ip netns add pmtu-router
@@ -57,7 +65,14 @@ ip netns exec pmtu-router sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.for
 # The original setting is restored by the exit trap; forwarding is never changed.
 sysctl -qw net.ipv4.tcp_mtu_probing=0
 ip netns exec pmtu-client ping -c1 -W2 192.0.2.1
+tcpdump -i v-pmtu -nn -v 'icmp6' > "$WORK/nd-pmtu.log" 2>&1 &
+capture_pid=$!
+sleep 1
+kill -0 "$capture_pid"
 ip netns exec pmtu-client ping -c1 -W2 2001:db8:200::1
+kill -INT "$capture_pid"
+wait "$capture_pid"
+capture_pid=
 # Disable segmentation offload on the test veths so tcpdump and the router see
 # real MTU-sized packets, not oversized local GSO aggregates.
 ethtool -K v-pmtu tso off gso off gro off >/dev/null

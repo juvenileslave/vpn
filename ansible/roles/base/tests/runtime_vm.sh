@@ -246,6 +246,8 @@ local_play -e @"$WORK/vars.json" -e @"$WORK/ack.json" > "$WORK/apply1.log" 2>&1 
 assert_access
 grep -q 'Активный swap уже есть' "$WORK/apply1.log" && echo "Существующий swap сохранён без создания нового."
 ok "$(recap "$WORK/apply1.log")"
+step "Реальный IPv4/IPv6 PMTU и передача данных через уменьшенный MTU"
+bash "$ROOT/ansible/roles/base/tests/runtime_pmtu.sh" "$WORK" "$VPN_TCP" "$SERVICE"
 
 cat > "$WORK/inventory.yml" <<EOF
 all:
@@ -333,8 +335,6 @@ in_ns nated python3 "$SERVICE" peer "$HOST4" "$SOURCE_TCP" "$NAT4" --source-addr
 in_ns nated python3 "$SERVICE" peer "$HOST6" "$SOURCE_TCP" "$NAT6" --source-address 2001:db8:100::4
 ok "наблюдаемые NAT egress совпадают с явно заявленными /32 и /128"
 
-step "Реальный IPv4/IPv6 PMTU и передача данных через уменьшенный MTU"
-bash "$ROOT/ansible/roles/base/tests/runtime_pmtu.sh" "$WORK" "$VPN_TCP" "$SERVICE"
 
 step "Сохранение постороннего состояния"
 snapshot > "$WORK/state.after"
