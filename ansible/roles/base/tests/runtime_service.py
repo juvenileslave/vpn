@@ -8,8 +8,10 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+from pathlib import Path
 import socket
 import threading
+import time
 
 PAYLOAD = bytes(range(256)) * 4096
 PAYLOAD_DIGEST = hashlib.sha256(PAYLOAD).hexdigest()
@@ -26,6 +28,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.dumps({"source": str(address)}).encode()
         else:
             payload = PAYLOAD
+        if self.path == "/pmtu":
+            peer = ipaddress.ip_address(self.client_address[0])
+            # Linux UAPI: force DF / IPv6 PMTU discovery only for this real
+            # disposable transition, never rely on black-hole fallback.
+            if isinstance(peer, ipaddress.IPv4Address) or peer.ipv4_mapped is not None:
+                self.connection.setsockopt(socket.IPPROTO_IP, 10, 2)
+            else:
+                self.connection.setsockopt(socket.IPPROTO_IPV6, 23, 2)
         self.send_response(200)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -59,10 +69,21 @@ def serve_udp(udp_port):
             udp.sendto(payload, peer)
 
 
-def request(address, port, path, expected_peer, source_address=None):
+def request(address, port, path, expected_peer, source_address=None, control=None):
     source = (source_address, 0) if source_address is not None else None
     connection = http.client.HTTPConnection(address, port, timeout=10, source_address=source)
     try:
+        connection.connect()
+        if control is not None:
+            ready, release = map(Path, control)
+            ready.write_text(json.dumps({"source": connection.sock.getsockname(),
+                                         "peer": connection.sock.getpeername(),
+                                         "mss": connection.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG)}))
+            deadline = time.monotonic() + 10
+            while not release.exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("PMTU transition was not released")
+                time.sleep(0.02)
         connection.request("GET", path, headers={"Connection": "close"})
         response = connection.getresponse()
         payload = response.read()
@@ -95,7 +116,7 @@ def main():
     server.add_argument("--udp", required=True, type=int)
     udp_server = sub.add_parser("serve-udp")
     udp_server.add_argument("port", type=int)
-    for operation in ("get", "peer", "udp"):
+    for operation in ("get", "peer", "udp", "staged-get"):
         client = sub.add_parser(operation)
         client.add_argument("address")
         client.add_argument("port", type=int)
@@ -104,6 +125,9 @@ def main():
         client.add_argument("--source-address")
         if operation == "udp":
             client.add_argument("--source-port", type=int, default=0)
+        if operation == "staged-get":
+            client.add_argument("ready")
+            client.add_argument("release")
     args = parser.parse_args()
     if args.operation == "serve":
         serve(args.tcp, args.udp)
@@ -112,8 +136,10 @@ def main():
     elif args.operation == "udp":
         udp_request(args.address, args.port, args.source_address, args.source_port)
     else:
-        request(args.address, args.port, "/peer" if args.operation == "peer" else "/payload",
-                getattr(args, "expected_peer", None), args.source_address)
+        path = "/peer" if args.operation == "peer" else "/pmtu" if args.operation == "staged-get" else "/payload"
+        control = (args.ready, args.release) if args.operation == "staged-get" else None
+        request(args.address, args.port, path, getattr(args, "expected_peer", None),
+                args.source_address, control)
 
 
 if __name__ == "__main__":
