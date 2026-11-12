@@ -69,9 +69,10 @@ squash merge владельцем. Рабочий аккаунт `popularhono` �
 В целевой политике review рекомендован, но не является обязательным merge-gate.
 PR, актуальная база и успешные обязательные проверки сохраняются.
 
-Отмена обязательных approvals и разрешения review threads подготовлена в
-`.github/rulesets/master.json`, но не применена к GitHub. Локальная правка
-файлов не отключает действующие серверные требования.
+Неблокирующий review применён в ruleset `master` 2026-11-12: approvals,
+CODEOWNER-review и разрешение review threads не обязательны; обязательные
+`Repository checks`, `Secret scan`, strict base и защита ветки сохранены. Правка
+`.github/rulesets/master.json` сама по себе сервер не меняет.
 
 [Защита master активна в GitHub](https://github.com/juvenileslave/vpn/rules/26988307),
 без bypass, force-push и удаления ветки. Подробности — в
