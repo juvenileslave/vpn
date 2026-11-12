@@ -8,6 +8,7 @@ directory named ``example``.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import ipaddress
 from pathlib import Path
 import re
@@ -29,7 +30,7 @@ ENUMS = {
 COMMON_KEYS = (
     "cp_placement", "client_family", "s2s_family", "egress_family",
     "egress_slots", "slot_fanout", "node_port_allow", "reality_sni",
-    "reality_target", "xhttp_path", "xhttp_mode", "image_tags",
+    "xhttp_path", "xhttp_mode", "image_tags",
 )
 ADDRESS_KEYS = ("public_ipv4", "public_ipv6")
 DOCUMENTATION_NETWORKS = tuple(
@@ -45,7 +46,6 @@ EXAMPLE_SNI_SUFFIX = ".example.com"
 YAML_SUFFIXES = (".yml", ".yaml")
 HOST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 DNS_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
-HOST_PORT = re.compile(r"\[(?P<ipv6>[^\]]+)\]:(?P<port6>[0-9]+)|(?P<host>[^:\[\]]+):(?P<port>[0-9]+)")
 
 # A layered variable keeps the location it came from for error messages.
 Located = tuple[Any, str]
@@ -228,6 +228,7 @@ class Inventory:
                     if isinstance(placement, str):
                         placements.add(placement)
         self.validate_topology(placements)
+        self.validate_profiles()
 
     def placement_value(self, located: Located) -> Any:
         value, origin = located
@@ -281,7 +282,6 @@ class Inventory:
             "egress_slots": check_egress_slots,
             "node_port_allow": self.check_node_port_allow,
             "reality_sni": self.check_reality_sni,
-            "reality_target": check_reality_target,
             "xhttp_path": check_xhttp_path,
             "image_tags": check_image_tags,
         }
@@ -327,7 +327,11 @@ class Inventory:
                 network = ipaddress.ip_network(item, strict=True)
             except ValueError:
                 return f"item {index}: invalid CIDR {item!r}"
-            if self.example and not in_networks(network, DOCUMENTATION_NETWORKS + PRIVATE_NETWORKS):
+            if network.is_loopback and str(network) not in ("127.0.0.1/32", "::1/128"):
+                return f"item {index}: only exact standard loopback management is allowed"
+            if network.is_multicast or network.is_unspecified or network.prefixlen < (8 if network.version == 4 else 32):
+                return f"item {index}: unsafe or wide management CIDR"
+            if self.example and str(network) not in ("127.0.0.1/32", "::1/128") and not in_networks(network, DOCUMENTATION_NETWORKS + PRIVATE_NETWORKS):
                 return f"item {index}: example CIDR must be in documentation or private ranges"
         return None
 
@@ -337,6 +341,60 @@ class Inventory:
         if self.example and not value.lower().endswith(EXAMPLE_SNI_SUFFIX):
             return f"example SNI must end with {EXAMPLE_SNI_SUFFIX}"
         return None
+
+    def validate_profiles(self) -> None:
+        """Static cross-role gates; DNS/certificate/runtime remain separate."""
+        module_path = Path(__file__).resolve().parents[1] / "roles/profiles/module_utils/profile_bundle.py"
+        spec = importlib.util.spec_from_file_location("vpn_profile_contract", module_path)
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        nodes = {}
+        for group in ("exit", "relay"):
+            if len(self.groups[group]) != 1:
+                continue
+            host = next(iter(self.groups[group]))
+            values = {key: item[0] for key, item in self.effective(group, host).items()}
+            nodes[group] = values
+            try:
+                contract.validate_host(values, group)
+            except contract.Invalid as error:
+                self.error(f"host {host}: {error}")
+            except (TypeError, ValueError):
+                self.error(f"host {host}: invalid self-steal input type")
+            if values.get("slot_fanout") != "ports":
+                self.error(f"host {host}: slot_fanout sni is unavailable; ports must be selected explicitly")
+            if values.get("s2s_family") != "v6_prefer" or values.get("xhttp_mode") != "stream-one":
+                self.error(f"host {host}: self-steal requires v6_prefer and stream-one")
+        if set(nodes) != {"exit", "relay"}:
+            return
+        exit_host, relay = nodes["exit"], nodes["relay"]
+        sources = set()
+        for version, suffix in ((4, "/32"), (6, "/128")):
+            key = f"relay_egress_ipv{version}"
+            try:
+                if not isinstance(relay.get(key), str):
+                    raise ValueError
+                address = ipaddress.ip_address(relay.get(key, ""))
+                if address.version != version or address.is_multicast or address.is_unspecified:
+                    raise ValueError
+                sources.add(str(address) + suffix)
+                if self.example and not in_networks(address, DOCUMENTATION_NETWORKS):
+                    raise ValueError
+            except ValueError:
+                self.error(f"relay: {key} requires an explicit IPv{version} egress address")
+        rules = exit_host.get("base_firewall_source_ports", [])
+        transit = [item for item in rules if isinstance(item, dict) and item.get("proto") == "tcp" and item.get("port") == exit_host.get("transit_port")] if isinstance(rules, list) else []
+        actual_sources = None
+        if len(transit) == 1:
+            try:
+                actual_sources = set(contract.cidrs(transit[0].get("source_cidrs"), "transit source_cidrs"))
+            except contract.Invalid:
+                pass
+        if actual_sources != sources:
+            self.error("exit: transit source ACL must exactly match declared relay egress /32 and /128")
+        ports = relay.get("relay_slot_ports")
+        if not isinstance(ports, list) or len(ports) != exit_host.get("egress_slots"):
+            self.error("relay: relay_slot_ports must contain one port per fixed slot")
 
     def summary(self) -> str:
         hosts = "; ".join(f"{group}: {', '.join(hosts) or '-'}" for group, hosts in self.groups.items())
@@ -377,23 +435,6 @@ def check_egress_slots(value: Any) -> str | None:
 def check_xhttp_path(value: Any) -> str | None:
     if not isinstance(value, str) or not value.startswith("/") or any(c.isspace() for c in value):
         return "must start with / and contain no whitespace"
-    return None
-
-
-def check_reality_target(value: Any) -> str | None:
-    match = HOST_PORT.fullmatch(value) if isinstance(value, str) else None
-    if match is None:
-        return "must be host:port or [ipv6]:port"
-    if match["ipv6"] is not None:
-        host_ok = isinstance(ip_or_none(match["ipv6"]), ipaddress.IPv6Address)
-        port = match["port6"]
-    else:
-        host_ok = ip_or_none(match["host"]) is not None or is_dns_name(match["host"])
-        port = match["port"]
-    if not host_ok:
-        return "host part must be an IP address or DNS name"
-    if not 1 <= int(port) <= 65535:
-        return "port must be from 1 through 65535"
     return None
 
 

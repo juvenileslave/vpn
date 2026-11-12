@@ -1,150 +1,148 @@
-# Ansible: контракт inventory
+# Ansible: общий inventory и безопасная интеграция
 
-Документ описывает этап 0.3 [архитектурного плана](ARCHITECTURE_PLAN.md):
-структуру inventory, контракт переменных и его проверку. **Развёртывание не
-реализовано.** В репозитории нет playbook'ов, ролей и коллекций; `make -C ansible`
-ничего не подключает к серверам и не меняет инфраструктуру. Успешная проверка
-означает только, что файлы inventory соответствуют контракту.
+`ansible/inventories/example/` — только синтетическая топология, не описание
+работающих серверов. `make -C ansible validate test` и `profiles.yml` работают
+локально. Роли base/cover/node имеют реальные opt-in entrypoints; их наличие
+не означает production deployment. [PROFILES.md](PROFILES.md) отделяет offline
+candidate от проверенного runtime и panel publication.
 
-## Структура
+## Файлы и топология
 
 ```text
 ansible/
-├── ansible.cfg                    # inventory по умолчанию — example
-├── Makefile                       # bootstrap, validate, test
-├── requirements-ansible.txt       # закреплённые ansible-core и PyYAML
-├── inventories/
-│   ├── example/                   # синтетическая топология, публикуется
-│   │   ├── hosts.yml
-│   │   ├── group_vars/{all,exit,relay,cp}.yml
-│   │   └── host_vars/{exit,relay,cp}-example.yml
-│   └── production/                # только локально, в .gitignore
-└── scripts/
-    ├── validate_inventory.py      # проверка контракта
-    └── tests/test_validate_inventory.py
+  ansible.cfg
+  playbooks/{base,cover_site,remnawave_node,profiles}.yml
+  inventories/example/
+    hosts.yml
+    group_vars/{all,exit,relay,cp}.yml
+    host_vars/{exit,relay,cp}-example.yml
+  roles/{base,cover_site,remnawave_node,profiles}/
+  scripts/validate_inventory.py
+  scripts/tests/{test_validate_inventory,test_render_profiles}.py
 ```
 
-`hosts.yml` содержит под `all.children` ровно три группы: `exit`, `relay`, `cp`.
-Хосты задаются только внутри этих групп; один хост не может входить в две группы.
-Переменные групп и хостов хранятся в файлах `group_vars/<группа>.yml` и
-`host_vars/<хост>.yml` рядом с `hosts.yml`; каталоги вида `group_vars/<группа>/`
-валидатор не поддерживает.
+`hosts.yml` содержит только `all.children.{exit,relay,cp}`. В exit/relay ровно
+по одному хосту. `cp_placement: dedicated` требует один отдельный cp;
+`cp_placement: exit` — пустую cp группу и host-namespace путь к colocated panel.
+Хост не принадлежит двум группам. `node_role`: `exit`, `relay`, `control_plane`.
+`ansible_host`, `public_ipv4`, `public_ipv6` обязательны и адреса уникальны.
 
-`ansible.cfg` включает проверку SSH host key (`host_key_checking = True`) и делает
-неразбираемый inventory фатальной ошибкой. Вывод в YAML настроен встроенным
-callback `ansible.builtin.default` через секцию `[callback_default]`
-(`result_format = yaml`): короткое имя `stdout_callback = yaml` относится к
-`community.general` и без этой коллекции ломает запуск `ansible-playbook`.
+`group_vars/<group>.yml`, `host_vars/<host>.yml` — mappings; вложенные каталоги
+и неизвестные группы валидатор не принимает. Precedence: inventory group vars,
+`group_vars/all`, `group_vars/<group>`, inline host vars, `host_vars/<host>`.
+Несовпадение inline host и host_vars — ошибка. `cp_placement` только all.
+SSH host key verification включена; неизвестный inventory фатален. YAML output
+использует встроенный `ansible.builtin.default`, не внешний callback plugin.
 
-## Контракт переменных
+## Общие поля
 
-Переменные хоста — `ansible_host` (адрес SSH), `public_ipv4`, `public_ipv6` и
-`node_role`. Они обязательны для `exit`, `relay` и для `cp` в режиме
-`dedicated`. `node_role` должен соответствовать группе: `exit`, `relay` или
-`control_plane` для `cp`. Если переменная задана и в `hosts.yml`, и в
-`host_vars`, значения должны совпадать.
+| Переменная | Контракт |
+| --- | --- |
+| `cp_placement` | `exit` или `dedicated`, только all |
+| `client_family` | `v4`, `dual` |
+| `s2s_family` | общий enum; self-steal bundle требует `v6_prefer` |
+| `egress_family` | `v4_prefer`, `v6_prefer`, `v4_only` |
+| `egress_slots` | integer 1…6; fixed `egress-0…egress-5` |
+| `slot_fanout` | self-steal требует явно `ports`; неработающий `sni` не становится ports автоматически |
+| `reality_sni` | одно точное DNS-имя cover/server/client; lowercase в профиле |
+| `xhttp_path` | `/…`, без whitespace/query/fragment для renderer |
+| `xhttp_mode` | self-steal требует `stream-one`, фиксированные padding/fingerprint |
+| `image_tags` | публичный mapping строк; не заменяет immutable digest authority роли Node |
 
-| Переменная | Допустимые значения | Где задаётся |
-| --- | --- | --- |
-| `cp_placement` | `exit`, `dedicated` | только `group_vars/all` |
-| `client_family` | `v4`, `dual` | `all`, `relay` |
-| `s2s_family` | `v6_prefer`, `v4_only`, `v6_only` | `all`, `relay` |
-| `egress_family` | `v4_prefer`, `v6_prefer`, `v4_only` | `all`, `exit` |
-| `egress_slots` | целое от 1 до 6 (слоты `egress-0…egress-5`) | `all`, `exit` |
-| `slot_fanout` | `sni`, `ports` | `all` |
-| `node_port_allow` | список CIDR без установленных битов хоста | `all` |
-| `reality_sni` | DNS-имя | `all` или `host_vars` |
-| `reality_target` | `host:port` или `[ipv6]:port`, порт 1–65535 | `all` или `host_vars` |
-| `xhttp_path` | начинается с `/`, без пробелов | `all` или `host_vars` |
-| `xhttp_mode` | `auto`, `packet-up`, `stream-up`, `stream-one` | `all` или `host_vars` |
-| `image_tags` | mapping «компонент → тег», строки | `group_vars/all` |
-| `panel_bind` | адрес привязки панели | `cp` |
+## Per-node cover, ports, source ACL
 
-Правила топологии:
+Для exit и relay нужны `cover_tls_port`, абсолютный `cover_site_source`,
+`cover_acme_email`, положительный integer `reality_max_time_diff_ms` (300000),
+`remnawave_node_network_mode: host`. Cover additionally требует TOS и явное
+подтверждение HTTP-01 DNS/TCP80 prerequisites; это не автоматическая DNS mutation.
+`reality_target` не обязателен; если указан, должен **в точности** совпадать с
+производным `127.0.0.1:<cover_tls_port>`. В server JSON используется только `dest`.
 
-- в `exit` и в `relay` ровно по одному хосту;
-- `cp_placement: dedicated` — в `cp` ровно один хост, отличный от exit;
-- `cp_placement: exit` — группа `cp` пустая: control plane работает на exit;
-- все публичные адреса всех хостов уникальны (сравниваются в нормализованном виде).
+Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одним
+портом на fixed slot, `relay_egress_ipv4`, `relay_egress_ipv6` с явно объявленным
+фактическим источником второго hop. Не выводите NAT egress из `public_ipv*`.
 
-Значения применяются в порядке приоритета ansible-core: переменные групп из
-`hosts.yml`, затем `group_vars/all`, `group_vars/<группа>`, переменные хоста из
-`hosts.yml` и `host_vars/<хост>`.
+Единственные firewall authority:
 
-## Только синтетический пример
+- `base_firewall_vpn_ports`: список `{proto: tcp|udp, port: integer}` публичных
+  ports; direct и relay TCP listeners обязательны. Не transit/API/private origin.
+- `base_firewall_source_ports`: список строгих mappings
+  `{proto, port, source_cidrs}`. Safe strict CIDRs, nonempty list, no bool/string
+  ports, duplicate/conflicting public/SSH rule или wide/invalid CIDR.
+- Для transit TCP source list **в точности** relay egress `/32` и `/128`.
+  Semantics проверяет profiles/inventory; generic base разрешает safe management
+  subnets и не выводит transit sources самостоятельно.
+- `node_api_port`: официальный default **2222**. Роль Node потребляет этот порт;
+  source TCP rule должен в точности совпадать с `node_port_allow`.
+- `node_port_allow`: safe CIDRs; допустимы также только exact management
+  loopback `127.0.0.1/32`, `::1/128`. SSH trust policy этим не ослабляется.
+  Для colocated panel — настоящий host-loopback путь. Dedicated CP — реально
+  объявленный permitted source/path; local probe требует явного loopback.
+- SSH, API, direct/transit/relay и cover listener ports не пересекаются. Origin
+  host-loopback не имеет ни public, ни source-exposed alternate port.
 
-`inventories/example/` — обезличенная топология для проверки контракта, а не
-описание рабочих серверов. Для каталога с именем `example` валидатор
-дополнительно требует:
+См. [BASE_ROLE.md](BASE_ROLE.md), [COVER_SITE.md](COVER_SITE.md),
+[REMNAWAVE_NODE.md](REMNAWAVE_NODE.md). Node source ACL проверяется **live** до
+старта wildcard API; Docker host network не является firewall restriction.
+Management address/source/delegate — обязательный реальный CP path, не
+предполагаемый localhost. SECRET_KEY — panel PKI export, а не случайный пароль;
+management probe использует mTLS/TLS1.3 + RS256 JWT. Секреты не входят в inventory.
 
-- адреса только из документационных диапазонов `192.0.2.0/24`,
-  `198.51.100.0/24`, `203.0.113.0/24` и `2001:db8::/32`;
-- `ansible_host` равен документационному `public_ipv4` хоста;
-- `reality_sni` оканчивается на `.example.com`;
-- `node_port_allow` — только документационные или частные диапазоны
-  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`).
+`profiles_probe_url` — explicit HTTP(S) endpoint через exit slot0; synthetic
+`probe.example.com` в example не является работающим сервисом. Offline schema
+не подтверждает DNS, ACME issuance, SAN/chain/expiry, H2, namespace или client
+transfer: это отдельные real runtime gates.
 
-Не добавляйте в пример реальные имена хостов, адреса, домены, ключи, токены и
-другие учётные данные.
+## Синтетический пример и приватный inventory
 
-## Рабочий inventory
+Для example public IP только RFC5737 `192.0.2.0/24`, `198.51.100.0/24`,
+`203.0.113.0/24` и `2001:db8::/32`; `ansible_host` равен synthetic public IPv4;
+SNI заканчивается `.example.com`. Management CIDRs — documentation/private
+ranges или exact standard loopback. Public example не содержит keys, UUID,
+node PKI, real domains/server IDs или client links.
 
-Реальный inventory размещается только локально в
-`ansible/inventories/production/`. Этот путь указан в `.gitignore`, а
-`scripts/check_repository.py` блокирует публикацию путей inventory с `production`,
-`prod` или `live`. **Никогда не коммитьте рабочий inventory**, даже частично или
-временно: `.gitignore` не защищает уже добавленные в индекс файлы. Секреты в
-inventory не хранятся.
-
-Проверка локального рабочего inventory, без подключения к узлам:
+Рабочий inventory держится только в ignored
+`ansible/inventories/production/`, credentials — Vault/файлы **вне checkout**.
+`make check` запрещает publication production/prod/live inventory; `.gitignore`
+не защищает уже tracked secrets. Проверять локально без подключения:
 
 ```sh
 .venv/bin/python ansible/scripts/validate_inventory.py \
   --inventory ansible/inventories/production/hosts.yml
 ```
 
-Для него действуют общие правила контракта; правила примера не применяются.
-Валидатор не печатает значения адресов в сообщениях об ошибках, но вывод с путями
-рабочего inventory всё равно не публикуйте.
+Валидатор показывает location/constraint, не секретные значения. Приватные пути
+и inventory output всё равно не публикуйте. Inventory не даёт разрешения менять
+production, firewall, certificates, DNS или существующую VM.
 
-## Добавление хоста
+## Проверки и guarded acceptance
 
-1. Добавьте хост в нужную группу `hosts.yml` с `ansible_host`, `public_ipv4`,
-   `public_ipv6` и `node_role`.
-2. При необходимости создайте `host_vars/<хост>.yml` с теми же значениями адресов
-   и роли или с переопределениями переменных узла.
-3. Для `cp` проверьте `cp_placement` в `group_vars/all.yml`: хост в `cp`
-   допустим только в режиме `dedicated`.
-4. Выполните проверку из следующего раздела.
-
-Контракт допускает ровно один exit и один relay; второй узел той же роли
-потребует отдельного изменения контракта и валидатора.
-
-## Локальная проверка
-
-Нужны Python 3.11 или новее. Команды используют общую `.venv` в корне
-репозитория; отдельное окружение в `ansible/` не создаётся.
+Python 3.11+, одна `.venv` в repository root:
 
 ```sh
 make -C ansible bootstrap
 make -C ansible validate
 make -C ansible test
+.venv/bin/python -m unittest discover -s ansible/roles/profiles/tests -p 'test_*.py' -v
 ```
 
-| Команда | Назначение |
-| --- | --- |
-| `make -C ansible bootstrap` | Создаёт `.venv`, если её нет, и устанавливает `requirements-ansible.txt`. |
-| `make -C ansible validate` | `ansible-inventory -i inventories/example/hosts.yml --list` как проверка разбора, затем `validate_inventory.py`. |
-| `make -C ansible test` | Unit-тесты валидатора на временных YAML-фикстурах; сеть не используется. |
+`validate`: настоящий `ansible-inventory --list`, затем static cross-role schema.
+`test`: temporary synthetic YAML плюс actual local profile playbook, generated
+credentials, invalid-before-write/idempotence/redaction. Нет network calls к
+панели или узлам. Эти тесты не заменяют runtime и не обещают работающий VPN.
 
-При ошибке валидатор выводит путь к файлу и переменной и завершается с кодом 1.
+Полный #47 entry и prerequisites — [PROFILES.md](PROFILES.md):
 
-## CI
+```sh
+sudo env PATH="$PATH" HOME="$HOME" GITHUB_ACTIONS=true \
+  RUNNER_ENVIRONMENT=github-hosted VPN_PROFILES_DISPOSABLE_GUEST=yes \
+  bash ansible/roles/profiles/tests/runtime_vm.sh
+```
 
-Workflow [`.github/workflows/ansible.yml`](../.github/workflows/ansible.yml)
-с job `Ansible inventory` запускается для каждого pull request и для push в
-`master`. Он использует закреплённые по SHA `actions/checkout` и
-`actions/setup-python`, права `contents: read`, не обращается к secrets и
-выполняет `make -C ansible bootstrap`, затем `make -C ansible validate test`.
-Job не входит в обязательные проверки защиты `master` (`Repository checks`,
-`Secret scan`) и не заменяет их.
+Только explicitly guarded свежий GitHub-hosted Ubuntu guest: real pinned
+RemnaNode/core, private cover/local ACME, base ACL, generated credentials,
+synthetic isolated netns, visitor/adversarial/replay/slot/failover/load/rollback.
+Не production/panel/DNS/public ACME. Unavailable runtime prerequisite — ошибка,
+не silent skip и не fake static equivalence. CI jobs/entrypoints описывают
+проверки; actual результаты интегратор публикует отдельно. Финальный `make check`
+не заменяет runtime, Secret scan или отдельно разрешённый российский AC-12 pilot.

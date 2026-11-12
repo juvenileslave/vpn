@@ -2,3 +2,15 @@ ansible_host: 192.0.2.10
 public_ipv4: 192.0.2.10
 public_ipv6: 2001:db8:10::10
 node_role: exit
+exit_direct_port: 8443
+transit_port: 8444
+base_firewall_vpn_ports:
+  - {proto: tcp, port: 80}
+  - {proto: tcp, port: 8443}
+base_firewall_source_ports:
+  - proto: tcp
+    port: 8444
+    source_cidrs: [198.51.100.20/32, "2001:db8:20::20/128"]
+  - proto: tcp
+    port: 2222
+    source_cidrs: [127.0.0.1/32, "::1/128", 203.0.113.30/32, "2001:db8:30::30/128"]

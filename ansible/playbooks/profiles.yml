@@ -1,8 +1,19 @@
 ---
-# Local-only render of the exit node Xray profiles (architecture tasks 3.2, 3.3, 3.5).
-# connection: local keeps every task on the control machine: no SSH to the
-# exit host, no panel API, no upload. See docs/PROFILES.md.
-- name: Render exit Xray profiles locally
+# One topology-wide offline bundle. No SSH, service, firewall or panel mutation.
+- name: Validate topology before any empty host pattern can silently skip
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require exactly one exit and relay
+      ansible.builtin.assert:
+        that:
+          - groups.get('exit', []) | length == 1
+          - groups.get('relay', []) | length == 1
+        fail_msg: A profile bundle requires exactly one exit and one relay.
+        quiet: true
+
+- name: Render coherent exit relay and client candidate locally
   hosts: exit
   connection: local
   gather_facts: false

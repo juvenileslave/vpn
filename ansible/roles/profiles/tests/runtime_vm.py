@@ -1,0 +1,781 @@
+#!/usr/bin/env python3
+"""Real disposable RemnaNode/Xray/nginx/source-ACL acceptance, never production."""
+from __future__ import annotations
+import base64
+import copy
+import hashlib
+import importlib.util
+import ipaddress
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+import yaml
+
+from fixtures import ROOT, bundle, inputs, secret_strings
+
+HERE = Path(__file__).resolve().parent
+
+
+def imported(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+NODE = ROOT / "ansible/roles/remnawave_node"
+LIFE = imported("node_life", NODE / "files/lifecycle.py")
+PKI = imported("node_fixture", NODE / "tests/runtime_vm.py")
+
+
+def command(args, *, expected=True, env=None, timeout=600):
+    result = subprocess.run([str(x) for x in args], capture_output=True, env=env, timeout=timeout, check=False)
+    if (result.returncode == 0) != expected:
+        raise AssertionError("unexpected result: " + Path(str(args[0])).name + " (private output withheld)")
+    return result.stdout
+
+
+def private_json(path, value):
+    path.write_text(json.dumps(value, sort_keys=True))
+    path.chmod(0o600)
+
+
+def guard():
+    wanted = {"VPN_PROFILES_DISPOSABLE_GUEST": "yes", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+    if os.geteuid() != 0 or any(os.environ.get(k) != v for k, v in wanted.items()) or sys.platform != "linux":
+        raise SystemExit("refusing non-disposable profile runtime")
+    for path in ("/etc/cover-site", "/var/lib/cover-site", "/etc/nginx/sites-enabled/cover-site.conf"):
+        if Path(path).exists() or Path(path).is_symlink():
+            raise SystemExit("fresh role-owned cover state required")
+
+
+def wire_bytes(field, value):
+    def varint(n):
+        data = bytearray()
+        while n > 127:
+            data.append((n & 127) | 128)
+            n >>= 7
+        data.append(n)
+        return bytes(data)
+    return varint((field << 3) | 2) + varint(len(value)) + value
+
+
+def fixture_geoip(path):
+    # Real Xray protobuf fixture keeps RFC1918/ULA/link-local/loopback blocked;
+    # only documentation-range test endpoints are not in PRIVATE. Production
+    # retains stock geodata and identical routing/finalRules. No fake core.
+    entry = wire_bytes(1, b"PRIVATE")
+    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10", "::1/128"):
+        net = ipaddress.ip_network(cidr)
+        record = wire_bytes(1, net.network_address.packed) + b"\x10" + bytes([net.prefixlen])
+        if net.prefixlen == 128:
+            record = wire_bytes(1, net.network_address.packed) + b"\x10\x80\x01"
+        entry += wire_bytes(2, record)
+    path.write_bytes(wire_bytes(1, entry))
+    path.chmod(0o600)
+
+
+class Lab:
+    def __init__(self, directory):
+        self.work = directory
+        self.prefix = "vp47-" + secrets.token_hex(3)
+        self.namespaces = {}
+        self.processes = []
+        self.client_processes = {}
+        self.evidence = {"schema": 1, "environment": "guarded-disposable-ubuntu-24.04", "node_image": bundle.NODE_IMAGE, "core_version": bundle.CORE_VERSION, "scenarios": {}}
+        self.old_hosts = Path("/etc/hosts").read_bytes()
+        self.output = directory / "bundles"
+        self.topology, self.secret = inputs(20)
+        self.topology["profiles_probe_url"] = "http://192.0.2.100:18081/generate_204"
+        for kind in ("exit", "relay"):
+            host = self.topology[kind]
+            host["reality_sni"] = "cover.example.test"
+            host["cover_tls_port"] = 18445
+            host["cover_site_source"] = str(self.work / "site")
+            host["cover_acme_email"] = "operator@example.test"
+            host["node_port_allow"] = ["127.0.0.1/32", "::1/128"]
+            host["base_firewall_source_ports"] = [{"proto": "tcp", "port": 2222, "source_cidrs": host["node_port_allow"]}]
+            host["public_ipv4"] = "192.0.2.10" if kind == "exit" else "192.0.2.20"
+            host["public_ipv6"] = "2001:db8:47::10" if kind == "exit" else "2001:db8:47::20"
+        self.topology["exit"].update(exit_direct_port=18443, transit_port=18444, base_firewall_vpn_ports=[{"proto": "tcp", "port": 80}, {"proto": "tcp", "port": 18443}])
+        self.topology["exit"]["base_firewall_source_ports"].append({"proto": "tcp", "port": 18444, "source_cidrs": ["192.0.2.20/32", "2001:db8:47::20/128"]})
+        self.topology["relay"].update(relay_egress_ipv4="192.0.2.20", relay_egress_ipv6="2001:db8:47::20", relay_slot_ports=[19443, 19444, 19445], base_firewall_vpn_ports=[{"proto": "tcp", "port": p} for p in (80, 19443, 19444, 19445)])
+        self.secret["relay_client_ids"] += [str(uuid.uuid4()), str(uuid.uuid4())]
+        self.secret["profiles_user_slots"] += [1, 2]
+        self.secret["profiles_upstreams"] = {"1": {"protocol": "socks", "settings": {"servers": [{"address": "192.0.2.50", "port": 18082}]}}}
+        self.node_inputs = {}
+        self.relay_env = None
+
+    def ns(self, kind):
+        return self.namespaces.get(kind)
+
+    def run(self, kind, args, **kwargs):
+        ns = self.ns(kind)
+        return command((["ip", "netns", "exec", ns] if ns else []) + [str(x) for x in args], **kwargs)
+
+    def spawn(self, kind, args, name, env=None):
+        ns = self.ns(kind)
+        output = (self.work / (name + ".private.log")).open("wb")
+        process = subprocess.Popen((["ip", "netns", "exec", ns] if ns else []) + [str(x) for x in args], stdout=output, stderr=subprocess.STDOUT, env=env)
+        output.close()
+        self.processes.append(process)
+        return process
+
+    def play(self, roles, kind="exit", variables=None, *, expected=True, check=False):
+        inventory = self.work / "deployment-inventory.yml"
+        wrapper = self.work / "relay-python"
+        wrapper.write_text('#!/bin/sh\nexec ip netns exec ' + self.ns("relay") + ' /usr/bin/python3 "$@"\n')
+        wrapper.chmod(0o700)
+        inventory.write_text(yaml.safe_dump({"all": {"hosts": {"exit": {"ansible_connection": "local", "ansible_python_interpreter": "/usr/bin/python3"}, "relay": {"ansible_connection": "local", "ansible_python_interpreter": str(wrapper)}}}}))
+        play = [{"name": "Disposable integration", "hosts": kind, "gather_facts": True, "environment": {"DOCKER_HOST": self.relay_env["DOCKER_HOST"]} if kind == "relay" and self.relay_env else {}, "tasks": [{"ansible.builtin.include_role": role if isinstance(role, dict) else {"name": str(ROOT / "ansible/roles" / role)}} for role in roles]}]
+        path = self.work / "deployment-play.yml"
+        path.write_text(yaml.safe_dump(play))
+        varfile = self.work / "deployment-vars.private.json"
+        private_json(varfile, variables or {})
+        return command([ROOT / ".venv/bin/ansible-playbook", "-i", inventory, path, "-e", "@" + str(varfile), *(["--check"] if check else [])], expected=expected)
+
+    def render(self, topology=None, secret=None, *, expected=True):
+        topology, secret = topology or self.topology, secret or self.secret
+        inv = self.work / "profiles-inventory.yml"
+        inv.write_text(yaml.safe_dump({"all": {"vars": {k: v for k, v in topology.items() if k not in ("exit", "relay")}, "children": {k: {"hosts": {k: topology[k]}} for k in ("exit", "relay")}}}))
+        varsfile = self.work / "profiles-vars.private.json"
+        private_json(varsfile, {**secret, "profiles_output_dir": str(self.output)})
+        result = command([ROOT / ".venv/bin/ansible-playbook", "-i", inv, ROOT / "ansible/playbooks/profiles.yml", "-e", "@" + str(varsfile)], expected=expected)
+        for value in secret_strings(secret):
+            if value.encode() in result:
+                raise AssertionError("secret leaked in profile output")
+        if expected:
+            return (self.output / "candidate").resolve(), result
+        return None, result
+
+    def network(self):
+        bridge = self.prefix + "br"
+        command(["ip", "link", "add", bridge, "type", "bridge"])
+        command(["ip", "addr", "add", "192.0.2.10/24", "dev", bridge])
+        command(["ip", "-6", "addr", "add", "2001:db8:47::10/64", "dev", bridge, "nodad"])
+        command(["ip", "link", "set", bridge, "up"])
+        for kind, suffix in (("relay", 20), ("client", 30), ("outsider", 40), ("upstream", 50), ("sink", 100)):
+            ns = self.prefix + "-" + kind
+            self.namespaces[kind] = ns
+            command(["ip", "netns", "add", ns])
+            interface = self.prefix + str(suffix)
+            command(["ip", "link", "add", interface, "type", "veth", "peer", "name", "eth0", "netns", ns])
+            command(["ip", "link", "set", interface, "master", bridge])
+            command(["ip", "link", "set", interface, "up"])
+            command(["ip", "-n", ns, "link", "set", "lo", "up"])
+            command(["ip", "-n", ns, "link", "set", "eth0", "up"])
+            command(["ip", "-n", ns, "addr", "add", f"192.0.2.{suffix}/24", "dev", "eth0"])
+            command(["ip", "-n", ns, "-6", "addr", "add", f"2001:db8:47::{suffix}/64", "dev", "eth0", "nodad"])
+        # No default route in any network namespace: no public-network traffic.
+        Path("/etc/hosts").write_bytes(self.old_hosts + b"\n192.0.2.10 cover.example.test\n2001:db8:47::10 cover.example.test\n")
+
+    def prerequisites(self):
+        self.play(["docker"], variables={"docker_allow_version_change": True})
+        existing = subprocess.run(["docker", "inspect", "vpn-remnanode"], capture_output=True, check=False)
+        if existing.returncode == 0:
+            raise AssertionError("fresh guest required; refusing an existing Node container")
+        command(["docker", "pull", "--quiet", bundle.NODE_IMAGE])
+        command(["docker", "save", "-o", self.work / "node-image.tar", bundle.NODE_IMAGE])
+        extract = self.prefix + "-extract"
+        command(["docker", "create", "--name", extract, "--network=none", "--entrypoint=sleep", bundle.NODE_IMAGE, "3600"])
+        self.extract = extract
+        self.assets = self.work / "core"
+        self.assets.mkdir(mode=0o700)
+        for name, source in (("xray", "/usr/local/bin/xray"), ("geoip.dat", "/usr/local/share/xray/geoip.dat"), ("geosite.dat", "/usr/local/share/xray/geosite.dat")):
+            command(["docker", "cp", extract + ":" + source, self.assets / name])
+        self.xray = self.assets / "xray"
+        self.xray.chmod(0o700)
+        if not command([self.xray, "version"]).startswith(b"Xray 26.11.9 "):
+            raise AssertionError("embedded core version differs from verified pin")
+        self.evidence["embedded_core_sha256"] = hashlib.sha256(self.xray.read_bytes()).hexdigest()
+        self.evidence["stock_geoip_sha256"] = hashlib.sha256((self.assets / "geoip.dat").read_bytes()).hexdigest()
+        fixture_geoip(self.assets / "geoip.dat")
+        self.evidence["fixture_geoip_sha256"] = hashlib.sha256((self.assets / "geoip.dat").read_bytes()).hexdigest()
+        self.core_env = {**os.environ, "XRAY_LOCATION_ASSET": str(self.assets)}
+        build = self.work / "reality-probe-source"
+        shutil.copytree(HERE / "reality_probe", build)
+        self.probe_binary = self.work / "reality-probe"
+        # Build from a copied private directory; never modify the checkout/go.sum.
+        result = subprocess.run(["go", "build", "-mod=mod", "-o", str(self.probe_binary), "."], cwd=build, env={**os.environ, "GOTOOLCHAIN": "auto", "GOWORK": "off"}, capture_output=True, timeout=900, check=False)
+        if result.returncode:
+            raise AssertionError("pinned disposable REALITY probe build failed")
+        command(["go", "install", "github.com/letsencrypt/pebble/v2/cmd/pebble@v2.6.0"], env={**os.environ, "GOBIN": str(self.work / "bin"), "GOTOOLCHAIN": "auto"}, timeout=900)
+
+    def relay_daemon(self):
+        data = self.work / "relay-docker"
+        data.mkdir(mode=0o700)
+        endpoint = "unix://" + str(data / "docker.sock")
+        self.relay_env = {**os.environ, "DOCKER_HOST": endpoint}
+        private_json(data / "daemon.json", {})
+        self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker")
+        for _ in range(90):
+            result = subprocess.run(["docker", "info"], env=self.relay_env, capture_output=True, check=False)
+            if result.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("isolated relay Docker daemon not ready")
+        command(["docker", "load", "-i", self.work / "node-image.tar"], env=self.relay_env)
+
+    def cover(self):
+        site = self.work / "site"
+        site.mkdir(mode=0o755)
+        (site / "index.html").write_text('<!doctype html><html lang="en"><head><title>Atlas field journal</title><link rel="stylesheet" href="journal.css"></head><body><h1>Atlas field journal</h1><p>A synthetic archive of coastal observations, local maps and weather notes from imaginary islands.</p><a href="notes.html">Field notes</a></body></html>\n')
+        (site / "journal.css").write_text("body { max-width: 48rem; margin: 3rem auto; color: #243; }\n")
+        (site / "notes.html").write_text("<!doctype html><title>Notes</title><p>Synthetic coastal weather observations.</p>\n")
+        ca = self.work / "acme-ca"
+        ca.mkdir(mode=0o700)
+        command(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", ca / "key.pem", "-out", ca / "cert.pem", "-days", "2", "-subj", "/CN=Disposable ACME API CA"])
+        command(["openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", ca / "api.key", "-out", ca / "api.csr", "-subj", "/CN=localhost"])
+        (ca / "api.ext").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
+        command(["openssl", "x509", "-req", "-in", ca / "api.csr", "-CA", ca / "cert.pem", "-CAkey", ca / "key.pem", "-CAcreateserial", "-out", ca / "api.pem", "-days", "2", "-extfile", ca / "api.ext"])
+        private_json(self.work / "pebble.json", {"pebble": {"listenAddress": "127.0.0.1:14000", "managementListenAddress": "127.0.0.1:15000", "certificate": str(ca / "api.pem"), "privateKey": str(ca / "api.key"), "httpPort": 80, "tlsPort": 5001, "externalAccountBindingRequired": False}})
+        self.spawn("exit", ["dnsmasq", "--keep-in-foreground", "--no-resolv", "--no-hosts", "--bind-interfaces", "--listen-address=127.0.0.1", "--port=53535", "--address=/.example.test/127.0.0.1"], "dns")
+        self.spawn("exit", [self.work / "bin/pebble", "-config", self.work / "pebble.json", "-dnsserver", "127.0.0.1:53535"], "pebble", env={**os.environ, "PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0", "PEBBLE_VA_ALWAYS_VALID": "0"})
+        for _ in range(90):
+            result = subprocess.run(["curl", "-fsSk", "--noproxy", "*", "https://127.0.0.1:15000/roots/0"], capture_output=True, check=False)
+            if result.returncode == 0 and b"BEGIN CERTIFICATE" in result.stdout:
+                self.trust = self.work / "root.pem"
+                self.trust.write_bytes(result.stdout)
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("real local ACME root unavailable")
+        self.cover_vars = {**self.topology["exit"], "cover_acme_agree_tos": True, "cover_acme_http_reachable": True, "cover_disposable_test": True, "cover_acme_directory": "https://localhost:14000/dir", "cover_acme_test_ca": str(ca / "cert.pem"), "cover_certificate_trust": str(self.trust)}
+        self.play(["cover_site"], variables=self.cover_vars)
+        self.first_site = Path("/var/lib/cover-site/active").resolve()
+        command(["/usr/local/libexec/cover-site/lifecycle.py", "health"])
+        command(["openssl", "x509", "-in", self.first_site / "certificate/cert.pem", "-checkend", "3600", "-noout"])
+        conf = self.work / "relay-nginx.conf"
+        conf.write_text('pid ' + str(self.work / 'relay-nginx.pid') + ';\nerror_log ' + str(self.work / 'relay-nginx.private.log') + ';\nevents {}\nhttp { include /etc/nginx/mime.types; include ' + str(self.first_site / 'site.conf') + '; }\n')
+        self.relay_nginx_conf = conf
+        self.spawn("relay", ["nginx", "-c", conf, "-g", "daemon off;"], "relay-origin")
+        self.evidence["scenarios"]["origin"] = {"issued_by": "real-local-Pebble-HTTP01", "chain_SAN_expiry": "cover-role-health-and-openssl-checkend", "replica": "same-role-generated-site.conf-in-relay-host-network"}
+
+    def base(self, kind, extra_public=None):
+        host = self.topology[kind]
+        variables = {**host, "base_ssh_trusted_cidrs": ["192.0.2.30/32", "2001:db8:47::30/128"], "base_firewall_enabled": True, "base_firewall_allow_icmp_echo": True, "base_firewall_allow_dhcpv6_client": False}
+        if extra_public:
+            variables["base_firewall_vpn_ports"] = variables["base_firewall_vpn_ports"] + [{"proto": "tcp", "port": extra_public}]
+        self.play([{"name": str(ROOT / "ansible/roles/base"), "tasks_from": "firewall.yml"}], kind=kind, variables=variables)
+
+    def deploy_node(self, kind):
+        pki = self.work / (kind + "-pki")
+        secret, credentials = PKI.fixture(pki)
+        directory = "/opt/" + self.prefix + "-" + kind
+        self.node_inputs[kind] = {"secret": secret, "credentials": credentials, "port": 2222, "config": {}}
+        host = self.topology[kind]
+        variables = {**host, "cp_placement": "exit", "remnawave_node_dir": directory, "remnawave_node_secret_key_file": str(pki / "secret"), "remnawave_node_management_credentials_file": str(pki / "credentials.json"), "remnawave_node_management_address": "127.0.0.1", "remnawave_node_management_source": "127.0.0.1", "remnawave_node_management_delegate": kind, "remnawave_node_timeout": 120}
+        self.play(["remnawave_node"], kind=kind, variables=variables)
+        env = self.relay_env if kind == "relay" else None
+        command(["docker", "cp", self.assets / "geoip.dat", "vpn-remnanode:/usr/local/share/xray/geoip.dat"], env=env)
+        inspect = json.loads(command(["docker", "inspect", "vpn-remnanode"], env=env))[0]
+        expected = Path("/var/run/netns/" + self.ns(kind)) if self.ns(kind) else Path("/proc/1/ns/net")
+        if os.stat(expected).st_ino != os.stat("/proc/" + str(inspect["State"]["Pid"]) + "/ns/net").st_ino:
+            raise AssertionError("Node does not share the actual origin network namespace")
+        self.evidence["scenarios"][kind + "_node"] = {"network_mode": inspect["HostConfig"]["NetworkMode"], "actual_namespace_matches_origin": True}
+        return variables
+
+    def api_start(self, kind, configuration):
+        obj = {**self.node_inputs[kind], "config": configuration}
+        path = self.work / (kind + "-start.private.json")
+        private_json(path, obj)
+        result = json.loads(self.run(kind, [ROOT / ".venv/bin/python", __file__, "node-start", path]))
+        if result["xrayVersion"] != bundle.CORE_VERSION:
+            raise AssertionError("API core version does not match stock binary")
+
+    def activate_configs(self, candidate):
+        if getattr(self, "installed_identity", None) == candidate.name:
+            for kind in ("exit", "relay"):
+                path = self.work / (kind + "-start.private.json")
+                self.run(kind, [ROOT / ".venv/bin/python", __file__, "node-health", path])
+            return
+        for kind in ("exit", "relay"):
+            config = candidate / (kind + ".json")
+            command([self.xray, "run", "-test", "-config", config], env=self.core_env)
+            self.api_start(kind, json.loads(config.read_text()))
+        for config in (candidate / "clients").glob("*.json"):
+            command([self.xray, "run", "-test", "-config", config], env=self.core_env)
+        self.installed_identity = candidate.name
+
+    def client(self, candidate, name, port, *, version=4, change=None):
+        if name in self.client_processes:
+            old = self.client_processes.pop(name)
+            old.terminate()
+            old.wait(timeout=10)
+        config = json.loads((candidate / ("clients/" + name + ".json")).read_text())
+        config["inbounds"][0]["port"] = port
+        if version == 6:
+            host = self.topology["exit" if name.startswith("direct") else "relay"]
+            config["outbounds"][0]["settings"]["vnext"][0]["address"] = host["public_ipv6"]
+        if change:
+            change(config)
+        path = self.work / ("client-" + name + ".private.json")
+        private_json(path, config)
+        self.client_processes[name] = self.spawn("client", [self.xray, "run", "-config", path], "client-" + name, env=self.core_env)
+        for _ in range(100):
+            if self.run("client", [ROOT / ".venv/bin/python", __file__, "tcp", "127.0.0.1", str(port)]).strip() == b"open":
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("real local client listener unavailable")
+
+    def transfer(self, port=1080, size=1048576, *, expected=True, address="192.0.2.100", target=18080):
+        return self.run("client", [ROOT / ".venv/bin/python", HERE / "traffic.py", "transfer", port, size, address, target], expected=expected, timeout=240)
+
+    def tls_matrix(self):
+        expected = (self.work / "site/index.html").read_bytes()
+        origin_results = {}
+        for kind in ("exit", "relay"):
+            host = self.topology[kind]
+            public_port = host.get("exit_direct_port", host.get("relay_slot_ports", [None])[0])
+            for tls in ("1.2", "1.3"):
+                for http in ("1.1", "2"):
+                    flags = ["--tlsv" + tls, "--tls-max", tls, "--http" + http]
+                    visitor_body = self.work / "visitor-body.private.bin"
+                    protocol = self.run("client", ["curl", "-fsS", "--max-time", "15", "--noproxy", "*", "--cacert", self.trust, "--resolve", f"cover.example.test:{public_port}:{host['public_ipv4']}", *flags, "--output", visitor_body, "--write-out", "%{http_version}", f"https://cover.example.test:{public_port}/"])
+                    if visitor_body.read_bytes() != expected or protocol.strip() != http.encode():
+                        raise AssertionError("actual public REALITY content or negotiated H1/H2 differs from owned origin")
+            for sni in (None, "unknown.example.test", "cover.example.test"):
+                for hostname in ("cover.example.test", "unknown.example.test"):
+                    for path in ("/", "/absent", "/panel", "/metrics"):
+                        request = {"sni": sni, "host": hostname, "path": path}
+                        testfile = self.work / "visitor.private.json"
+                        private_json(testfile, request)
+                        origin = self.run(kind, [ROOT / ".venv/bin/python", __file__, "visitor", "127.0.0.1", str(host["cover_tls_port"]), testfile])
+                        public = self.run("client", [ROOT / ".venv/bin/python", __file__, "visitor", host["public_ipv4"], str(public_port), testfile])
+                        if json.loads(origin) != json.loads(public):
+                            raise AssertionError("unknown/missing SNI/Host/path differs from actual origin")
+                        origin_results[str(request)] = json.loads(origin)
+        self.evidence["scenarios"]["visitor_matrix"] = {"TLS": ["1.2", "1.3"], "HTTP": ["1.1", "2"], "baseline_cases": len(origin_results), "baseline": origin_results}
+
+    def denied_ports(self):
+        checks = []
+        for kind in ("exit", "relay"):
+            for version in (4, 6):
+                host = self.topology[kind]
+                for port in (host["cover_tls_port"], 2222, 9100):
+                    if port == 9100:
+                        if self.run(kind, [ROOT / ".venv/bin/python", __file__, "tcp", host["public_ipv" + str(version)], "9100"]).strip() != b"open":
+                            raise AssertionError("exporter canary absent; deny observation would be vacuous")
+                    result = self.run("outsider", [ROOT / ".venv/bin/python", __file__, "tcp", host["public_ipv" + str(version)], str(port)])
+                    if result.strip() != b"closed":
+                        raise AssertionError("private origin/API/exporter externally reachable")
+                    checks.append({"node": kind, "version": version, "port": port, "denied": True})
+        for version in (4, 6):
+            destination = self.topology["exit"]["public_ipv" + str(version)]
+            if self.run("outsider", [ROOT / ".venv/bin/python", __file__, "tcp", destination, "18444"]).strip() != b"closed":
+                raise AssertionError("transit reachable from undeclared source")
+            if self.run("relay", [ROOT / ".venv/bin/python", __file__, "tcp", destination, "18444"]).strip() != b"open":
+                raise AssertionError("declared relay family cannot reach transit")
+            banner = self.run("client", [ROOT / ".venv/bin/python", __file__, "ssh-banner", destination])
+            if not banner.startswith(b"SSH-2.0-"):
+                raise AssertionError("independent trusted SSH path unavailable")
+            if self.run("outsider", [ROOT / ".venv/bin/python", __file__, "tcp", destination, "22"]).strip() != b"closed":
+                raise AssertionError("SSH opened to unrelated sources")
+            checks.append({"node": "exit", "version": version, "port": 22, "trusted_banner": True, "unrelated_denied": True})
+        self.evidence["scenarios"]["source_acl"] = checks
+
+    def capture_routes(self, label, action):
+        capture = self.work / (label + ".private.pcap")
+        process = self.spawn("exit", ["tcpdump", "-i", "any", "-nn", "-U", "-w", capture, "tcp port 18444 or tcp port 18082 or tcp port 18080"], "capture-" + label)
+        time.sleep(.5)
+        action()
+        # Capture actual live peers while streams/XMUX connections still exist.
+        sockets = self.run("relay", ["ss", "-tnp"])
+        time.sleep(.5)
+        process.terminate()
+        process.wait(timeout=10)
+        decoded = command(["tcpdump", "-nn", "-r", capture])
+        self.evidence["scenarios"][label] = {"relay_socket_ipv6": b"2001:db8:47::10:18444" in sockets, "relay_socket_ipv4": b"192.0.2.10:18444" in sockets, "captured_ipv6": b"2001:db8:47::20" in decoded and b"2001:db8:47::10.18444" in decoded, "captured_ipv4": b"192.0.2.20" in decoded and b"192.0.2.10.18444" in decoded, "pcap_sha256": hashlib.sha256(capture.read_bytes()).hexdigest()}
+        return self.evidence["scenarios"][label]
+
+    def failures(self, candidate):
+        self.client(candidate, "relay-0", 1080)
+        time.sleep(5)
+        first = self.capture_routes("preferred_ipv6", lambda: self.transfer())
+        if not first["captured_ipv6"]:
+            raise AssertionError("preferred second hop was not actually IPv6")
+        self.run("relay", ["nft", "add", "table", "inet", "profile_fault"])
+        self.run("relay", ["nft", "add", "chain", "inet", "profile_fault", "output", "{ type filter hook output priority -10; policy accept; }"])
+        self.run("relay", ["nft", "add", "rule", "inet", "profile_fault", "output", "ip6", "daddr", "2001:db8:47::10", "tcp", "dport", "18444", "reject"])
+        # Existing IPv6 H2 sessions must actually die; observatory includes its
+        # transport timeout. Do not call preference instant or session migration.
+        time.sleep(15)
+        fallback = self.capture_routes("same_exit_ipv4", lambda: self.transfer())
+        if not fallback["captured_ipv4"]:
+            raise AssertionError("IPv6 failure did not traverse same exit IPv4")
+        self.run("relay", ["nft", "add", "rule", "inet", "profile_fault", "output", "ip", "daddr", "192.0.2.10", "tcp", "dport", "18444", "reject"])
+        time.sleep(2)
+        self.transfer(expected=False)
+        # Explicit direct remains a different selectable profile, never an
+        # automatic relay rescue. No client direct file is modified by failover.
+        self.client(candidate, "direct-0", 2080)
+        self.transfer(2080)
+        self.run("relay", ["nft", "delete", "table", "inet", "profile_fault"])
+        time.sleep(15)
+        restored = self.capture_routes("restored_preferred_ipv6", lambda: self.transfer())
+        if not restored["captured_ipv6"]:
+            raise AssertionError("restoring IPv6 did not restore preferred second hop")
+        self.evidence["scenarios"]["both_down"] = {"relay_transfer": "denied", "explicit_direct_transfer": "works", "relay_freedom_fallback": False}
+
+    def adversarial(self, candidate):
+        def wrong_key(config):
+            config["outbounds"][0]["streamSettings"]["realitySettings"]["password"] = self.secret["profiles_credentials"]["exit"]["public_key"]
+        def wrong_short(config):
+            config["outbounds"][0]["streamSettings"]["realitySettings"]["shortId"] = secrets.token_hex(8)
+        def wrong_uuid(config):
+            config["outbounds"][0]["settings"]["vnext"][0]["users"][0]["id"] = str(uuid.uuid4())
+        for label, mutation in (("wrong-key", wrong_key), ("wrong-shortid", wrong_short), ("correct-reality-wrong-vless", wrong_uuid)):
+            self.client(candidate, "relay-0", 1080, change=mutation)
+            self.transfer(expected=False)
+            self.evidence["scenarios"][label] = "no-tunnel"
+        self.client(candidate, "relay-0", 1080)
+        credential = self.secret["profiles_credentials"]["exit"]
+        count_before = len((self.work / "sink-sources.private.jsonl").read_text().splitlines())
+        captures = {}
+        for offset, fragmented in ((0, 0), (-301, 0), (301, 0), (0, 17)):
+            name = f"clock-{offset}-fragment-{fragmented}"
+            file = self.work / (name + ".private.json")
+            capture = self.work / (name + ".hello.private.bin")
+            private_json(file, {"address": "192.0.2.10:18443", "sni": "cover.example.test", "public_key": credential["public_key"], "short_id": credential["short_ids"][0], "offset_seconds": offset, "capture": str(capture), "fragment": fragmented})
+            result = json.loads(self.run("client", [self.probe_binary, file]))
+            if result["reality_authenticated"] != (offset == 0):
+                raise AssertionError("REALITY clock budget not enforced")
+            captures[name] = capture
+            self.evidence["scenarios"][name] = result
+        fresh = captures["clock-0-fragment-0"]
+        # Raw fresh replay has no client's private TLS key, Finished or VLESS UUID.
+        # Measure response/timing; a fresh server response is NOT a replay cache.
+        replay = json.loads(self.run("client", [ROOT / ".venv/bin/python", __file__, "replay", "192.0.2.10", "18443", fresh]))
+        self.evidence["scenarios"]["fresh_replay"] = replay
+        if len((self.work / "sink-sources.private.jsonl").read_text().splitlines()) != count_before:
+            raise AssertionError("timestamp/replay probe reached an application sink")
+        self.transfer(1080)  # legitimate path unaffected by probes
+        count_before = len((self.work / "sink-sources.private.jsonl").read_text().splitlines())
+        for length in (1, 3, 16, 80):
+            self.run("client", [ROOT / ".venv/bin/python", __file__, "malformed", "192.0.2.10", "18443", fresh, str(length)])
+        # Exercise expiry of precisely the same recorded authenticated hello,
+        # not an unrelated wrong-key handshake. The stated five-minute budget
+        # is tested against wall time on the real stock server.
+        time.sleep(302)
+        expired = json.loads(self.run("client", [ROOT / ".venv/bin/python", __file__, "replay", "192.0.2.10", "18443", fresh]))
+        self.evidence["scenarios"]["expired_replay"] = expired
+        if len((self.work / "sink-sources.private.jsonl").read_text().splitlines()) != count_before:
+            raise AssertionError("malformed/expired replay reached an application sink")
+        self.evidence["scenarios"]["replay_limit"] = "Fresh replay may receive TLS response; no Finished/VLESS/tunnel. maxTimeDiff is a time window, not a full replay cache."
+        # A replay cannot reach either data sink; only traffic.py authenticated
+        # application flows create entries in the sink's source log.
+        self.transfer(1080)
+
+    def fanout(self, candidate):
+        self.base("relay", extra_public=20443)
+        fanout = self.work / "fanout-nginx.conf"
+        fanout.write_text('load_module /usr/lib/nginx/modules/ngx_stream_module.so;\npid ' + str(self.work / 'fanout-nginx.pid') + ';\nevents {}\nstream { map $ssl_preread_server_name $slot { cover.example.test 127.0.0.1:19443; default 127.0.0.1:19445; } server { listen 20443; ssl_preread on; proxy_pass $slot; } }\n')
+        process = self.spawn("relay", ["nginx", "-c", fanout, "-g", "daemon off;"], "fanout")
+        time.sleep(1)
+        def fanout_port(config):
+            config["outbounds"][0]["settings"]["vnext"][0]["port"] = 20443
+        self.client(candidate, "relay-0", 1080, change=fanout_port)
+        self.transfer(1080)
+        self.client(candidate, "relay-20", 1100, change=fanout_port)
+        self.transfer(1100, expected=False)
+        # The same user's explicit port must work through actual third-party
+        # SOCKS upstream, demonstrating failure was fanout, not credentials.
+        self.client(candidate, "relay-20", 1100)
+        configured = self.capture_routes("configured_slot_upstream", lambda: self.transfer(1100))
+        sources = [json.loads(line)["source"] for line in (self.work / "sink-sources.private.jsonl").read_text().splitlines()]
+        if "192.0.2.50" not in sources:
+            raise AssertionError("configured slot did not traverse disposable upstream")
+        self.client(candidate, "relay-21", 1101)
+        self.transfer(1101, expected=False)
+        process.terminate()
+        process.wait(timeout=10)
+        self.base("relay")
+        self.client(candidate, "relay-0", 1080)
+        self.evidence["scenarios"]["sni_feasibility"] = {"real_ssl_preread_passthrough": True, "same_SNI_slot0": "works", "same_SNI_slot1": "wrong-fixed-slot-no-tunnel", "explicit_ports_slot1": "works-via-upstream", "mode_switch": "operator-explicit-only"}
+        self.evidence["scenarios"]["empty_slot"] = "blackhole-no-freedom"
+
+    def load(self, candidate):
+        for i in range(20):
+            self.client(candidate, "relay-" + str(i), 1080 + i)
+        report = json.loads(self.run("client", [ROOT / ".venv/bin/python", HERE / "traffic.py", "load", *range(1080, 1100)], timeout=360))
+        if report["bytes_each_direction"] != 20 * 1048576 or report["flows"] != 80:
+            raise AssertionError("load acceptance volume incomplete")
+        self.evidence["scenarios"]["load"] = report
+        self.evidence["scenarios"]["large_transfer"] = json.loads(self.transfer(1080, 20 * 1048576))
+        time.sleep(10)
+        self.transfer(1080)
+        self.client(candidate, "relay-0", 1080)
+        self.transfer(1080)
+        sources = [json.loads(line)["source"] for line in (self.work / "sink-sources.private.jsonl").read_text().splitlines()]
+        if any(source not in ("192.0.2.10", "192.0.2.50") for source in sources):
+            raise AssertionError("relay/client egress leaked directly to sink")
+        self.evidence["scenarios"]["idle_reconnect_no_leak"] = {"idle_seconds": 10, "sink_sources": sorted(set(sources)), "sha256_integrity": "all-bidirectional-flows"}
+        self.transfer(1080, expected=False, address="192.168.47.1", target=18080)
+
+    def usable(self, candidate):
+        identity = candidate.name
+        receipts = self.output / "receipts"
+        receipts.mkdir(mode=0o700, exist_ok=True)
+        private_json(receipts / (identity + ".json"), {"bundle_id": identity, "state": "usable-in-disposable-runtime", "evidence": self.evidence})
+        link = self.output / ".current-new"
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to("versions/" + identity)
+        os.replace(link, self.output / "current")
+
+    def idempotence_rollback(self, candidate):
+        self.usable(candidate)
+        before = {str(path.relative_to(candidate)): hashlib.sha256(path.read_bytes()).hexdigest() for path in candidate.rglob("*") if path.is_file()}
+        repeated, output = self.render()
+        if repeated != candidate or b"changed=0" not in output:
+            raise AssertionError("profile playbook not idempotent")
+        if before != {str(path.relative_to(candidate)): hashlib.sha256(path.read_bytes()).hexdigest() for path in candidate.rglob("*") if path.is_file()}:
+            raise AssertionError("idempotence changed usable bytes")
+        core_pids = {kind: self.run(kind, ["docker", "exec", "vpn-remnanode", "/command/s6-svstat", "-o", "pid", "/run/service/xray"], env=self.relay_env if kind == "relay" else None) for kind in ("exit", "relay")}
+        self.activate_configs(repeated)
+        after_pids = {kind: self.run(kind, ["docker", "exec", "vpn-remnanode", "/command/s6-svstat", "-o", "pid", "/run/service/xray"], env=self.relay_env if kind == "relay" else None) for kind in ("exit", "relay")}
+        if core_pids != after_pids:
+            raise AssertionError("identical bundle reapplication restarted the embedded core")
+        for key, value in (("cover_tls_port", True), ("reality_sni", ""), ("reality_target", "foreign.example.test:443"), ("remnawave_node_network_mode", "bridge")):
+            bad = copy.deepcopy(self.topology)
+            bad["exit"][key] = value
+            self.render(bad, expected=False)
+            if (self.output / "current").resolve() != candidate or (self.output / "candidate").resolve() != candidate:
+                raise AssertionError("invalid candidate replaced checked output")
+        bad_config = json.loads((candidate / "exit.json").read_text())
+        bad_config["inbounds"][0]["streamSettings"]["realitySettings"]["privateKey"] = "invalid"
+        path = self.work / "invalid-core.private.json"
+        private_json(path, bad_config)
+        command([self.xray, "run", "-test", "-config", path], env=self.core_env, expected=False)
+        # Invalid runtime syntax never enters Node API or alters usable pointers.
+        self.transfer(1080)
+        revoked = self.secret["relay_client_ids"][1]
+        revoked_file = self.work / "revocations.private.json"
+        private_json(revoked_file, [revoked])
+        old_inputs = json.loads((candidate / "inputs.private.json").read_text())
+        self.secret["profiles_revoked_client_ids"] = [revoked]
+        (self.work / "site/index.html").write_text((self.work / "site/index.html").read_text().replace("Atlas field journal", "Atlas coastal journal"))
+        self.play(["cover_site"], variables=self.cover_vars)
+        new, _ = self.render()
+        self.activate_configs(new)
+        self.client(new, "relay-0", 1080)
+        self.transfer(1080)
+        # Restore old bundle INPUTS, overlay CURRENT independent revocations,
+        # render a new identity, and restore actual checked site/profile/ACL.
+        old_inputs["secrets"]["profiles_revoked_client_ids"] = json.loads(revoked_file.read_text())
+        restored, _ = self.render(old_inputs["topology"], old_inputs["secrets"])
+        command(["/usr/local/libexec/cover-site/lifecycle.py", "rollback"])
+        self.base("relay")
+        self.base("exit")
+        self.activate_configs(restored)
+        self.client(restored, "relay-0", 1080)
+        self.transfer(1080)
+        self.client(candidate, "relay-1", 1081)
+        self.transfer(1081, expected=False)
+        if (restored / "clients/relay-1.json").exists() or revoked in (restored / "relay.json").read_text():
+            raise AssertionError("rollback undid independent credential revocation")
+        self.denied_ports()
+        body = self.run("client", ["curl", "-fsS", "--noproxy", "*", "--cacert", self.trust, "--resolve", "cover.example.test:18443:192.0.2.10", "https://cover.example.test:18443/"])
+        if b"Atlas field journal" not in body:
+            raise AssertionError("rollback did not restore demonstrated original site")
+        self.usable(restored)
+        self.evidence["scenarios"]["idempotence_rollback"] = {"byte_identical_reapply": True, "site_profile_ACL_path_restored": True, "independent_revocation_preserved": True, "restored_bundle_id": restored.name}
+
+    def cleanup(self):
+        # Root-owned credentials/captures stay private and are erased; public
+        # report carries only synthetic endpoints and measured aggregate data.
+        for env in (self.relay_env, None):
+            if env is not None or hasattr(self, "extract"):
+                subprocess.run(["docker", "rm", "-f", "vpn-remnanode"], env=env, capture_output=True, check=False)
+        for process in reversed(self.processes):
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+        if hasattr(self, "extract"):
+            subprocess.run(["docker", "rm", "-f", self.extract], capture_output=True, check=False)
+        for ns in self.namespaces.values():
+            subprocess.run(["ip", "netns", "del", ns], capture_output=True, check=False)
+        subprocess.run(["ip", "link", "del", self.prefix + "br"], capture_output=True, check=False)
+        Path("/etc/hosts").write_bytes(self.old_hosts)
+        for kind in ("exit", "relay"):
+            shutil.rmtree("/opt/" + self.prefix + "-" + kind, ignore_errors=True)
+        subprocess.run(["systemctl", "stop", "cover-site-renew.timer", "nginx", "vpn-base-firewall.service"], capture_output=True, check=False)
+        subprocess.run(["nft", "delete", "table", "inet", "vpn_base"], capture_output=True, check=False)
+        for path in ("/etc/nginx/sites-enabled/cover-site.conf",):
+            p = Path(path)
+            if p.is_symlink() or p.exists():
+                p.unlink()
+        for path in ("/etc/cover-site", "/var/lib/cover-site", "/var/log/cover-site", "/var/www/cover-site-acme"):
+            shutil.rmtree(path, ignore_errors=True)
+
+    def execute(self):
+        self.stage = "network"
+        self.network()
+        self.stage = "verified-runtime-prerequisites"
+        self.prerequisites()
+        self.relay_daemon()
+        self.stage = "owned-cover-local-ACME"
+        self.cover()
+        # Real firewall policy is active before either API daemon starts.
+        self.stage = "source-ACL-before-Node"
+        self.base("relay")
+        self.base("exit")
+        self.deploy_node("exit")
+        self.deploy_node("relay")
+        for kind in ("exit", "relay"):
+            for version in (4, 6):
+                self.spawn(kind, [ROOT / ".venv/bin/python", __file__, "tcp-listen", self.topology[kind]["public_ipv" + str(version)], "9100"], kind + "-exporter-canary-" + str(version))
+        self.spawn("sink", [ROOT / ".venv/bin/python", HERE / "traffic.py", "serve", self.work / "sink-sources.private.jsonl"], "sink")
+        upstream = {"log": {"loglevel": "warning"}, "inbounds": [{"listen": "192.0.2.50", "port": 18082, "protocol": "socks", "settings": {"auth": "noauth", "udp": False}}], "outbounds": [{"protocol": "freedom"}]}
+        path = self.work / "upstream.private.json"
+        private_json(path, upstream)
+        self.spawn("upstream", [self.xray, "run", "-config", path], "upstream", env=self.core_env)
+        self.stage = "coherent-playbook-and-authorized-baseline"
+        candidate, _ = self.render()
+        self.activate_configs(candidate)
+        self.client(candidate, "direct-0", 2080)
+        self.transfer(2080)
+        self.client(candidate, "relay-0", 1080)
+        time.sleep(5)
+        self.transfer()
+        self.stage = "TLS-H1-H2-origin-baselines"
+        self.tls_matrix()
+        self.denied_ports()
+        self.stage = "same-exit-failover-and-recovery"
+        self.failures(candidate)
+        self.stage = "adversarial-clock-and-replay"
+        self.adversarial(candidate)
+        self.stage = "ssl-preread-fanout-and-fixed-slots"
+        self.fanout(candidate)
+        self.stage = "real-concurrent-bidirectional-load"
+        self.load(candidate)
+        self.stage = "idempotence-and-revocation-safe-rollback"
+        self.idempotence_rollback(candidate)
+        self.evidence["result"] = "PASS"
+        return self.evidence
+
+
+def child():
+    mode = sys.argv[1]
+    if mode == "node-start":
+        obj = json.loads(Path(sys.argv[2]).read_text())
+        LIFE.start(obj)
+        print(json.dumps(LIFE.health(obj, True)))
+    elif mode == "node-health":
+        obj = json.loads(Path(sys.argv[2]).read_text())
+        print(json.dumps(LIFE.health(obj, True)))
+    elif mode == "tcp-listen":
+        address = sys.argv[2]
+        with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET) as server:
+            if ":" in address:
+                server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((sys.argv[2], int(sys.argv[3])))
+            server.listen(16)
+            while True:
+                conn, _peer = server.accept()
+                with conn:
+                    conn.sendall(b"private-exporter-canary\n")
+    elif mode == "ssh-banner":
+        with socket.create_connection((sys.argv[2], 22), timeout=5) as sock:
+            sock.settimeout(5)
+            sys.stdout.buffer.write(sock.recv(128))
+    elif mode == "tcp":
+        address, port = sys.argv[2], int(sys.argv[3])
+        sock = socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET)
+        sock.settimeout(2)
+        try:
+            result = sock.connect_ex((address, port))
+            print("open" if result == 0 else "closed")
+        finally:
+            sock.close()
+    elif mode == "visitor":
+        address, port = sys.argv[2], int(sys.argv[3])
+        options = json.loads(Path(sys.argv[4]).read_text())
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        start = time.monotonic()
+        try:
+            with socket.create_connection((address, port), timeout=5) as raw:
+                with ctx.wrap_socket(raw, server_hostname=options["sni"]) as conn:
+                    conn.settimeout(5)
+                    conn.sendall(("GET " + options["path"] + " HTTP/1.1\r\nHost: " + options["host"] + "\r\nConnection: close\r\n\r\n").encode())
+                    response = bytearray()
+                    while True:
+                        part = conn.recv(65536)
+                        if not part:
+                            break
+                        response.extend(part)
+                    parts = bytes(response).split(b"\r\n\r\n", 1)
+                    status = parts[0].split(b"\r\n", 1)[0].decode()
+                    body = parts[1] if len(parts) > 1 else b""
+                    print(json.dumps({"status": status, "body_sha256": hashlib.sha256(body).hexdigest(), "TLS": conn.version()}))
+        except (OSError, ssl.SSLError):
+            print(json.dumps({"TLS": "handshake-or-stream-rejected"}))
+    elif mode in ("replay", "malformed"):
+        address, port = sys.argv[2], int(sys.argv[3])
+        data = Path(sys.argv[4]).read_bytes()
+        if mode == "malformed":
+            data = data[:int(sys.argv[5])]
+        start = time.monotonic()
+        response = b""
+        with socket.create_connection((address, port), timeout=5) as sock:
+            sock.settimeout(3)
+            try:
+                sock.sendall(data)
+                if mode == "malformed":
+                    sock.shutdown(socket.SHUT_WR)
+                response = sock.recv(65536)
+            except (OSError, TimeoutError):
+                pass
+        print(json.dumps({"response_bytes": len(response), "seconds": time.monotonic() - start, "finished_or_vless_sent": False, "application_transfer": False}))
+    else:
+        raise SystemExit("unknown disposable child operation")
+
+
+def main():
+    guard()
+    with tempfile.TemporaryDirectory(prefix="vpn-profiles-", dir="/var/tmp") as temporary:
+        lab = Lab(Path(temporary))
+        try:
+            lab.execute()
+        except Exception:
+            lab.evidence["result"] = "FAIL"
+            lab.evidence["failed_stage"] = getattr(lab, "stage", "initialization")
+            raise
+        finally:
+            try:
+                report_dir = ROOT / "artifacts/active-probing"
+                report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                private_json(report_dir / "profiles-runtime.json", lab.evidence)
+                print(json.dumps(lab.evidence, sort_keys=True, indent=2))
+            finally:
+                lab.cleanup()
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) > 1:
+            child()
+        else:
+            main()
+    except Exception:
+        print("Profile disposable acceptance failed; private diagnostics withheld", file=sys.stderr)
+        raise SystemExit(1) from None

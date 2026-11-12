@@ -27,25 +27,18 @@ HOSTS = {
     "cp-a": {"ansible_host": "203.0.113.30", "public_ipv4": "203.0.113.30",
              "public_ipv6": "2001:db8:30::30", "node_role": "control_plane"},
 }
-ALL_VARS = {
-    "cp_placement": "dedicated",
-    "client_family": "v4",
-    "s2s_family": "v6_prefer",
-    "egress_family": "v4_prefer",
-    "egress_slots": 3,
-    "slot_fanout": "sni",
-    "node_port_allow": ["203.0.113.30/32", "2001:db8:30::30/128", "10.0.0.0/8"],
-    "reality_sni": "www.example.com",
-    "reality_target": "127.0.0.1:8445",
-    "xhttp_path": "/xhttp",
-    "xhttp_mode": "stream-one",
-    "image_tags": {},
-}
+ALL_VARS = yaml.safe_load((EXAMPLE.parent / "group_vars/all.yml").read_text())
 GROUP_VARS = {
     "exit": {"node_role": "exit", "egress_family": "v4_prefer", "egress_slots": 3},
     "relay": {"node_role": "relay", "client_family": "v4", "s2s_family": "v6_prefer"},
     "cp": {"node_role": "control_plane", "panel_bind": "127.0.0.1"},
 }
+GROUP_VARS["exit"].update(yaml.safe_load((EXAMPLE.parent / "host_vars/exit-example.yml").read_text()))
+GROUP_VARS["relay"].update(yaml.safe_load((EXAMPLE.parent / "host_vars/relay-example.yml").read_text()))
+# Test host identities remain in HOSTS, not in group defaults.
+for variables in GROUP_VARS.values():
+    for key in ("ansible_host", "public_ipv4", "public_ipv6"):
+        variables.pop(key, None)
 
 
 class ValidateInventoryTest(unittest.TestCase):
@@ -223,6 +216,35 @@ class ValidateInventoryTest(unittest.TestCase):
                 self.all_vars["reality_target"] = value
                 self.assertTrue(any("reality_target" in e for e in self.errors()))
         self.all_vars["reality_target"] = "[::1]:8445"
+        self.assertInvalid("reality_target")
+        self.all_vars["reality_target"] = "127.0.0.1:9443"
+        self.assertEqual(self.errors(), [])
+
+    def test_source_acl_matches_explicit_egress_not_public_address(self) -> None:
+        self.group_vars["relay"]["relay_egress_ipv4"] = "198.51.100.99"
+        self.assertInvalid("transit source ACL")
+
+    def test_normalized_transit_ipv6_identity(self) -> None:
+        self.group_vars["relay"]["relay_egress_ipv6"] = "2001:0db8:0020:0000:0000:0000:0000:0020"
+        rule = self.group_vars["exit"]["base_firewall_source_ports"][0]
+        rule["source_cidrs"][1] = "2001:0db8:0020:0000:0000:0000:0000:0020/128"
+        self.assertEqual(self.errors(), [])
+
+    def test_invalid_transit_source_type_is_a_diagnostic(self) -> None:
+        self.group_vars["exit"]["base_firewall_source_ports"][0]["source_cidrs"] = [{}]
+        self.assertTrue(self.errors())
+
+    def test_management_origin_and_public_conflicts(self) -> None:
+        for value in (True, "8445", 22, 2222, 8443):
+            with self.subTest(value=value):
+                self.group_vars["exit"]["cover_tls_port"] = value
+                self.assertTrue(self.errors())
+
+    def test_unavailable_sni_mode_is_explicit(self) -> None:
+        self.all_vars["slot_fanout"] = "sni"
+        self.assertInvalid("ports must be selected explicitly")
+
+    def test_exact_loopback_management_is_allowed(self) -> None:
         self.assertEqual(self.errors(), [])
 
     def test_image_tags_must_be_mapping(self) -> None:

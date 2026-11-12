@@ -2,3 +2,15 @@ ansible_host: 198.51.100.20
 public_ipv4: 198.51.100.20
 public_ipv6: 2001:db8:20::20
 node_role: relay
+relay_egress_ipv4: 198.51.100.20
+relay_egress_ipv6: 2001:db8:20::20
+relay_slot_ports: [10443, 10444, 10445]
+base_firewall_vpn_ports:
+  - {proto: tcp, port: 80}
+  - {proto: tcp, port: 10443}
+  - {proto: tcp, port: 10444}
+  - {proto: tcp, port: 10445}
+base_firewall_source_ports:
+  - proto: tcp
+    port: 2222
+    source_cidrs: [127.0.0.1/32, "::1/128", 203.0.113.30/32, "2001:db8:30::30/128"]
