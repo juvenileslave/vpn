@@ -20,7 +20,7 @@
 
     - name: Stage transient CP credentials
       ansible.builtin.copy:
-        content: "{{ {'secret': _remnawave_node_secret, 'credentials': _remnawave_node_credentials, 'address': remnawave_node_management_address, 'source': remnawave_node_management_source, 'port': remnawave_node_api_port, 'require_xray': _remnawave_node_config | length > 0} | to_json }}"
+        content: "{{ {'secret': _remnawave_node_secret, 'credentials': _remnawave_node_credentials, 'address': remnawave_node_management_address, 'source': remnawave_node_management_source, 'port': _remnawave_node_effective_probe.port, 'require_xray': _remnawave_node_effective_probe.require_xray} | to_json }}"
         dest: "{{ _remnawave_node_cp_stage.path }}/input.json"
         mode: "0600"
       delegate_to: "{{ remnawave_node_management_delegate }}"

@@ -83,6 +83,8 @@
 
     - name: Verify intended CP path with current credentials
       ansible.builtin.include_tasks: management.yml
+      vars:
+        _remnawave_node_effective_probe: "{{ (_remnawave_node_result.stdout | from_json).probe }}"
       when: not ansible_check_mode
     - name: Commit only after the intended control-plane path succeeds
       ansible.builtin.command:
@@ -92,19 +94,38 @@
       no_log: true
 
   rescue:
-    - name: Restore checked deployment without undoing credential revocation
-      ansible.builtin.command:
-        argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", abort, "{{ _remnawave_node_stage.path }}"]
-      register: _remnawave_node_abort
-      changed_when: (_remnawave_node_abort.stdout | from_json).changed
+    - name: Complete restoration through the actual current-credential CP path
       when: not ansible_check_mode
-      no_log: true
+      block:
+        - name: Restore checked deployment without undoing credential revocation
+          ansible.builtin.command:
+            argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", abort, "{{ _remnawave_node_stage.path }}"]
+          register: _remnawave_node_abort
+          changed_when: (_remnawave_node_abort.stdout | from_json).changed
+          no_log: true
 
-    - name: Verify restored control-plane access with current credentials
-      ansible.builtin.include_tasks: management.yml
-      when:
-        - not ansible_check_mode
-        - (_remnawave_node_abort.stdout | from_json).restored | default(false)
+        - name: Verify restored control-plane access with current credentials
+          ansible.builtin.include_tasks: management.yml
+          vars:
+            _remnawave_node_effective_probe: "{{ (_remnawave_node_abort.stdout | from_json).probe }}"
+          when: (_remnawave_node_abort.stdout | from_json).restored | default(false)
+
+        - name: Finish abort only after the restored control-plane path succeeds
+          ansible.builtin.command:
+            argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", finish-abort, "{{ _remnawave_node_stage.path }}"]
+          changed_when: false
+          when: (_remnawave_node_abort.stdout | from_json).restored | default(false)
+          no_log: true
+      rescue:
+        - name: Fail closed when restored local or control-plane health is unavailable
+          ansible.builtin.command:
+            argv: [python3, "{{ _remnawave_node_stage.path }}/lifecycle.py", stop, "{{ _remnawave_node_stage.path }}"]
+          changed_when: false
+          no_log: true
+
+        - name: Reject restoration after stopping only the transaction-owned node
+          ansible.builtin.fail:
+            msg: Node restoration gate failed; only the transaction-owned node was stopped. Rollout remains failed.
 
     - name: Stop rollout after a failed gate even when restoration succeeded
       ansible.builtin.fail:

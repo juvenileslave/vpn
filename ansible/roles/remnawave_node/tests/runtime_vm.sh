@@ -7,5 +7,5 @@ fi
 root=$(git rev-parse --show-toplevel)
 [[ -x "$root/.venv/bin/ansible-playbook" ]] || { printf '%s\n' 'Run make -C ansible bootstrap first.' >&2; exit 1; }
 apt-get update -qq
-apt-get install -y -qq nftables iproute2 openssl curl python3
+apt-get install -y -qq nftables iproute2 openssl curl python3 util-linux
 exec "$root/.venv/bin/python" "$root/ansible/roles/remnawave_node/tests/runtime_vm.py" "$root"

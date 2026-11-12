@@ -21,11 +21,43 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import yaml
 
 
+SAFE_TASKS = {
+    'Validate node inputs before host mutation',
+    'Validate candidate PKI compose and active base ACL',
+    'Roll out with authenticated health gate and credential-safe restoration',
+    'Perform genuine mTLS and JWT health operation from the CP source',
+    'Restore checked deployment without undoing credential revocation',
+    'Fail closed when restored local or control-plane health is unavailable',
+    'Reject restoration after stopping only the transaction-owned node',
+    'Stop rollout after a failed gate even when restoration succeeded',
+    'Render owned nftables table', 'Verify owned table is loaded',
+}
+
+
+def safe_failure_context(output):
+    """Only repository-authored task labels and numeric recaps can leave capture."""
+    output = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output)
+    context = []
+    task = None
+    for line in output.splitlines():
+        heading = re.fullmatch(r'TASK \[(.+)\] \*+', line.strip())
+        if heading:
+            name = heading[1].rsplit(' : ', 1)[-1]
+            task = name if name in SAFE_TASKS else None
+        elif line.startswith('fatal:') and task:
+            context.append('failed task: ' + task)
+        recap = re.fullmatch(r'(node|cp|bridge_cp|bad_cp)\s*:\s*((?:(?:ok|changed|unreachable|failed|skipped|rescued|ignored)=\d+\s*)+)', line.strip())
+        if recap:
+            context.append('recap ' + recap[1] + ': ' + recap[2].strip())
+    return '; '.join(context) or 'captured output withheld (no safe task/recap)'
+
+
 def command(args, expected=0, timeout=600):
     result = subprocess.run([str(a) for a in args], capture_output=True, timeout=timeout, check=False)
     if (result.returncode == 0) != (expected == 0):
-        # Captured Ansible/Docker/API output may contain credentials; never print it.
-        raise AssertionError('unexpected command result: ' + Path(str(args[0])).name)
+        # Never echo raw Ansible/Docker/API output, exception bodies or arguments.
+        detail = safe_failure_context(result.stdout.decode(errors='replace')) if Path(str(args[0])).name == 'ansible-playbook' else 'captured output withheld'
+        raise AssertionError('unexpected command result: ' + Path(str(args[0])).name + '; ' + detail)
     return result.stdout.decode()
 
 
@@ -77,6 +109,10 @@ def main(root):
     namespaces = [prefix + '-cp', prefix + '-bad']
     deployment = Path('/opt/' + prefix)
     unrelated = prefix + '-unrelated'
+    bridge = prefix + '-bridge'
+    bridge_cp = prefix + '-bridge-cp'
+    bridge_bad = prefix + '-bridge-bad'
+    alternate = Path('/opt/' + prefix + '-other')
     with tempfile.TemporaryDirectory(prefix=prefix + '-', dir='/run') as temp:
         td = Path(temp)
         secret, credentials = fixture(td / 'pki')
@@ -91,8 +127,15 @@ def main(root):
         wrapper = td / 'cp-python'
         wrapper.write_text('#!/bin/sh\nexec ip netns exec ' + namespaces[0] + ' /usr/bin/python3 "$@"\n')
         wrapper.chmod(0o700)
-        inventory.write_text(yaml.safe_dump({'all': {'hosts': {'node': {'ansible_connection': 'local', 'ansible_python_interpreter': '/usr/bin/python3'}, 'cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(wrapper)}}}}))
-        settings = {'docker_allow_version_change': True, 'cp_placement': 'exit', 'node_api_port': 2222, 'node_port_allow': ['127.0.0.1/32', '::1/128'], 'base_ssh_port': 22, 'base_ssh_trusted_cidrs': ['192.0.2.10/32'], 'base_firewall_vpn_ports': [], 'base_firewall_source_ports': [{'proto': 'tcp', 'port': 2222, 'source_cidrs': ['127.0.0.1/32', '::1/128']}], 'remnawave_node_dir': str(deployment), 'remnawave_node_secret_key_file': str(td / 'pki/secret'), 'remnawave_node_management_credentials_file': str(td / 'pki/credentials.json'), 'remnawave_node_management_delegate': 'node', 'remnawave_node_management_address': '127.0.0.1', 'remnawave_node_management_source': '127.0.0.1', 'remnawave_node_timeout': 30, 'remnawave_node_xray_config': config(19146)}
+        bridge_wrapper = td / 'bridge-python'
+        bridge_wrapper.write_text('#!/bin/sh\npid=$(docker inspect --format "{{.State.Pid}}" ' + bridge_cp + ') || exit 1\nexec nsenter --net=/proc/$pid/ns/net /usr/bin/python3 "$@"\n')
+        bridge_wrapper.chmod(0o700)
+        bad_wrapper = td / 'bad-python'
+        bad_wrapper.write_text('#!/bin/sh\nexec ip netns exec ' + namespaces[1] + ' /usr/bin/python3 "$@"\n')
+        bad_wrapper.chmod(0o700)
+        inventory.write_text(yaml.safe_dump({'all': {'hosts': {'node': {'ansible_connection': 'local', 'ansible_python_interpreter': '/usr/bin/python3'}, 'cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(wrapper)}, 'bridge_cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(bridge_wrapper)}, 'bad_cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(bad_wrapper)}}}}))
+        allowed = ['10.203.48.2/32', 'fd46:205::2/128']
+        settings = {'docker_allow_version_change': True, 'cp_placement': 'exit', 'node_api_port': 2222, 'node_port_allow': allowed, 'base_ssh_port': 22, 'base_ssh_trusted_cidrs': ['192.0.2.10/32'], 'base_firewall_vpn_ports': [], 'base_firewall_source_ports': [{'proto': 'tcp', 'port': port, 'source_cidrs': allowed} for port in [2222, 2224]], 'remnawave_node_dir': str(deployment), 'remnawave_node_secret_key_file': str(td / 'pki/secret'), 'remnawave_node_management_credentials_file': str(td / 'pki/credentials.json'), 'remnawave_node_management_delegate': 'bridge_cp', 'remnawave_node_management_address': '10.203.48.1', 'remnawave_node_management_source': '10.203.48.2', 'remnawave_node_timeout': 30, 'remnawave_node_xray_config': config(19146)}
 
         def play(path, values=None, expected=0, check=False):
             write_json(variables, settings if values is None else values)
@@ -101,17 +144,25 @@ def main(root):
                 args.append('--check')
             return command(args, expected)
 
-        def cp_health(version=4):
-            obj = {'secret': secret, 'credentials': credentials, 'address': '10.203.46.1' if version == 4 else 'fd46:203::1', 'source': '10.203.46.2' if version == 4 else 'fd46:203::2', 'port': 2222, 'require_xray': True}
+        def bridge_args(name):
+            pid = int(command(['docker', 'inspect', '--format', '{{.State.Pid}}', name]).strip())
+            assert pid > 0, 'CP namespace container is not running'
+            return ['nsenter', '--net=/proc/' + str(pid) + '/ns/net']
+
+        def cp_health(version=4, colocated=False, port=2222, require_xray=True):
+            address, source = (('10.203.48.1', '10.203.48.2') if version == 4 else ('fd46:205::1', 'fd46:205::2')) if colocated else (('10.203.46.1', '10.203.46.2') if version == 4 else ('fd46:203::1', 'fd46:203::2'))
+            obj = {'secret': secret, 'credentials': credentials, 'address': address, 'source': source, 'port': port, 'require_xray': require_xray}
             probe = td / 'cp-probe'
             probe.mkdir(mode=0o700, exist_ok=True)
             write_json(probe / 'input.json', obj)
-            command(['ip', 'netns', 'exec', namespaces[0], 'python3', role / 'files/lifecycle.py', 'probe', probe])
+            namespace = bridge_args(bridge_cp) if colocated else ['ip', 'netns', 'exec', namespaces[0]]
+            command([*namespace, 'python3', role / 'files/lifecycle.py', 'probe', probe])
 
-        def denied(namespace, address, port):
+        def denied(namespace, address, port, colocated=False):
             # Assert failed TCP connection, not merely an HTTP auth error.
             code = 'import socket,sys; s=socket.socket(socket.AF_INET6 if ":" in sys.argv[1] else socket.AF_INET); s.settimeout(2); result=s.connect_ex((sys.argv[1],int(sys.argv[2]))); sys.exit(0 if result else 1)'
-            command(['ip', 'netns', 'exec', namespace, 'python3', '-c', code, address, str(port)])
+            prefix_args = bridge_args(namespace) if colocated else ['ip', 'netns', 'exec', namespace]
+            command([*prefix_args, 'python3', '-c', code, address, str(port)])
 
         def observed():
             inspect = json.loads(command(['docker', 'inspect', unrelated]))[0]
@@ -128,13 +179,28 @@ def main(root):
 
         target = None
         occupied = None
+        registry = None
+        created_containers = []
+        created_bridge = False
+        created_namespaces = []
+        allow_deployment_cleanup = False
         try:
             play(docker_play)
+            existing = subprocess.run(['docker', 'inspect', life.CONTAINER], capture_output=True, check=False)
+            assert existing.returncode != 0 and not deployment.exists(), 'disposable singleton is already occupied'
+            allow_deployment_cleanup = True
             command(['docker', 'pull', '--quiet', life.IMAGE])
             command(['docker', 'run', '--detach', '--name', unrelated, '--network=none', '--entrypoint=sleep', life.IMAGE, '3600'])
+            created_containers.append(unrelated)
+            command(['docker', 'network', 'create', '--driver=bridge', '--ipv6', '--subnet=10.203.48.0/29', '--gateway=10.203.48.1', '--subnet=fd46:205::/64', '--gateway=fd46:205::1', bridge])
+            created_bridge = True
+            for name, suffix in [(bridge_cp, '2'), (bridge_bad, '3')]:
+                command(['docker', 'run', '--detach', '--name', name, '--network', bridge, '--ip=10.203.48.' + suffix, '--ip6=fd46:205::' + suffix, '--entrypoint=sleep', life.IMAGE, '3600'])
+                created_containers.append(name)
             before = observed()
             for index, ns in enumerate(namespaces):
                 command(['ip', 'netns', 'add', ns])
+                created_namespaces.append(ns)
                 host = prefix[-8:] + str(index)
                 command(['ip', 'link', 'add', host, 'type', 'veth', 'peer', 'name', 'eth0', 'netns', ns])
                 subnet = 46 + index
@@ -151,9 +217,33 @@ def main(root):
             target.socket = ctx.wrap_socket(target.socket, server_side=True)
             threading.Thread(target=target.serve_forever, daemon=True).start()
             play(base_play)
+            try:
+                life.active_acl(2222, settings['node_port_allow'])
+            except life.Rejected as error:
+                raise AssertionError('accepted #49 active INPUT/source ACL prerequisite failed: ' + str(error)) from None
             play(node_play, check=True)
             assert not deployment.exists(), 'check mode activated node'
+            api_only = dict(settings, node_api_port=2224, remnawave_node_xray_config={})
+            play(node_play, api_only)
+            cp_health(4, colocated=True, port=2224, require_xray=False)
+            with life.resource_lock(deployment) as record:
+                registry = record
             play(node_play)
+            play(node_play, dict(settings, remnawave_node_state='rollback'))
+            cp_health(4, colocated=True, port=2224, require_xray=False)
+            cp_health(6, colocated=True, port=2224, require_xray=False)
+            assert not life.core_running(), 'API-only rollback falsely retained the candidate Xray requirement'
+            play(node_play)
+            cp_health(4, colocated=True)
+            cp_health(6, colocated=True)
+            cp_info = json.loads(command(['docker', 'inspect', bridge_cp]))[0]
+            assert cp_info['HostConfig']['NetworkMode'] == bridge and not cp_info['HostConfig'].get('PortBindings')
+            assert cp_info['NetworkSettings']['Networks'][bridge]['IPAddress'] == '10.203.48.2'
+            assert cp_info['NetworkSettings']['Networks'][bridge]['GlobalIPv6Address'] == 'fd46:205::2'
+            assert os.readlink('/proc/' + str(cp_info['State']['Pid']) + '/ns/net') != os.readlink('/proc/self/ns/net')
+            for address in ['10.203.48.1', 'fd46:205::1']:
+                denied(bridge_bad, address, 2222, colocated=True)
+                denied(bridge_cp, address, 18146, colocated=True)
             current = life.owned_container()
             assert current['HostConfig']['NetworkMode'] == 'host'
             host_net = os.readlink('/proc/self/ns/net')
@@ -162,6 +252,36 @@ def main(root):
             assert 'host-loopback-via-embedded-xray' in command(['curl', '--silent', '--show-error', '--fail', '--cacert', td / 'pki/ca.pem', 'https://127.0.0.1:19146/'])
             assert re.search(r'changed=0\b', play(node_play)), 'reapplication is not idempotent'
             assert life.owned_container()['Id'] == current['Id'], 'idempotent apply recreated container'
+            for expression in [['tcp', 'dport', '!=', '2223', 'accept'], ['iif', '!=', 'lo', 'accept'], ['ct', 'state', '!=', 'established', 'accept']]:
+                try:
+                    command(['nft', 'add', 'rule', 'inet', 'vpn_base', 'input', *expression])
+                    try:
+                        life.active_acl(2222, settings['node_port_allow'])
+                    except life.Rejected:
+                        pass
+                    else:
+                        raise AssertionError('inverted real nft accept bypassed the active gate')
+                    play(node_play, expected=1, check=True)
+                    assert life.owned_container()['Id'] == current['Id'], 'ACL rejection mutated the running node'
+                finally:
+                    command(['systemctl', 'restart', 'vpn-base-firewall.service'])
+            play(node_play, dict(settings, remnawave_node_dir=str(alternate)), expected=1)
+            assert not alternate.exists(), 'mismatched directory mutated the daemon singleton'
+            ready = td / 'lock-ready'
+            hold = 'import importlib.util,pathlib,sys,time; s=importlib.util.spec_from_file_location("node",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwith m.resource_lock(pathlib.Path(sys.argv[2])):\n pathlib.Path(sys.argv[3]).touch(); time.sleep(60)'
+            locker = subprocess.Popen(['python3', '-c', hold, str(role / 'files/lifecycle.py'), str(deployment), str(ready)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and locker.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert ready.exists(), 'daemon resource lock fixture failed'
+                play(node_play, expected=1)
+                play(node_play, dict(settings, remnawave_node_dir=str(alternate)), expected=1)
+                assert life.owned_container()['Id'] == current['Id'], 'concurrent transaction changed the singleton'
+            finally:
+                locker.terminate()
+                locker.wait(timeout=10)
+            print('active nft inverted accepts rejected; daemon singleton concurrent/mismatched-directory mutation denied')
             command(['docker', 'exec', life.CONTAINER, '/command/s6-svc', '-wd', '-T', '10000', '-d', '/run/service/xray'])
             assert not life.core_running(), 'core-stop fixture did not stop Xray'
             play(node_play)
@@ -172,13 +292,12 @@ def main(root):
             for address in ['10.203.46.1', 'fd46:203::1']:
                 denied(namespaces[0], address, 2222)
                 denied(namespaces[0], address, 18146)
-            for args in [{'bad_jwt': True}, {'no_cert': True}]:
-                try:
-                    life.api(secret, credentials, '127.0.0.1', 2222, **args)
-                except (life.Rejected, OSError, ValueError):
-                    pass
-                else:
-                    raise AssertionError('wrong credentials granted management')
+            negative = td / 'negative.json'
+            write_json(negative, {'secret': secret, 'credentials': credentials})
+            rejection = 'import importlib.util,json,sys; s=importlib.util.spec_from_file_location("node",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); o=json.load(open(sys.argv[2])); m.api(o["secret"],o["credentials"],sys.argv[3],2222,source=sys.argv[4],**{sys.argv[5]:True})'
+            for address, source in [('10.203.48.1', '10.203.48.2'), ('fd46:205::1', 'fd46:205::2')]:
+                for failure in ['bad_jwt', 'no_cert']:
+                    command([*bridge_args(bridge_cp), 'python3', '-c', rejection, role / 'files/lifecycle.py', negative, address, source, failure], expected=1)
             for mutate in ['wide', 'empty', 'conflict', 'bad-secret', 'wrong-key', 'bad-config']:
                 bad = copy.deepcopy(settings)
                 if mutate == 'wide':
@@ -201,17 +320,15 @@ def main(root):
                 play(node_play, bad, expected=1)
                 assert json.loads((deployment / 'state.json').read_text())['checked'] == checked
                 life.health({'secret': secret, 'credentials': credentials, 'port': 2222}, True)
-            print('exit placement: real authenticated API, exact core, namespace/TLS and preactivation rejection observed')
+            print('exit placement: real Docker bridge CP IPv4/IPv6 mTLS/JWT API, API-only effective-port rollback, namespace/TLS and preactivation rejection observed')
 
             settings.update({'cp_placement': 'dedicated', 'node_port_allow': ['10.203.46.2/32', 'fd46:203::2/128'], 'remnawave_node_management_delegate': 'cp', 'remnawave_node_management_address': '10.203.46.1', 'remnawave_node_management_source': '10.203.46.2'})
-            settings['base_firewall_source_ports'][0]['source_cidrs'] = settings['node_port_allow']
+            for rule in settings['base_firewall_source_ports']:
+                rule['source_cidrs'] = settings['node_port_allow']
             play(base_play)
             play(node_play)
             cp_health(4)
             cp_health(6)
-            negative = td / 'negative.json'
-            write_json(negative, {'secret': secret, 'credentials': credentials})
-            rejection = 'import importlib.util,json,sys; s=importlib.util.spec_from_file_location("node",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); o=json.load(open(sys.argv[2])); m.api(o["secret"],o["credentials"],sys.argv[3],2222,source=sys.argv[4],**{sys.argv[5]:True})'
             for address, source in [('10.203.46.1', '10.203.46.2'), ('fd46:203::1', 'fd46:203::2')]:
                 for failure in ['bad_jwt', 'no_cert']:
                     command(['ip', 'netns', 'exec', namespaces[0], 'python3', '-c', rejection, role / 'files/lifecycle.py', negative, address, source, failure], expected=1)
@@ -236,6 +353,23 @@ def main(root):
             play(node_play, bad, expected=1)
             cp_health()
             assert 'host-loopback-via-embedded-xray' in command(['curl', '--silent', '--fail', '--cacert', td / 'pki/ca.pem', 'https://127.0.0.1:19146/'])
+            state = json.loads((deployment / 'state.json').read_text())
+            assert not state['pending'] and 'restoration' not in state, 'successful restoration lost its CP completion gate'
+            checked = state['checked']
+            # Both automatic abort and rescue-initiated abort must stop the owned
+            # node if the actual delegate cannot reach its declared source path.
+            for candidate in [bad, dict(settings, remnawave_node_xray_config=config(19149, 'cp-gate'))]:
+                unreachable = dict(candidate, remnawave_node_management_delegate='bad_cp')
+                play(node_play, unreachable, expected=1)
+                assert not life.owned_container()['State']['Running'], 'CP-inaccessible restoration stayed running'
+                after_abort = json.loads((deployment / 'state.json').read_text())
+                assert after_abort['checked'] == checked and not after_abort['pending']
+                assert observed() == before, 'fail-closed restoration touched unrelated resources'
+                recovery = dict(settings, remnawave_node_xray_config=config(19146))
+                play(node_play, recovery)
+                cp_health(4)
+                cp_health(6)
+            print('automatic and rescue restoration: real inaccessible CP gate stopped only the owned node; allowed CP recovery observed')
             print('dedicated placement: allowed IPv4/IPv6 CP, unauthorized source denial, recreate and checked rollback observed')
             print('host and node namespace identity equal; private TLS reached by embedded Xray; no credentials logged')
             sockets = command(['ss', '-H', '-ltn'])
@@ -258,12 +392,27 @@ def main(root):
             if target:
                 target.shutdown()
                 target.server_close()
-            for name in [life.CONTAINER, unrelated]:
+            try:
+                if life.owned_container(deployment):
+                    subprocess.run(['docker', 'rm', '--force', life.CONTAINER], capture_output=True, check=False)
+            except (life.Rejected, OSError):
+                pass  # A pre-existing/mismatched singleton is never removed.
+            for name in created_containers:
                 subprocess.run(['docker', 'rm', '--force', name], capture_output=True, check=False)
-            for ns in namespaces:
+            if created_bridge:
+                subprocess.run(['docker', 'network', 'rm', bridge], capture_output=True, check=False)
+            for ns in created_namespaces:
                 subprocess.run(['ip', 'netns', 'delete', ns], capture_output=True, check=False)
-            if deployment.exists():
-                shutil.rmtree(deployment)
+            if allow_deployment_cleanup and deployment.exists():
+                try:
+                    with life.resource_lock(deployment) as record:
+                        registry = record
+                except (life.Rejected, OSError):
+                    pass
+                else:
+                    shutil.rmtree(deployment)
+            if registry and registry.exists() and json.loads(registry.read_text()) == {'directory': str(deployment), 'project': life.PROJECT}:
+                registry.unlink()
 
 
 if __name__ == '__main__':

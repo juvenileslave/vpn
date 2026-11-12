@@ -48,6 +48,8 @@ Manifest и config blob прочитаны непосредственно из G
 - [Health schema](https://github.com/remnawave/node/blob/3.4.5/libs/contract/commands/xray/get-node-health-check.command.ts).
 - [Backend dependency 3.4.10](https://github.com/remnawave/backend/blob/3.4.10/package.json).
 - [Официальная генерация сертификатов без IP SAN](https://github.com/remnawave/backend/blob/3.4.10/src/common/utils/certs/generate-certs.util.ts).
+- [Операторы nft JSON, включая обязательный `match.op`](https://manpages.debian.org/testing/libnftables1/libnftables-json.5.en.html#MATCH).
+- [Docker: отдельные IPv4/IPv6 bridge-сети и gateway](https://docs.docker.com/engine/network/drivers/bridge/).
 
 ## Сеть: сначала действующий base ACL
 
@@ -65,8 +67,13 @@ namespace. В исходниках Node нет переменной bind address
    целочисленный, не boolean; пустые, дублирующиеся, неканонические, multicast,
    unspecified, link-local и широкие CIDR отклоняются.
 4. **Действующий**, а не только отрендеренный `inet vpn_base/input`: INPUT-hook,
-   policy drop, loopback invariant, точные source accept для API и отсутствие
-   широкого accept-пути для этого TCP-порта. Проверка выполняется через `nft -j`.
+   filter/drop policy, безусловный loopback invariant, точные source accept для
+   API и отсутствие широкого accept-пути для этого TCP-порта. Проверка выполняется
+   через `nft -j`; `match.op` обязателен. Поддерживаются equality `==` и реальный
+   conntrack bitmask lookup `in` только для established/related. Инвертированные
+   `tcp dport != 2223`, `iif != lo`, `ct state != established`, неизвестные
+   operands/expressions и jump/goto/verdict-map paths отклоняются даже при наличии
+   правильных source rules. Это отказ до rollout, не создание второй firewall.
 5. Явный management source входит в `node_port_allow`; source и destination
    одной IP-family. `cp_placement` поддерживает `exit` и `dedicated`.
 
@@ -152,8 +159,11 @@ mTLS/JWT. Производная SNI-опция не нужна для закр�
    реального immutable образа**, с `--network=none` и `xray run -test -config`.
    Ошибки транспорта/config не меняют active deployment.
 4. Root-only content-addressed release сохраняет точные image/Compose/config/env.
-   Existing directory/container принимается только с собственным marker/labels.
-   Чужие ресурсы никогда не adoption-ятся и не удаляются через remove-orphans.
+   Existing directory/container принимается только с собственным marker/labels;
+   Compose working directory должен быть release именно этого `/opt/<name>`,
+   а read-only probe/health mounts — принадлежать тому же release. Чужие ресурсы
+   никогда не adoption-ятся и не удаляются через remove-orphans. Singleton
+   `vpn-remnanode` закреплён за одной directory на конкретном Docker daemon.
 5. Compose запускается `up --detach --wait`. Настоящий authenticated healthcheck
    проверяет Node `3.4.5`, stock Xray `26.11.9` и `GET /node/xray/healthcheck`.
 6. При bootstrap config роль вызывает `POST /node/xray/start` с официальной
@@ -174,17 +184,39 @@ checked release используют единственный проверенн
 исторические образы не поддерживаются. Это не Docker downgrade по guessed tag.
 
 При автоматическом abort старый SECRET_KEY восстанавливается только если его PKI
-identity совпадает с текущим input. Текущие management credentials остаются
-авторитетными; независимая ротация/revocation CA/JWT/cert не откатывается. Если
-прошлые credentials уже невалидны или restoration health gate не проходит,
-останавливается только owned node и task остаётся failed, вместо скрытого revival.
+identity совпадает с текущим input. Текущие management credentials, source authority
+и timeout остаются авторитетными; независимая ротация/revocation CA/JWT/cert не
+откатывается. Port и `require_xray` берутся из **фактически выбранного checked
+release**, а не из отклонённого candidate. Поэтому API-only release с пустым
+bootstrap config не обязан запускать Xray; его прежний порт должен иметь
+действующий base ACL с текущими разрешёнными sources.
 
-`state.json` хранит checked/previous/pending; releases и lock доступны root.
-Concurrent/uncommitted rollout отклоняется: нельзя перехватить чужой pending
-commit. Если процесс был прерван между deploy и CP commit, сохраните исходный
-private transaction input, выполните `lifecycle.py abort <transaction-directory>`
-на том же разрешённом host и подтвердите management; восстановление не отменяет
-revocation. Не удаляйте pending state вручную как замену health-gated recovery.
+Автоматический abort сохраняет `pending`, owner и `restoration` outcome до
+завершения CP gate. Повторный owner abort возвращает тот же восстановленный release,
+не скрывает его за `restored:false`. Delegated CP всегда проверяет восстановление
+текущими credentials из объявленного namespace. Только успешный реальный CP probe
+разрешает `finish-abort`; restoration нельзя `commit`-ить как failed candidate.
+Если старый PKI уже невалиден, локальная health проверка или CP gate не проходят,
+executor явно останавливает только pending-owned node и остаётся failed. Pending
+очищается после остановки либо успешного завершения восстановительного CP gate.
+
+Все non-probe операции сериализуются неблокирующим daemon-specific `flock`:
+`/run/vpn-remnanode/<sha256-Docker-ID>.lock`. Docker ID получен из реально выбранного
+daemon (`docker info`), не из пути CLI socket или project directory. Persistent
+root-only `/var/lib/vpn-remnanode/<sha256-Docker-ID>.json` закрепляет singleton за
+directory; другой `/opt/<name>` не может захватить его даже между deploy и CP commit.
+Два независимых lab daemon для host и relay имеют разные ID и не блокируют друг друга.
+Смена directory существующего singleton не является поддерживаемой миграцией.
+
+`state.json` хранит checked/previous/pending и outcome незавершённого восстановления.
+Concurrent/uncommitted rollout отклоняется: чужой stage не может abort/commit/stop
+pending другого owner. Если executor прерван, сохраните исходный private transaction
+input и выполните `lifecycle.py abort <transaction-directory>` на том же разрешённом
+host/daemon. Затем выполните настоящий CP probe с возвращёнными `probe.port` и
+`probe.require_xray` и текущими credentials/source/address; после успеха выполните
+`lifecycle.py finish-abort <transaction-directory>`. При отказе используйте
+`lifecycle.py stop <transaction-directory>`, не оставляйте восстановленный node без
+CP gate. Не удаляйте pending или daemon ownership record вручную вместо recovery.
 Для репозитория откат — отдельный revert PR; Git revert не откатывает контейнер.
 
 ## Запуск и проверки
@@ -229,14 +261,34 @@ sudo env PATH="$PATH" HOME="$HOME" \
 runtime prerequisites, генерирует временную CA/RSA PKI, применяет **реальную base
 firewall роль**, стартует **реальный закреплённый Node**, а не mock server.
 
-Сценарии включают оба `cp_placement`, разрешённый IPv4/IPv6 CP, TCP-denial иных
-источников, неверные JWT/отсутствующий client cert, private loopback TLS через
-embedded Xray, observations namespace/socket, check-mode и unchanged ID,
-preactivation rejection, force recreate, explicit previous checked rollback,
-unhealthy-start restoration и independent credential revocation без revival.
+Prerequisite #49 — именно accepted source-port base role, а не её копия внутри
+Node PR. До первого startup драйвер проверяет реальный active INPUT/source ACL;
+при отсутствии prerequisite завершает сценарий с безопасным constraint label.
+При неожиданном отказе Ansible выдаются только известные имена failed tasks и
+числовой recap. Credentials, raw stdout/stderr/API/config и неизвестные task names
+не печатаются; прежний отказ check-mode не превращается в искусственный success.
+
+Сценарии включают оба `cp_placement`: для exit создаются настоящие dual-stack
+Docker bridge CP-client containers с фиксированными private IPv4/IPv6 и явными
+host gateways. Python/OpenSSL на host исполняют probe через `nsenter --net` именно
+в namespace CP-контейнера: filesystem инструментов остаётся host-owned, исходящий
+socket реально принадлежит bridge CP. Проверяются разные namespace IDs, реальные
+Docker bridge addresses, разрешённые mTLS/JWT GET, wrong-JWT/no-cert отказ и
+TCP-denial других bridge sources. Это network-client fixture, не развёртывание
+панели и не запись в её API; port publishing и публичного обхода private cover нет.
+
+Dedicated CP использует отдельный реальный namespace и IPv4/IPv6 source ACL.
+Также проверяются private loopback TLS через embedded Xray, observations
+namespace/socket, check-mode/unchanged ID, preactivation rejection, inverted live
+nft accept rules, concurrent daemon lock и mismatched-directory rejection.
+Checked rollback включает переход configured TCP/2222 → API-only TCP/2224 с
+проверкой effective port/config. Unhealthy-start restoration и rescue после CP
+ошибки проходят настоящий restored CP gate; оба CP-inaccessible варианта должны
+остановить только owned node. Independent credential revocation не допускает revival.
 Unrelated container ID/start time/network и forwarding sysctls сравниваются до/
-после. Disposable namespaces/container/files удаляются, real panel/cloud/DNS/ACME
-не используются. Отчёт не печатает keys, certs, API tokens или secret config.
+после node operations. Драйвер удаляет только созданные им fixture resources;
+pre-existing/mismatched singleton не удаляется. Real panel/cloud/DNS/ACME не используются.
+Отчёт не печатает keys, certs, API tokens или secret config.
 
 Повторно используемые lab helpers: `tests/runtime_vm.py:fixture(Path)` и
 `files/lifecycle.py:api/health/start`. Две host-network ноды в одном интеграционном
