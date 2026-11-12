@@ -15,7 +15,7 @@
         src: "{{ item }}"
         dest: "{{ cover_preflight_stage.path }}/{{ item }}"
         mode: '0600'
-      loop: [lifecycle.py, validate_content.py]
+      loop: [lifecycle.py, validate_content.py, ownership.py]
       check_mode: false
       changed_when: false
 
@@ -35,6 +35,13 @@
       check_mode: false
       changed_when: false
       no_log: true
+
+    - name: Atomically claim only absent persistent role roots
+      ansible.builtin.command:
+        argv: [python3, "{{ cover_preflight_stage.path }}/ownership.py", initialize]
+      register: cover_ownership
+      changed_when: (cover_ownership.stdout | from_json).changed
+      when: not ansible_check_mode
   always:
     - name: Remove temporary preflight inputs
       ansible.builtin.file:

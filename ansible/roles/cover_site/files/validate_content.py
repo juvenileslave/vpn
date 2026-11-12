@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Managed by cover_site. Operator static content validation.
 """Validate a complete operator-owned static tree; emit only its public manifest."""
 from __future__ import annotations
 

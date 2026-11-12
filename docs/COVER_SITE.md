@@ -23,20 +23,37 @@ TLS backend и не исправляет несовместимую namespace п
 - `/etc/nginx/sites-enabled/cover-site.conf` — атомарная ссылка на checked release;
 - `/etc/cover-site/` — inputs и отдельный Certbot account/lineage;
 - `/var/lib/cover-site/` — staging, immutable releases, active/previous и journal;
-- `/var/www/cover-site-acme/.well-known/acme-challenge/` — HTTP-01 webroot;
+- `/var/www/cover-site-acme/` — отдельный HTTP-01 webroot;
 - `/usr/local/libexec/cover-site/` — validation/lifecycle;
+- `/var/log/cover-site/` — отдельные Certbot logs;
 - `cover-site-renew.service`, `cover-site-renew.timer`, `cover-site-recover.service`.
 
 Другие vhosts, `nginx.conf`, default site, firewall и DNS не переписываются.
 Настройка под тем же hostname на TCP/80, другой listener на private TLS port,
 TCP/80 stream/TLS/PROXY protocol, чужой owned-path или невалидная текущая
-nginx configuration приводят к отказу **до записи site configuration**.
-Входные данные и статический контент проверяются до установки пакетов.
-Preflight читает существующие listeners/nginx через временные helper-файлы в
-`/run` до установки пакетов и изменения persistent inputs. Candidate inputs
-отделены от checked `/etc/cover-site/settings.json`: renewal получает новые
-настройки только после проверенной активации. Отказ и rollback сохраняют
-настройки предыдущего release вместе с его сайтом и сертификатом.
+nginx configuration приводят к отказу **до установки пакетов и persistent writes**.
+Входные данные и статический контент проверяются на controller до host changes.
+Read-only preflight использует временные helper-файлы только в `/run` и проверяет
+**все** перечисленные persistent roots, helpers, units, enable links и sidecars.
+Существующая директория принимается только с root-owned regular marker
+`.cover-site-owner.json`, содержащим `owner: cover_site`, `schema: 1` и точный root.
+Helpers и units дополнительно имеют явный `# Managed by cover_site`; проверяются
+типы файлов/директорий, отсутствие symlink ancestors, неизвестных sidecars,
+unit drop-ins и не принадлежащих роли enable links. Certbot live symlinks могут
+ссылаться только на собственный archive; active/previous/enabled — на законченные
+immutable releases с согласованным fingerprint. Чужие paths не становятся owned
+из-за похожего имени. Неотмеченные старые установки автоматически не принимаются:
+оператор отдельно разбирает их происхождение и сохраняет usable state, а не
+использует роль как команду принудительного захвата ресурсов.
+
+После полного preflight отсутствующие roots создаются через private staging,
+fsync marker/directory и атомарный rename. Поэтому прерывание и повторный запуск
+не оставляют root без durable ownership marker и не меняют чужие mode/content.
+Модули, дочерние директории и units могут ещё отсутствовать при повторном входе;
+роль достраивает только уже явно owned installation. Candidate inputs отделены
+от checked `/etc/cover-site/settings.json`: renewal получает новые настройки
+только после проверенной активации. Отказ и rollback сохраняют старые настройки
+вместе с проверенными сайтом и сертификатом.
 
 ## Входные данные
 
@@ -87,11 +104,14 @@ Public TCP/80 — rollout prerequisite, а не firewall policy этой рол�
 redirect target. Неизвестный hostname на shared TCP/80 остаётся обычным nginx
 vhost selection, включая прежний default site.
 
-Bootstrap активирует checked HTTP-only configuration: несуществующих TLS files
-и self-signed public fallback нет. Реальный Certbot `certonly --webroot` хранит
-account/lineage отдельно в `/etc/cover-site/acme`. Проверяются срок, ровно один
-DNS SAN, hostname/issuer chain, соответствие certificate/private key и
-fullchain. Private key — root/0600; private snapshot directory — root/0700.
+До первого bootstrap роль устанавливает и включает recovery unit, загружает
+systemd configuration и запускает read-only/repair recovery. Bootstrap активирует
+checked **HTTP-only** configuration: несуществующих TLS files и self-signed public
+fallback нет. Этот промежуточный release никогда не предлагается как previous
+TLS rollback target. Реальный Certbot `certonly --webroot` хранит account/lineage
+отдельно в `/etc/cover-site/acme`. Проверяются срок, ровно один DNS SAN,
+hostname/issuer chain, соответствие certificate/private key и fullchain.
+Private key — root/0600; private snapshot directory — root/0700.
 Ключи не копируются на controller, не печатаются lifecycle или Ansible tasks.
 
 nginx читает **копию проверенного certificate/key из immutable release**, не
@@ -102,20 +122,28 @@ nginx читает **копию проверенного certificate/key из im
 
 Роль создаёт content snapshot по точному controller manifest: удалённый исходный
 файл не остаётся публичным из-за старой staging copy. Fingerprint включает
-content, inputs и certificate. Неизменный release не переключается и не reload.
+content, inputs и certificate. Полностью записанный/fsync snapshot публикуется
+атомарным rename из `.stage-*`; незавершённый staging не становится release и
+не препятствует повторному входу. Неизменный release не переключается и не reload.
 
 Кандидат сначала проверяется `nginx -t` на копии **всей текущей nginx
-configuration с другими sites**. Затем journal `pending.json` сохраняет
-previous checked release, атомарно переключается owned enabled link, снова
-выполняется `nginx -t`, и только после этого — настоящий systemd reload/start.
-Успешность подтверждают новый leaf certificate, точное содержимое index по H1
-и negotiated H2. Только после service health активный release становится
-checked; journal удаляется. Reload refusal/невалидный кандидат восстанавливают
-предыдущую configuration, content и certificate; health проверяет настоящий
-старый сервис, а не результат фиктивного reload.
+configuration с другими sites**. Затем journal `pending.json` durable-сохраняет
+**active и distinct previous** (`old`, `previous`, `candidate`), атомарно
+переключается owned enabled link, снова выполняется `nginx -t`, и только после
+этого — настоящий systemd reload/start. Успешность подтверждают новый leaf
+certificate, точное содержимое index по H1 и negotiated H2. Только после service
+health активный release и renewal settings становятся checked; journal удаляется
+с fsync directory. Reload refusal/невалидный кандидат восстанавливают active,
+previous, settings, configuration, content и certificate; health проверяет
+настоящий старый сервис, а не результат фиктивного reload. Прерывание между
+записью previous и commit не теряет отдельный более старый rollback target.
 
-`cover-site-recover.service` enabled и ordered `Before=nginx.service`:
+`cover-site-recover.service` устанавливается/enabled **до первого HTTP/TLS
+переключения**, ordered `Before=nginx.service` и required by nginx:
 незаконченная транзакция восстанавливается перед запуском nginx при boot.
+При первом interrupted install без checked active восстанавливается отсутствие
+owned site; unchecked candidate не загружается. Ошибка recovery блокирует запуск
+nginx через dependency, а не позволяет тихо загрузить незавершённый candidate.
 Не удаляйте checked snapshots/Certbot archives вручную при аварийном откате.
 Роль не удаляет предыдущие releases; их объём и retention контролирует оператор.
 
@@ -129,14 +157,22 @@ checked; journal удаляется. Reload refusal/невалидный кан�
 
 `health` выдаёт JSON hostname/port/TLS/H2/expiry без ключей. Это вход для будущей
 диагностики; существующий bot/alert command не предполагается. `rollback`
-проверяет previous configuration и переключает предыдущий checked release;
-повторный rollback позволяет вернуть второй retained release.
+допускает только previous **TLS** release, проверяет certificate/configuration,
+reload и H1/H2 health и восстанавливает его настройки. После первой TLS установки
+валидного previous ещё нет: команда отказывает без удаления TLS listener.
+После двух проверенных TLS версий повторный rollback возвращает второй retained
+release вместе с его certificate/content/settings. HTTP bootstrap не является
+успешным откатом TLS-сайта.
 
-Renewal timer запускается дважды в сутки с randomized delay. Deployment hook
-проходит ту же stage/check/reload/health транзакцию. Certbot может завершиться
-с кодом 0 при отказе deploy hook: lifecycle дополнительно проверяет, что
-сертификат active snapshot совпал с новым lineage, и сигнализирует ошибку при
-расхождении. Hook не полагается на один только exit code Certbot.
+Renewal timer включается только после checked TLS, запускается дважды в сутки
+и сохраняет `RandomizedDelaySec=3600`. Managed `certbot renew` использует
+`--no-random-sleep-on-renew`: собственная случайная пауза Certbot, даже в
+noninteractive mode, иначе может исчерпать 180-секундный process deadline.
+Рандомизацию уже обеспечивает owned timer; timeout не увеличен и renewal
+не пропускается. Deployment hook проходит ту же stage/check/reload/health
+транзакцию. Certbot может завершиться с кодом 0 при отказе deploy hook:
+lifecycle дополнительно сверяет active snapshot с новым lineage и сигнализирует
+ошибку при расхождении. Hook не полагается на один только exit code Certbot.
 
 ## Baseline и негативные запросы
 
@@ -159,13 +195,23 @@ SNI через `openssl -verify_return_error -verify_hostname`; chain и hostnam
 verification не отключаются. Штатные H1/H2/TLS probes проверяют CA и hostname.
 Baseline не переносится автоматически на внешний REALITY endpoint.
 
+Internal canary считает **каждое принятое TCP connection**, а не только GET.
+До negative probes отдельное настоящее direct TCP connection обязано попасть
+в счётчик; затем positive control очищается. CONNECT, абсолютный URL и любые
+методы/ошибки не могут незаметно обратиться к canary, просто не вызвав GET handler.
+
 ## Точные проверки и ограничения среды
 
-Быстрые role-local проверки контента/nginx parser:
+Быстрые role-local проверки контента/nginx parser и filesystem-транзакций:
 
 ```sh
 python3 -m unittest discover -s ansible/roles/cover_site/tests -p 'test_*.py'
 ```
+
+`test_lifecycle.py` проверяет прерывания при записи previous/active/settings,
+восстановление absence на first install, два TLS rollback targets и checked
+settings, отказ HTTP rollback и read-only ownership/type validation.
+Внешние сервисные команды в этих unit tests изолированы: это не nginx/ACME proof.
 
 Полный service/certificate сценарий **только в свежем disposable
 GitHub-hosted Ubuntu 24.04 systemd guest**, после `make -C ansible bootstrap`:
@@ -187,19 +233,34 @@ email не нужны. Два явных trust inputs разрешены тол�
 chain/origin; `cover_disposable_test: true` и directory
 `https://localhost:14000/dir`. Нет `--no-verify-ssl`, `curl -k` или unverified TLS.
 
-Проверяются H1/H2/GET/HEAD/TLS 1.2/1.3, реальный canary против internal proxy,
+Проверяются H1/H2/GET/HEAD/TLS 1.2/1.3, реальный TCP canary против internal proxy,
 host namespace reachability и отрицательный доступ из veth netns по IPv4/IPv6
 с положительным HTTP control, first issuance, forced renewal/deploy, failed
 HTTP-01, invalid config/certificate/reload, idempotence и unrelated sites.
+`ownership_probe.py` вызывает настоящий Ansible playbook с чужими roots,
+helpers, units, symlinks и sidecars, как до установки, так и в marked installation.
+Негативные результаты требуют неизменности bytes, mode/uid/gid, inode/mtime и
+набора ресурсов owned paths, nginx/systemd configuration и dpkg/apt state.
+После first issuance rollback обязан отказать с сохранением настоящего TLS/H2.
+Две content/settings версии и renewal snapshots проходят двусторонний TLS rollback.
 
 Driver также вызывает `ansible/roles/cover_site/tests/reboot_guest.sh`: свежий
-Ubuntu rootfs через debootstrap, isolated `systemd-nspawn --boot` guest,
-реальный `machinectl reboot` только этого randomly named guest, **новый boot ID**,
-восстановление pending transaction перед nginx и повторные TLS/H2/unrelated-site
-checks. Это **guest userspace reboot, не reboot host kernel или runner**.
-Helper отдельно вызывается под тем же guard после применения synthetic
-`.example.test` cover-site; не копирует CA account, panel/node credentials.
-Это проверка устойчивости сайта; не доказательство reboot всей Xray/Docker stack.
+Ubuntu rootfs через debootstrap, isolated `systemd-nspawn --boot` guest и настоящие
+`machinectl reboot` только этого randomly named guest, каждый с **новым boot ID**.
+`interrupt_activation.py` запускает реальную lifecycle-транзакцию с настоящими
+nginx validation/reload и network health; единственная test instrumentation —
+process exit после durable link write. Driver отдельно проверяет first HTTP
+switch (boot восстанавливает absence), first TLS commit (checked HTTP bootstrap,
+без TLS rollback target) и later commit после замены previous pointer:
+на boot восстанавливаются checked TLS, distinct older previous и settings.
+Guest создаёт ещё две настоящие checked content/settings версии, включая другой
+приватный порт, и проверяет их двусторонний rollback по TLS/H2 и unrelated site.
+Синтетические certificate snapshots лишь дают guest-local lineage для staging;
+это **не ACME доказательство**: real HTTP-01/renewal выполняет `runtime_vm.sh`.
+Это **guest userspace reboot, не reboot host kernel или runner**. Helper отдельно
+вызывается под тем же guard после применения synthetic `.example.test` site;
+CA account, panel/node credentials не копируются. Это устойчивость сайта,
+не доказательство reboot всей Xray/Docker stack.
 
 После интеграции владелец проверки запускает `make -C ansible validate test` и
 однократный финальный `make check`. Реально выполненные результаты публикуются
@@ -207,11 +268,20 @@ Helper отдельно вызывается под тем же guard после
 Linux guest proof не разрешает production rollout и не заменяет отдельный
 pilot на целевой платформе/сети.
 
+Внешние gates исправленного сценария: свежий GitHub-hosted Ubuntu 24.04 с root,
+systemd, netns/veth, systemd-nspawn/machinectl и разрешёнными cgroups; сеть до
+public Ubuntu mirrors и pinned Go/Pebble modules. Нельзя подменять эти gates
+existing VM, production DNS/CA или фиктивным service proof. Переиспользованный
+CI-host с уже существующим owned state отклоняется. Сами исправления не являются
+повторным успешным renewal/reboot прогоном; интегратор публикует фактический
+результат полного driver и обязательных repository/secret checks.
+
 ## Источники синтаксиса и lifecycle
 
 - [nginx listen/virtual server](https://nginx.org/en/docs/http/ngx_http_core_module.html#listen): `listen ... ssl http2`, default vhost behaviour.
 - [nginx HTTP/2 module](https://nginx.org/en/docs/http/ngx_http_v2_module.html): ALPN/H2 и новая директива с 1.25.1.
 - [nginx HTTPS](https://nginx.org/en/docs/http/configuring_https_servers.html): certificate/key и TLS protocol configuration.
 - [Certbot webroot/renewal/custom CA](https://eff-certbot.readthedocs.io/en/stable/using.html): HTTP-01, deploy hook, отдельные directories, REQUESTS_CA_BUNDLE и hook exit semantics.
+- [Certbot CLI renew flag](https://github.com/certbot/certbot/blob/main/certbot/src/certbot/_internal/cli/__init__.py): `--no-random-sleep-on-renew` устанавливает `random_sleep_on_renew=false`; jitter остаётся в owned systemd timer.
 - [Pebble](https://github.com/letsencrypt/pebble/tree/v2.6.0): disposable ACME server, реальные challenges, issuer roots, AUTHZREUSE.
 - [systemd container integration](https://systemd.io/WRITING_VM_AND_CONTAINER_MANAGERS/): isolated booted guest и machine-scoped systemd commands.

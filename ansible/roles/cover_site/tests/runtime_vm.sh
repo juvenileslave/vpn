@@ -7,7 +7,7 @@ set -euo pipefail
 [[ $EUID == 0 && -d /run/systemd/system ]] || { echo 'Root/systemd required.' >&2; exit 2; }
 . /etc/os-release
 [[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || { echo 'Ubuntu 24.04 required.' >&2; exit 2; }
-for path in /etc/cover-site /var/lib/cover-site /etc/nginx/sites-enabled/cover-site.conf; do
+for path in /etc/cover-site /usr/local/libexec/cover-site /var/lib/cover-site /var/log/cover-site /var/www/cover-site-acme /etc/nginx/sites-enabled/cover-site.conf /etc/systemd/system/cover-site-{recover.service,renew.service,renew.timer}; do
   [[ ! -e $path && ! -L $path ]] || { echo 'Refusing non-fresh role-owned state.' >&2; exit 2; }
 done
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
@@ -89,11 +89,20 @@ expect_failure play -e '{"cover_acme_http_reachable": false}'
 expect_failure play -e '{"cover_disposable_test": false}'
 [[ ! -e /etc/cover-site ]] || fail 'Custom trust escaped disposable gate'
 
+step 'Reject every foreign persistent root, helper namespace, unit and sidecar without mutation'
+python3 "$ROOT/ansible/roles/cover_site/tests/ownership_probe.py" fresh "$AP" -i localhost, -c local -e ansible_python_interpreter=/usr/bin/python3 -e @"$WORK/vars.json" "$WORK/play.yml"
+
 step 'Real initial Certbot issuance through HTTP-01'
 play >"$WORK/apply1.log" 2>&1 || { cat "$WORK/apply1.log"; fail 'First role application'; }
 healthy
 FIRST=$(active)
 openssl x509 -in "$FIRST/certificate/cert.pem" -noout -serial >"$WORK/serial.first"
+cp /etc/cover-site/settings.json "$WORK/settings.first.json"
+[[ ! -e /var/lib/cover-site/previous && ! -L /var/lib/cover-site/previous ]] || fail 'First TLS installation retained HTTP bootstrap as previous'
+expect_failure "$LIFECYCLE" rollback
+[[ $(active) == "$FIRST" ]] || fail 'First-install rollback removed TLS'
+cmp /etc/cover-site/settings.json "$WORK/settings.first.json"
+healthy
 # Successful validation must be real: skipping challenges is never enabled.
 [[ ${PEBBLE_VA_ALWAYS_VALID:-0} != 1 ]] || fail 'Challenge validation bypassed'
 
@@ -146,20 +155,29 @@ grep -E '^localhost +:.*changed=0 .*failed=0' "$WORK/apply2.log" || fail 'Role i
 sha256sum -c "$WORK/unrelated.before"
 healthy
 
+step 'Reject foreign helpers and sidecars in an established marked installation'
+python3 "$ROOT/ansible/roles/cover_site/tests/ownership_probe.py" managed "$AP" -i localhost, -c local -e ansible_python_interpreter=/usr/bin/python3 -e @"$WORK/vars.json" "$WORK/play.yml"
+healthy
+
 step 'Actual content replacement and previous-site rollback'
 sed 's/Atlas field journal/Atlas coastal journal/g' "$WORK/source/index.html" >"$WORK/source/replacement.html"
 mv "$WORK/source/replacement.html" "$WORK/source/index.html"
 rm "$WORK/source/retired.txt"
-play >"$WORK/apply3.log" 2>&1 || { cat "$WORK/apply3.log"; fail 'Content replacement'; }
+play -e '{"cover_certificate_min_lifetime":7200}' >"$WORK/apply3.log" 2>&1 || { cat "$WORK/apply3.log"; fail 'Content/settings replacement'; }
 SECOND=$(active)
 [[ $SECOND != "$FIRST" ]] || fail 'Content release did not change'
+cp /etc/cover-site/settings.json "$WORK/settings.second.json"
+! cmp -s "$WORK/settings.first.json" "$WORK/settings.second.json" || fail 'Settings fixture did not change'
 https >"$WORK/body"; cmp "$WORK/body" "$WORK/source/index.html"
 [[ $(curl -s --noproxy '*' --cacert "$WORK/root.pem" --resolve "$HOST:$PORT:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$HOST:$PORT/retired.txt") == 404 ]] || fail 'Deleted source file stayed public'
 "$LIFECYCLE" rollback
 [[ $(active) == "$FIRST" ]] || fail 'Rollback did not select previous site'
+cmp /etc/cover-site/settings.json "$WORK/settings.first.json"
 healthy
 "$LIFECYCLE" rollback
 [[ $(active) == "$SECOND" ]] || fail 'Rollback restoration did not preserve both releases'
+cmp /etc/cover-site/settings.json "$WORK/settings.second.json"
+healthy
 
 step 'Invalid candidate configuration and certificate retain the checked site'
 cp -a "$SECOND" "$WORK/bad-release"
@@ -216,23 +234,32 @@ systemctl is-enabled cover-site-renew.timer
 systemctl is-active cover-site-renew.timer
 
 step 'Interrupted activation recovery, reboot ordering and real restart'
-# Recreate the on-disk state left by a crash between link replacement and commit.
-python3 - "$AFTER_RENEW" "$FIRST" <<'PY'
-import json, os, pathlib, sys
-base = pathlib.Path('/var/lib/cover-site')
-(base / 'pending.json').write_text(json.dumps({'old': sys.argv[1], 'candidate': sys.argv[2]}))
-link = pathlib.Path('/etc/nginx/sites-enabled/cover-site.conf')
-link.unlink(); link.symlink_to(pathlib.Path(sys.argv[2]) / 'site.conf')
-PY
+# Interrupt the real transaction after service health and its previous-pointer write.
+# All nginx checks/reloads/network probes execute normally; only this exit seam is injected.
+OLDER_TARGET=$(readlink -f /var/lib/cover-site/previous)
+cp /etc/cover-site/settings.json "$WORK/settings.before-interruption.json"
+set +e
+python3 "$ROOT/ansible/roles/cover_site/tests/interrupt_activation.py" previous "$FIRST"
+interruption_status=$?
+set -e
+[[ $interruption_status == 86 ]] || fail 'Real commit interruption was not reached'
 systemctl stop nginx
 systemctl restart cover-site-recover.service
 [[ ! -e /var/lib/cover-site/pending.json ]] || fail 'Recovery left pending transaction'
 [[ $(readlink -f /etc/nginx/sites-enabled/cover-site.conf) == "$AFTER_RENEW/site.conf" ]] || fail 'Recovery failed to restore checked config'
+[[ $(readlink -f /var/lib/cover-site/previous) == "$OLDER_TARGET" ]] || fail 'Recovery lost the distinct older rollback target'
+cmp /etc/cover-site/settings.json "$WORK/settings.before-interruption.json"
 # Enabled recovery unit is ordered before nginx at the next boot; replay it here.
 systemctl is-enabled cover-site-recover.service
 systemctl show cover-site-recover.service -p Before --value | grep -qw nginx.service
 systemctl start nginx
 systemctl restart nginx
+healthy
+"$LIFECYCLE" rollback
+[[ $(active) == "$OLDER_TARGET" ]] || fail 'Recovered previous target was unusable'
+healthy
+"$LIFECYCLE" rollback
+[[ $(active) == "$AFTER_RENEW" ]] || fail 'Recovered two-version rollback lost active TLS'
 healthy
 sha256sum -c "$WORK/unrelated.before"
 

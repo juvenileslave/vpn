@@ -1,3 +1,4 @@
+# Managed by cover_site
 [Unit]
 Description=Recover an interrupted cover-site activation before nginx starts
 Before=nginx.service
@@ -10,3 +11,4 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=nginx.service

@@ -77,8 +77,9 @@ class LifecycleTests(unittest.TestCase):
             (old / 'site.conf').write_text('# checked owned configuration\n')
             settings = root / 'settings.json'
             settings.write_text(json.dumps({'hostname': 'rejected.example.test', 'port': 19443}))
-            with patch.multiple(lifecycle, ENABLED=root / 'enabled', ACTIVE=root / 'active', SETTINGS=settings):
-                lifecycle.restore(str(old))
+            with patch.multiple(lifecycle, ENABLED=root / 'enabled', ACTIVE=root / 'active',
+                                PREVIOUS=root / 'previous', SETTINGS=settings):
+                lifecycle.restore(str(old), None)
                 self.assertEqual(json.loads(settings.read_text()), checked)
                 self.assertEqual((root / 'enabled').resolve(), old / 'site.conf')
                 self.assertEqual((root / 'active').resolve(), old)

@@ -9,6 +9,7 @@ set -euo pipefail
 }
 . /etc/os-release
 [[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || exit 2
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 python3 - <<'PY'
 import json, os
 value = json.load(open('/etc/cover-site/settings.json'))
@@ -49,6 +50,10 @@ cp /etc/cover-site/settings.json "$GUEST/etc/cover-site/settings.json"
 cp -a /usr/local/libexec/cover-site "$GUEST/usr/local/libexec/"
 cp -a /var/lib/cover-site/releases /var/lib/cover-site/active "$GUEST/var/lib/cover-site/"
 if [[ -L /var/lib/cover-site/previous ]]; then cp -a /var/lib/cover-site/previous "$GUEST/var/lib/cover-site/"; fi
+for path in /etc/cover-site /var/lib/cover-site /var/www/cover-site-acme; do
+  cp "$path/.cover-site-owner.json" "$GUEST$path/.cover-site-owner.json"
+done
+cp "$ROOT/ansible/roles/cover_site/tests/interrupt_activation.py" "$GUEST/usr/local/libexec/cover-ci-interrupt.py"
 python3 - "$GUEST" <<'PY'
 import json, pathlib, shutil, sys
 root = pathlib.Path(sys.argv[1])
@@ -92,25 +97,84 @@ wait_ready() {
   done
   cat "$WORK/guest.log"; fail 'guest boot did not reach nginx'
 }
+reboot_checked_guest() {
+  local before after=
+  before=$(inside /usr/bin/cat /proc/sys/kernel/random/boot_id)
+  machinectl reboot "$MACHINE"
+  for _ in {1..120}; do
+    after=$(inside /usr/bin/cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+    if [[ -n $after && $after != "$before" ]]; then break; fi
+    kill -0 "$SUPERVISOR" 2>/dev/null || { cat "$WORK/guest.log"; fail 'supervisor lost guest during reboot'; }
+    sleep 1
+  done
+  [[ -n $after && $after != "$before" ]] || { cat "$WORK/guest.log"; fail 'guest boot ID did not change'; }
+  wait_ready
+  inside /usr/bin/test ! -e /var/lib/cover-site/pending.json
+  inside /usr/bin/bash -c 'test "$(curl -s --noproxy "*" http://127.0.0.1:18081/)" = unrelated-site'
+  printf 'Actual isolated guest reboot: %s -> %s\n' "$before" "$after"
+}
+interrupt() {
+  local code
+  set +e
+  inside /usr/bin/python3 /usr/local/libexec/cover-ci-interrupt.py "$@"
+  code=$?
+  set -e
+  [[ $code == 86 ]] || fail 'real activation interruption seam was not reached'
+}
 wait_ready
-BOOT1=$(inside /usr/bin/cat /proc/sys/kernel/random/boot_id)
+inside /usr/local/libexec/cover-site/lifecycle.py health
+# Save real checked fixture identities; no account or live external CA is copied.
+inside /usr/bin/python3 -c 'import json,pathlib; b=pathlib.Path("/var/lib/cover-site"); tls=(b/"active").resolve(); http=next((b/"releases").glob("*-http")); pathlib.Path("/var/tmp/cover-initial.json").write_text(json.dumps({"tls":str(tls),"http":str(http)}))'
+INITIAL_TLS=$(inside /usr/bin/python3 -c 'import json; print(json.load(open("/var/tmp/cover-initial.json"))["tls"])')
+INITIAL_HTTP=$(inside /usr/bin/python3 -c 'import json; print(json.load(open("/var/tmp/cover-initial.json"))["http"])')
+
+printf '\n=== Interrupted first HTTP activation reboots into absent owned state\n'
+inside /usr/bin/python3 -c 'import sys; sys.path.insert(0,"/usr/local/libexec/cover-site"); import lifecycle; lifecycle.restore(None,None); lifecycle.run(["nginx","-t"]); lifecycle.run(["systemctl","reload","nginx"])'
+interrupt enabled "$INITIAL_HTTP"
+reboot_checked_guest
+inside /usr/bin/python3 -c 'import os,pathlib,socket,json; b=pathlib.Path("/var/lib/cover-site"); assert all(not os.path.lexists(p) for p in (b/"active",b/"previous",pathlib.Path("/etc/cover-site/settings.json"),pathlib.Path("/etc/nginx/sites-enabled/cover-site.conf"))); tls=pathlib.Path(json.load(open("/var/tmp/cover-initial.json"))["tls"]); port=json.load(open(tls/"metadata.json"))["settings"]["port"]; s=socket.socket(); s.settimeout(2); assert s.connect_ex(("127.0.0.1",port)) != 0; s.close()'
+
+# Complete the real HTTP bootstrap before interrupting the first TLS commit.
+inside /usr/bin/python3 -c 'import json,pathlib,sys; sys.path.insert(0,"/usr/local/libexec/cover-site"); import lifecycle; lifecycle.activate(pathlib.Path(json.load(open("/var/tmp/cover-initial.json"))["http"]))'
+printf '\n=== Interrupted first TLS commit reboots into checked HTTP bootstrap\n'
+interrupt active "$INITIAL_TLS"
+reboot_checked_guest
+inside /usr/bin/python3 -c 'import os,pathlib,socket,json; b=pathlib.Path("/var/lib/cover-site"); initial=json.load(open("/var/tmp/cover-initial.json")); http=pathlib.Path(initial["http"]); assert (b/"active").resolve()==http; assert not os.path.lexists(b/"previous"); assert pathlib.Path("/etc/nginx/sites-enabled/cover-site.conf").resolve()==http/"site.conf"; assert json.load(open("/etc/cover-site/settings.json"))==json.load(open(http/"metadata.json"))["settings"]; tls=pathlib.Path(initial["tls"]); port=json.load(open(tls/"metadata.json"))["settings"]["port"]; s=socket.socket(); s.settimeout(2); assert s.connect_ex(("127.0.0.1",port)) != 0; s.close()'
+inside /usr/bin/python3 -c 'import json,pathlib,sys; sys.path.insert(0,"/usr/local/libexec/cover-site"); import lifecycle; lifecycle.activate(pathlib.Path(json.load(open("/var/tmp/cover-initial.json"))["tls"]))'
+if inside /usr/local/libexec/cover-site/lifecycle.py rollback; then fail 'first TLS rollback accepted an HTTP/absent target'; fi
+inside /usr/local/libexec/cover-site/lifecycle.py health
+
+printf '\n=== Generate two real checked content/settings versions in the guest\n'
+# Only copied synthetic certificate snapshots seed a guest-local lineage fixture.
+# This is not ACME proof: initial/renewed HTTP-01 is exercised by runtime_vm.sh.
+inside /usr/bin/python3 -c '
+import json,pathlib,shutil,socket,sys,tempfile
+sys.path.insert(0,"/usr/local/libexec/cover-site")
+import lifecycle
+old=lifecycle.release(); value=json.load(open(old/"metadata.json"))["settings"]
+live=pathlib.Path("/etc/cover-site/acme/live")/value["hostname"]; live.mkdir(parents=True)
+for source in (old/"certificate").iterdir():
+    shutil.copyfile(source,live/source.name); (live/source.name).chmod(0o600 if source.name=="privkey.pem" else 0o644)
+with tempfile.TemporaryDirectory(prefix="cover-boot-content-",dir="/var/tmp") as temporary:
+    content=pathlib.Path(temporary)/"content"; shutil.copytree(old/"content",content)
+    page=content/"index.html"; page.write_text(page.read_text()+"\n<p>Disposable guest version B: coastal observations.</p>\n")
+    probe=socket.socket(); probe.bind(("127.0.0.1",0)); port=probe.getsockname()[1]; probe.close()
+    lifecycle.stage({**value,"port":port},tls=True,source=content)
+    page.write_text(page.read_text()+"\n<p>Disposable guest version C: seasonal field observations.</p>\n")
+    lifecycle.stage(value,tls=True,source=content)
+pathlib.Path("/var/tmp/cover-expected.json").write_text(json.dumps({"active":str(lifecycle.release()),"previous":str(lifecycle.release(lifecycle.PREVIOUS)),"candidate":str(old),"settings":json.load(open(lifecycle.SETTINGS))}))
+'
+CANDIDATE=$(inside /usr/bin/python3 -c 'import json; print(json.load(open("/var/tmp/cover-expected.json"))["candidate"])')
+printf '\n=== Interrupted commit retains the distinct older rollback target at boot\n'
+interrupt previous "$CANDIDATE"
+reboot_checked_guest
+inside /usr/bin/python3 -c 'import json,pathlib; e=json.load(open("/var/tmp/cover-expected.json")); b=pathlib.Path("/var/lib/cover-site"); assert (b/"active").resolve()==pathlib.Path(e["active"]); assert (b/"previous").resolve()==pathlib.Path(e["previous"]); assert e["active"]!=e["previous"]; assert pathlib.Path("/etc/nginx/sites-enabled/cover-site.conf").resolve()==(b/"active").resolve()/"site.conf"; assert json.load(open("/etc/cover-site/settings.json"))==e["settings"]'
+inside /usr/local/libexec/cover-site/lifecycle.py health
+inside /usr/local/libexec/cover-site/lifecycle.py rollback
+inside /usr/bin/python3 -c 'import json,pathlib; e=json.load(open("/var/tmp/cover-expected.json")); b=pathlib.Path("/var/lib/cover-site"); old=(b/"active").resolve(); assert str(old)==e["previous"]; assert json.load(open("/etc/cover-site/settings.json"))==json.load(open(old/"metadata.json"))["settings"]'
+inside /usr/local/libexec/cover-site/lifecycle.py health
+inside /usr/local/libexec/cover-site/lifecycle.py rollback
+inside /usr/bin/python3 -c 'import json,pathlib; e=json.load(open("/var/tmp/cover-expected.json")); assert str(pathlib.Path("/var/lib/cover-site/active").resolve())==e["active"]; assert json.load(open("/etc/cover-site/settings.json"))==e["settings"]'
 inside /usr/local/libexec/cover-site/lifecycle.py health
 inside /usr/bin/bash -c 'test "$(curl -s --noproxy "*" http://127.0.0.1:18081/)" = unrelated-site'
-# An interrupted switch is reconstructed inside the actual guest. The normal
-# role recovery unit must restore the checked active release on the next boot.
-inside /usr/bin/python3 -c 'import json,pathlib; b=pathlib.Path("/var/lib/cover-site"); old=(b/"active").resolve(); candidate=(b/"previous").resolve(); (b/"pending.json").write_text(json.dumps({"old":str(old),"candidate":str(candidate)})); p=pathlib.Path("/etc/nginx/sites-enabled/cover-site.conf"); p.unlink(); p.symlink_to(candidate/"site.conf")'
-# machinectl contacts only this randomly named owned guest. It is not host reboot.
-machinectl reboot "$MACHINE"
-for _ in {1..120}; do
-  BOOT2=$(inside /usr/bin/cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
-  if [[ -n $BOOT2 && $BOOT2 != "$BOOT1" ]]; then break; fi
-  kill -0 "$SUPERVISOR" 2>/dev/null || { cat "$WORK/guest.log"; fail 'supervisor lost guest during reboot'; }
-  sleep 1
-done
-[[ -n ${BOOT2:-} && $BOOT2 != "$BOOT1" ]] || { cat "$WORK/guest.log"; fail 'guest boot ID did not change'; }
-wait_ready
-inside /usr/bin/test ! -e /var/lib/cover-site/pending.json
-inside /usr/bin/python3 -c 'import pathlib; b=pathlib.Path("/var/lib/cover-site"); assert pathlib.Path("/etc/nginx/sites-enabled/cover-site.conf").resolve() == (b/"active").resolve()/"site.conf"'
-inside /usr/local/libexec/cover-site/lifecycle.py health
-inside /usr/bin/bash -c 'test "$(curl -s --noproxy "*" http://127.0.0.1:18081/)" = unrelated-site'
-printf 'PASS actual systemd guest userspace reboot: %s -> %s; TLS/H2 and unrelated site recovered. Host kernel untouched.\n' "$BOOT1" "$BOOT2"
+printf 'PASS actual guest reboots: first HTTP interruption -> absent, first TLS interruption -> checked HTTP; later commit -> checked TLS/H2, distinct previous and old settings. Host kernel untouched.\n'

@@ -66,6 +66,7 @@
     - {path: /var/lib/cover-site/releases, mode: '0755'}
     - {path: /var/lib/cover-site/acme-work, mode: '0700'}
     - {path: /var/log/cover-site, mode: '0700'}
+    - {path: /var/www/cover-site-acme/.well-known, mode: '0755'}
     - {path: /var/www/cover-site-acme/.well-known/acme-challenge, mode: '0755'}
 
 - name: Install lifecycle executables
@@ -75,7 +76,28 @@
     owner: root
     group: root
     mode: '0755'
-  loop: [lifecycle.py, validate_content.py]
+  loop: [lifecycle.py, validate_content.py, ownership.py]
+
+- name: Install owned renewal and recovery units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [cover-site-renew.service, cover-site-renew.timer, cover-site-recover.service]
+  register: cover_units
+
+- name: Load changed lifecycle units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: cover_units is changed
+
+- name: Enable recovery dependency before any HTTP or TLS activation
+  ansible.builtin.systemd_service:
+    name: cover-site-recover.service
+    enabled: true
+    state: started
 
 - name: Stage candidate inputs without replacing checked renewal settings
   ansible.builtin.template:
@@ -133,27 +155,12 @@
   changed_when: (cover_apply.stdout | from_json).changed
   when: not ansible_check_mode
 
-- name: Install owned renewal and recovery units
-  ansible.builtin.template:
-    src: "{{ item }}.j2"
-    dest: "/etc/systemd/system/{{ item }}"
-    owner: root
-    group: root
-    mode: '0644'
-  loop: [cover-site-renew.service, cover-site-renew.timer, cover-site-recover.service]
-  register: cover_units
 
-- name: Load changed lifecycle units
+- name: Enable renewal only after a checked TLS origin exists
   ansible.builtin.systemd_service:
-    daemon_reload: true
-  when: cover_units is changed
-
-- name: Enable recover ordering and renewal timer
-  ansible.builtin.systemd_service:
-    name: "{{ item }}"
+    name: cover-site-renew.timer
     enabled: true
     state: started
-  loop: [cover-site-recover.service, cover-site-renew.timer]
 
 - name: Enable nginx without altering unrelated sites
   ansible.builtin.systemd_service:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Managed by cover_site. Checked nginx and Certbot lifecycle.
 """Owned nginx/Certbot stage-check-activate lifecycle. Never prints key material."""
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ import tempfile
 import time
 
 from validate_content import validate
+from ownership import inspect, sync_directory
 
 BASE = Path('/var/lib/cover-site')
 SETTINGS = Path('/etc/cover-site/settings.json')
@@ -56,11 +58,12 @@ def settings(path=SETTINGS):
 
 def atomic_json(path, value):
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, sort_keys=True) + '\n')
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
-    with path.open('rb') as handle:
+    with temporary.open('w') as handle:
+        handle.write(json.dumps(value, sort_keys=True) + '\n')
+        handle.flush()
+        os.fchmod(handle.fileno(), 0o600)
         os.fsync(handle.fileno())
+    os.replace(temporary, path)
     directory = os.open(path.parent, os.O_DIRECTORY)
     try:
         os.fsync(directory)
@@ -80,28 +83,38 @@ def link(path, target):
         os.close(directory)
 
 
-def release(path=ACTIVE):
+def unlink(path):
+    path.unlink(missing_ok=True)
+    sync_directory(path.parent)
+
+
+def release(path=None):
+    path = ACTIVE if path is None else path
     return path.resolve() if path.is_symlink() else None
 
 
-def restore(old):
+def restore(old, previous):
     if old:
         link(ENABLED, Path(old) / 'site.conf')
         link(ACTIVE, old)
         atomic_json(SETTINGS, json.loads((Path(old) / 'metadata.json').read_text())['settings'])
     else:
-        ENABLED.unlink(missing_ok=True)
-        ACTIVE.unlink(missing_ok=True)
-        SETTINGS.unlink(missing_ok=True)
+        unlink(ENABLED)
+        unlink(ACTIVE)
+        unlink(SETTINGS)
+    if previous:
+        link(PREVIOUS, previous)
+    else:
+        unlink(PREVIOUS)
 
 
 def recover():
     if not PENDING.exists():
         return False
     pending = json.loads(PENDING.read_text())
-    restore(pending['old'])
+    restore(pending['old'], pending['previous'])
     run(['nginx', '-t'])
-    PENDING.unlink()
+    unlink(PENDING)
     return True
 
 
@@ -135,6 +148,7 @@ def servers(text):
 
 
 def preflight(value, *, before_install=False):
+    inspect()
     if not shutil.which('nginx'):
         if not before_install:
             raise ValueError('nginx must be installed before activation')
@@ -149,10 +163,6 @@ def preflight(value, *, before_install=False):
     features = subprocess.run(['nginx', '-V'], capture_output=True, text=True, timeout=10).stderr
     if '--with-http_v2_module' not in features or '--with-http_ssl_module' not in features:
         raise ValueError('nginx must provide TLS and HTTP/2 modules')
-    if os.path.lexists(ENABLED) and not (ENABLED.is_symlink() and
-                                        str(ENABLED.resolve()).startswith(str(BASE / 'releases') + '/')
-                                        and MARKER in ENABLED.read_text()):
-        raise ValueError('Refusing to replace an unrelated cover-site.conf')
     dump = run(['nginx', '-T']).decode()
     paths = []
     for section in re.split(r'^# configuration file (.+):\n', dump, flags=re.MULTILINE)[1:]:
@@ -293,7 +303,7 @@ def health(path):
 
 def validate_candidate(path):
     # Validate the full shared configuration without touching the enabled site.
-    with tempfile.TemporaryDirectory(prefix='cover-nginx-', dir=BASE) as temporary:
+    with tempfile.TemporaryDirectory(prefix='cover-nginx-', dir='/run') as temporary:
         mirror = Path(temporary) / 'nginx'
         shutil.copytree('/etc/nginx', mirror, symlinks=False)
         for conf in mirror.rglob('*.conf'):
@@ -307,22 +317,26 @@ def validate_candidate(path):
 
 def activate(path):
     old = release()
+    previous = release(PREVIOUS)
     validate_candidate(path)
-    atomic_json(PENDING, {'old': str(old) if old else None, 'candidate': str(path)})
+    atomic_json(PENDING, {'old': str(old) if old else None,
+                          'previous': str(previous) if previous else None, 'candidate': str(path)})
     try:
         link(ENABLED, path / 'site.conf')
         run(['nginx', '-t'])
         running = subprocess.run(['systemctl', 'is-active', '--quiet', 'nginx'], timeout=10).returncode == 0
         run(['systemctl', 'reload' if running else 'start', 'nginx'])
         result = health(path)
-        if old:
+        if old and (old / 'certificate').is_dir():
             link(PREVIOUS, old)
+        else:
+            unlink(PREVIOUS)
         link(ACTIVE, path)
         atomic_json(SETTINGS, json.loads((path / 'metadata.json').read_text())['settings'])
-        PENDING.unlink()
+        unlink(PENDING)
         return result
     except Exception as error:
-        restore(str(old) if old else None)
+        restore(str(old) if old else None, str(previous) if previous else None)
         run(['nginx', '-t'])
         if old:
             try:
@@ -333,8 +347,21 @@ def activate(path):
                 health(old)
             else:
                 health(old)
-        PENDING.unlink(missing_ok=True)
+        elif subprocess.run(['systemctl', 'is-active', '--quiet', 'nginx'], timeout=10).returncode == 0:
+            # First-install absence is also a real service state: retire candidate
+            # workers by reloading the restored shared config, not only its link.
+            run(['systemctl', 'reload', 'nginx'])
+        unlink(PENDING)
         raise RuntimeError('Activation failed; restored the previous owned configuration/content/certificate') from error
+
+def rollback():
+    previous = release(PREVIOUS)
+    if previous is None or not (previous / 'certificate').is_dir():
+        raise ValueError('No previous checked TLS release; HTTP bootstrap is not a rollback target')
+    value = json.loads((previous / 'metadata.json').read_text())['settings']
+    certificate(previous / 'certificate', value)
+    return activate(previous)
+
 
 
 def stage(value, *, tls, source=None):
@@ -362,26 +389,31 @@ def stage(value, *, tls, source=None):
         if health_metadata['fingerprint'] != identity:
             raise ValueError('Owned release identity mismatch')
     else:
-        path.mkdir(mode=0o755)
-        try:
-            (path / 'content').mkdir(mode=0o755)
+        with tempfile.TemporaryDirectory(prefix='.stage-', dir=path.parent) as temporary:
+            staged = Path(temporary) / 'release'
+            staged.mkdir(mode=0o755)
+            (staged / 'content').mkdir(mode=0o755)
             for name in manifest:
-                target = path / 'content' / name
+                target = staged / 'content' / name
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
                 shutil.copyfile(content / name, target)
                 target.chmod(0o644)
-            validate(path / 'content')
+            validate(staged / 'content')
             if tls:
-                (path / 'certificate').mkdir(mode=0o700)
+                (staged / 'certificate').mkdir(mode=0o700)
                 for name in ('cert.pem', 'chain.pem', 'fullchain.pem', 'privkey.pem'):
-                    shutil.copyfile(live / name, path / 'certificate' / name)
-                    (path / 'certificate' / name).chmod(0o600 if name == 'privkey.pem' else 0o644)
-            (path / 'site.conf').write_text(config(path, value, tls))
-            (path / 'site.conf').chmod(0o644)
-            atomic_json(path / 'metadata.json', {'fingerprint': identity, 'settings': value})
-        except Exception:
-            shutil.rmtree(path)
-            raise
+                    shutil.copyfile(live / name, staged / 'certificate' / name)
+                    (staged / 'certificate' / name).chmod(0o600 if name == 'privkey.pem' else 0o644)
+            (staged / 'site.conf').write_text(config(path, value, tls))
+            (staged / 'site.conf').chmod(0o644)
+            atomic_json(staged / 'metadata.json', {'fingerprint': identity, 'settings': value})
+            for directory, _, files in os.walk(staged, topdown=False):
+                for name in files:
+                    with (Path(directory) / name).open('rb') as handle:
+                        os.fsync(handle.fileno())
+                sync_directory(Path(directory))
+            os.rename(staged, path)
+            sync_directory(path.parent)
     activate(path)
     return True
 
@@ -397,7 +429,8 @@ def certbot(value, operation, extra=()):
         argv += ['--webroot', '-w', '/var/www/cover-site-acme', '--cert-name', value['hostname'],
                  '-d', value['hostname'], '--email', value['email'], '--agree-tos', '--keep-until-expiring']
     else:
-        argv += ['--cert-name', value['hostname'], '--deploy-hook', SCRIPT + ' deploy']
+        # The owned timer already applies the machine-specific randomized delay.
+        argv += ['--no-random-sleep-on-renew', '--cert-name', value['hostname'], '--deploy-hook', SCRIPT + ' deploy']
     run(argv + list(extra), env=env)
 
 
@@ -421,6 +454,7 @@ def main():
             parser.exit(1, f'cover_site: {error}\n')
         print(json.dumps({'changed': False}))
         return
+    inspect()
     # Renewal owns Certbot; its synchronous hook acquires the lifecycle lock only.
     lockpath = BASE / ('renew.lock' if args.operation == 'renew' else 'lifecycle.lock')
     with lockpath.open('a') as lock:
@@ -459,10 +493,7 @@ def main():
                     raise ValueError('No active checked release')
                 result = health(old)
             elif args.operation == 'rollback':
-                previous = release(PREVIOUS)
-                if previous is None:
-                    raise ValueError('No previous checked release')
-                result = activate(previous)
+                result = rollback()
                 changed = True
             elif args.operation == 'renew':
                 if args.force_renewal and not value['test']:
