@@ -26,7 +26,8 @@
    - Почему: единый рабочий аккаунт использует PR и CI без самоодобрения.
    - Проверка: обязательные CI jobs, локальный hook `no-commit-to-branch` и
      фактический ruleset `master` в GitHub ([декларация](../.github/rulesets/master.json)).
-     Снятие review-gate подготовлено локально, не применено к серверу. Подробно —
+     Review-gate снят в ruleset `master` 2026-11-12; ответ API и эффективные
+     правила ветки проверены, обязательные CI и защита ветки сохранены. Подробно —
      [CONTRIBUTING.md](../CONTRIBUTING.md), [AGENTS.md](../AGENTS.md),
      [README.md](../README.md).
 

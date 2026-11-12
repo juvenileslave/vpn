@@ -15,11 +15,13 @@
 [release-теги](.github/rulesets/release-tags.json).
 Правила активированы в GitHub: [master](https://github.com/juvenileslave/vpn/rules/26988307),
 [release-теги](https://github.com/juvenileslave/vpn/rules/26988138).
-Локальная декларация `master` подготовлена для неблокирующего review: ноль
-обязательных approvals, без CODEOWNER/last-push approval и обязательного
-разрешения review threads. Эта правка не применена к GitHub. Изменение JSON
-само по себе не меняет сервер: владелец отдельно согласует применение политики
-через API, затем проверяет ответ и сохранность обязательных PR/CI/защитных правил.
+Декларация `master` применена к GitHub 2026-11-12 через API: ноль обязательных
+approvals, без CODEOWNER/last-push approval и обязательного разрешения review
+threads. Проверены ответ API и эффективные правила ветки: обязательные
+`Repository checks` и `Secret scan`, strict base, запрет deletion/non-fast-forward
+и пустой `bypass_actors` сохранены. Изменение JSON само по себе сервер не меняет;
+следующая правка политики требует отдельного явного разрешения владельца и
+повторной проверки ответа.
 
 - Основной репозиторий — `juvenileslave/vpn`; единственный рабочий GitHub-аккаунт —
   `juvenileslave`. Разработка, коммиты, push, issues и PR выполняются под ним,
