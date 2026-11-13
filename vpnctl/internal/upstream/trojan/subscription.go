@@ -31,12 +31,9 @@ type Subscription struct {
 // the body as a whole is unusable (ErrTooLarge, ErrEncoding, ErrEmpty,
 // ErrTooManyEntries); per-entry failures are reported in Subscription.Errors.
 func ParseSubscription(data []byte) (*Subscription, error) {
-	doc, err := sharelink.Decode(data)
+	doc, err := sharelink.DecodeLimit(data, MaxEntries)
 	if err != nil {
 		return nil, err
-	}
-	if len(doc.Entries) > MaxEntries {
-		return nil, ErrTooManyEntries
 	}
 	sub := &Subscription{Encoding: doc.Encoding}
 	for _, e := range doc.Entries {

@@ -88,16 +88,27 @@ func TestParseSIP002Base64Userinfo(t *testing.T) {
 }
 
 func TestParseSIP002PercentEncoded(t *testing.T) {
-	l := mustParse(t, "ss://aes-128-gcm:p%40ss%3Aword@192.0.2.10:8388")
+	l := mustParse(t, "ss://aes-128-gcm:p%40ss%3Aword@192.0.2.10:8388/")
 	if l.Method != "aes-128-gcm" || l.Password != "p@ss:word" {
 		t.Errorf("method %q password %q", l.Method, l.Password)
 	}
 }
 
-func TestParseSIP002MethodAlias(t *testing.T) {
-	l := mustParse(t, "ss://CHACHA20-IETF-POLY1305:"+testPassword+"@192.0.2.10:8388")
-	if l.Method != "chacha20-poly1305" {
-		t.Errorf("method = %q; want canonical name", l.Method)
+func TestParseMethodNames(t *testing.T) {
+	for input, want := range map[string]string{
+		"aes-128-gcm":            "aes-128-gcm",
+		"aes-256-gcm":            "aes-256-gcm",
+		"chacha20-poly1305":      "chacha20-poly1305",
+		"chacha20-ietf-poly1305": "chacha20-poly1305",
+		"CHACHA20-IETF-POLY1305": "chacha20-poly1305",
+		"AES-256-GCM":            "aes-256-gcm",
+	} {
+		t.Run(input, func(t *testing.T) {
+			l := mustParse(t, "ss://"+input+":"+testPassword+"@192.0.2.10:8388")
+			if l.Method != want {
+				t.Errorf("method = %q; want %q", l.Method, want)
+			}
+		})
 	}
 }
 

@@ -5,10 +5,11 @@
 `ss://` и подписки (plain или base64) в типизированные кандидаты и строят из них
 outbound-объекты Xray. Это офлайн-библиотеки: CLI-команд для них нет.
 
-Общие примитивы (percent-decoding, проверка host/port, метка `#fragment`,
-разбор query и декодирование тела подписки) вынесены во внутренний пакет
-`vpnctl/internal/upstream/sharelink`. Пакет `vless` использует из него только
-декодирование подписок; поведение и публичный API VLESS не изменились.
+Общие для `trojan` и `shadowsocks` примитивы (percent-decoding, проверка
+host/port, метка `#fragment`, разбор query и декодирование тела подписки)
+вынесены во внутренний пакет `vpnctl/internal/upstream/sharelink`. Пакет
+`vless` использует из него только общий декодер подписок; его собственный
+разбор ссылок, ошибки и публичный API не менялись.
 
 ## Чего пакеты не делают
 
@@ -55,13 +56,14 @@ outbound-объекты Xray. Это офлайн-библиотеки: CLI-ко
 - Адрес: DNS-имя (LDH, IDN только `xn--`), IPv4 или IPv6 в квадратных скобках без
   zone; имя приводится к нижнему регистру, IP — к канонической записи.
 - Порт: десятичное число 1–65535 без ведущих нулей.
-- `#метка`: необязательна; percent-decoding, без управляющих символов, до 256
-  символов, обрезается по краям.
+- `#метка`: необязательна; percent-decoding, без управляющих символов,
+  обрезается по краям, после обрезки не более 256 символов.
 - Query: повторяющиеся, пустые и безымянные параметры, параметры без значения и
   неверное percent-encoding — ошибка. Известный параметр вне поддерживаемого
   сочетания сообщается отдельно, неизвестный — «unknown parameter». Ничего не
   игнорируется молча.
-- Путь URI после authority не допускается ни в одной форме.
+- Путь URI после authority: допускается только пустой, то есть одиночный
+  завершающий `/` перед query или фрагментом; любой непустой путь — ошибка.
 
 ## Trojan (`trojan://`)
 
@@ -148,6 +150,8 @@ Outbound: `protocol: shadowsocks`,
 - Одна запись на строку; пустые строки и строки, начинающиеся с `#`,
   пропускаются. Для base64 номера строк относятся к декодированному тексту.
 - `ErrTooManyEntries` — больше 1024 непустых некомментированных строк.
+  Предел применяется в `trojan` и `shadowsocks`; `vless` сохраняет прежнее
+  поведение без ограничения числа записей.
 - Размер тела — не более 1 MiB; размер одной ссылки — не более 16 KiB
   (`MaxLinkBytes`). Ссылка сверх предела становится `EntryError`, а не
   ошибкой всего тела.
@@ -173,8 +177,8 @@ Outbound: `protocol: shadowsocks`,
 
 ```sh
 cd vpnctl
-go vet ./internal/upstream/trojan/ ./internal/upstream/shadowsocks/
-go test ./internal/upstream/trojan/ ./internal/upstream/shadowsocks/
+go vet ./internal/upstream/...
+go test ./internal/upstream/...
 ```
 
 Тесты используют только синтетические данные и документационные адреса
@@ -184,11 +188,13 @@ go test ./internal/upstream/trojan/ ./internal/upstream/shadowsocks/
 `VPNCTL_XRAY_BIN`:
 
 ```sh
-VPNCTL_XRAY_BIN=/path/to/xray-v26.11.9 go test -run TestXrayConfigSmoke \
-  ./internal/upstream/trojan/ ./internal/upstream/shadowsocks/
+VPNCTL_XRAY_BIN=/path/to/xray-v26.11.9 go test -count=1 -run TestXrayConfigSmoke \
+  ./internal/upstream/trojan/ ./internal/upstream/shadowsocks/ ./internal/upstream/vless/
 ```
 
-Бинарник Xray берите из официального релиза v26.11.9 с проверкой SHA-256 из
-файла `.dgst`; для `Xray-macos-arm64-v8a.zip` закреплён хеш
+CI job `Xray parser smoke` скачивает официальный `Xray-linux-64.zip` v26.11.9,
+проверяет SHA-256 и запускает эти же smoke-тесты для trojan, shadowsocks и
+vless. Бинарник для локального запуска берите из официального релиза v26.11.9 с
+проверкой SHA-256 из файла `.dgst`; для `Xray-macos-arm64-v8a.zip` закреплён хеш
 `233f0c66681cd0726f81a6b2b6ed6a5710869e312047b522e46ed53035bebd26` (см.
 [PROFILES.md](PROFILES.md)).

@@ -21,7 +21,7 @@ const (
 	// MaxSubscriptionBytes bounds the raw subscription body.
 	MaxSubscriptionBytes = sharelink.MaxSubscriptionBytes
 	// MaxEntries bounds the number of lines in one subscription.
-	MaxEntries = 1024
+	MaxEntries = sharelink.MaxEntries
 )
 
 // Transport is the stream transport of a link. Only Xray RAW (formerly TCP) is

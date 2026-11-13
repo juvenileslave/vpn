@@ -1,0 +1,52 @@
+name: Xray parser smoke
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  xray-smoke:
+    name: Xray parser smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: vpnctl
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Go
+        # Тег v5 → 40f1582b2485089dde7abd97c1529aa768e1baff (v5.6.0).
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: vpnctl/go.mod
+          # Без общего кэша между PR и master.
+          cache: false
+      - name: Загрузить и проверить Xray v26.11.9
+        run: |
+          curl --fail --silent --show-error --location --max-time 120 \
+            --output "$RUNNER_TEMP/xray.zip" \
+            https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-linux-64.zip
+          # SHA-256 из docs/PROFILES.md для Xray-linux-64.zip v26.11.9.
+          printf '%s  %s\n' \
+            'b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82' \
+            "$RUNNER_TEMP/xray.zip" | sha256sum --check --strict -
+          unzip -q "$RUNNER_TEMP/xray.zip" -d "$RUNNER_TEMP/xray"
+      - name: Проверить outbounds через xray -test
+        env:
+          VPNCTL_XRAY_BIN: ${{ runner.temp }}/xray/xray
+        run: |
+          go test -count=1 -run TestXrayConfigSmoke \
+            ./internal/upstream/trojan/ \
+            ./internal/upstream/shadowsocks/ \
+            ./internal/upstream/vless/

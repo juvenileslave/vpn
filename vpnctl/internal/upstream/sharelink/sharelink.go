@@ -21,12 +21,14 @@ import (
 )
 
 const (
-	// MaxLinkBytes bounds a single link, also after legacy base64 decoding.
+	// MaxLinkBytes bounds the raw length of a single link.
 	MaxLinkBytes = 16 << 10
 	// MaxSubscriptionBytes bounds an already obtained subscription body.
 	MaxSubscriptionBytes = 1 << 20
 	// MaxLabelRunes bounds the display-only fragment of a link.
 	MaxLabelRunes = 256
+	// MaxEntries is the default entry limit for share-link subscriptions.
+	MaxEntries = 1024
 )
 
 var (
@@ -149,10 +151,11 @@ func ParseLabel(frag string, hasFrag bool) (string, error) {
 			return "", Fieldf("label", "contains control characters")
 		}
 	}
+	label = strings.TrimSpace(label)
 	if utf8.RuneCountInString(label) > MaxLabelRunes {
 		return "", Fieldf("label", "longer than %d characters", MaxLabelRunes)
 	}
-	return strings.TrimSpace(label), nil
+	return label, nil
 }
 
 // ParseHostPort parses "host:port" where host is a DNS name (LDH, IDN only in

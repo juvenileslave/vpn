@@ -115,6 +115,37 @@ func TestParseSubscriptionAllMalformed(t *testing.T) {
 	}
 }
 
+func TestParseSubscriptionEntryLimit(t *testing.T) {
+	line := "trojan://" + testPassword + "@192.0.2.1:443\n"
+	sub, err := ParseSubscription([]byte(strings.Repeat(line, MaxEntries)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.Candidates) != MaxEntries || len(sub.Errors) != 0 {
+		t.Fatalf("at limit: %d candidates, %d errors", len(sub.Candidates), len(sub.Errors))
+	}
+	if _, err := ParseSubscription([]byte(strings.Repeat(line, MaxEntries+1))); !errors.Is(err, ErrTooManyEntries) {
+		t.Errorf("over limit err = %v", err)
+	}
+}
+
+func TestParseSubscriptionOversizedEntry(t *testing.T) {
+	oversized := "trojan://" + testPassword + "@192.0.2.1:443#" + strings.Repeat("a", MaxLinkBytes)
+	body := oversized + "\ntrojan://" + testPassword + "@192.0.2.1:443\n"
+	sub, err := ParseSubscription([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.Candidates) != 1 || len(sub.Errors) != 1 {
+		t.Fatalf("got %d candidates, %d errors", len(sub.Candidates), len(sub.Errors))
+	}
+	e := sub.Errors[0]
+	var fe *FieldError
+	if e.Entry != 1 || e.Line != 1 || !errors.As(e, &fe) || fe.Field != "" || !strings.Contains(fe.Reason, "exceeds") {
+		t.Errorf("oversized entry error = %v", e)
+	}
+}
+
 // TestXrayConfigSmoke loads representative outbounds with a pinned Xray binary
 // ("xray run -test" parses and builds the config without connecting).
 // Set VPNCTL_XRAY_BIN to enable it.

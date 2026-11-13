@@ -117,6 +117,27 @@ func TestParseLinkAddresses(t *testing.T) {
 	}
 }
 
+func TestParseLinkLimits(t *testing.T) {
+	l := mustParse(t, "trojan://"+testPassword+"@192.0.2.1:65535/")
+	if l.Port != 65535 {
+		t.Errorf("port = %d; want 65535", l.Port)
+	}
+	label := strings.Repeat("a", 256)
+	l = mustParse(t, "trojan://"+testPassword+"@192.0.2.1:443#"+label)
+	if l.Label != label {
+		t.Errorf("256-rune label not preserved")
+	}
+	l = mustParse(t, "trojan://"+testPassword+"@192.0.2.1:443#%20"+label+"%20")
+	if l.Label != label {
+		t.Errorf("label must be trimmed before the length check")
+	}
+	_, err := ParseLink("trojan://" + testPassword + "@192.0.2.1:443#" + label + "a")
+	var fe *FieldError
+	if !errors.As(err, &fe) || fe.Field != "label" || !strings.Contains(fe.Reason, "longer") {
+		t.Errorf("over-limit label err = %v", err)
+	}
+}
+
 func TestParseLinkErrors(t *testing.T) {
 	tests := []struct {
 		name, link, field, reason string

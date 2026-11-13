@@ -33,8 +33,15 @@ type Document struct {
 // either as plain text or as standard (padded or raw) base64 of it. Blank lines
 // and lines starting with '#' are skipped. The returned error is one of
 // ErrTooLarge, ErrEncoding or ErrEmpty; per-entry failures are left to the
-// calling parser.
+// calling parser. Decode does not limit the number of entries.
 func Decode(data []byte) (*Document, error) {
+	return DecodeLimit(data, 0)
+}
+
+// DecodeLimit is Decode with an entry limit: more than maxEntries non-blank,
+// non-comment lines is ErrTooManyEntries. A non-positive maxEntries disables
+// the limit.
+func DecodeLimit(data []byte, maxEntries int) (*Document, error) {
 	if len(data) > MaxSubscriptionBytes {
 		return nil, ErrTooLarge
 	}
@@ -63,6 +70,9 @@ func Decode(data []byte) (*Document, error) {
 	}
 	if len(doc.Entries) == 0 {
 		return nil, ErrEmpty
+	}
+	if maxEntries > 0 && len(doc.Entries) > maxEntries {
+		return nil, ErrTooManyEntries
 	}
 	return doc, nil
 }
