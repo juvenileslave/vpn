@@ -230,6 +230,8 @@ Route gate связывает один случайный flow ID с измер�
 probe-трафика. SYN, повторные пакеты, простое наличие адреса в pcap и один
 external IP этот gate не проходят. Ограничение 64 KiB относится к доказательству
 одноразового сценария, не добавляет production timeout или fallback cutoff.
+Socket endpoints сравниваются как IP/port tuples: IPv4-mapped IPv6 из `ss`
+нормализуется к тому же wire IPv4, без ослабления проверки адреса или порта.
 PCAP собирает только second-hop TCP/18444 на synthetic bridge с
 `--immediate-mode -U`, snaplen 256 и буфером 32 MiB. Для sequence-byte accounting
 нужны IP/TCP headers; полная payload integrity измеряется отдельно на sink.

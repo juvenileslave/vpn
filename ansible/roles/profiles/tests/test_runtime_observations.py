@@ -32,6 +32,13 @@ class RuntimeObservationParserTest(unittest.TestCase):
         self.assertFalse(established_pair(samples, "2001:db8:47::20.31001", "2001:db8:47::10.18444"))
         self.assertFalse(established_pair(samples, "2001:db8:47::20.31000", "2001:db8:47::10.1844"))
 
+    def test_mapped_ipv4_socket_is_the_same_wire_peer_not_another_port_or_family(self):
+        samples = [b"0 0 [::ffff:192.0.2.20]:33252 [::ffff:192.0.2.10]:18444\n"]
+        self.assertTrue(established_pair(samples, "192.0.2.20.33252", "192.0.2.10.18444"))
+        self.assertFalse(established_pair(samples, "192.0.2.20.33253", "192.0.2.10.18444"))
+        self.assertFalse(established_pair(samples, "192.0.2.20.33252", "192.0.2.11.18444"))
+        self.assertFalse(established_pair(samples, "2001:db8:47::20.33252", "2001:db8:47::10.18444"))
+
 
 class RuntimeVisitorRepresentationTest(unittest.TestCase):
     def test_head_keeps_get_representation_headers_without_body(self):

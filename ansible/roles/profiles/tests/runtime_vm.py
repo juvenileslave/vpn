@@ -185,13 +185,21 @@ def captured_streams(decoded):
 
 
 def established_pair(samples, source, destination):
-    def endpoint(value):
-        address, port = value.rsplit(".", 1)
-        return address + ":" + port
-    left, right = endpoint(source), endpoint(destination)
+    def endpoint(value, separator):
+        try:
+            address, listener = value.rsplit(separator, 1)
+            ip = ipaddress.ip_address(address.replace("[", "").replace("]", ""))
+            if ip.version == 6 and ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            return ip, int(listener)
+        except ValueError:
+            return None
+    left, right = endpoint(source, "."), endpoint(destination, ".")
+    if left is None or right is None:
+        return False
     for sample in samples:
         for line in sample.decode().splitlines():
-            columns = [item.replace("[", "").replace("]", "") for item in line.split()]
+            columns = [endpoint(item, ":") for item in line.split()]
             if left in columns and right in columns:
                 return True
     return False
