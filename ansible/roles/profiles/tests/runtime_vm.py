@@ -664,6 +664,8 @@ class Lab:
                 prefix = ["ip", "netns", "exec", namespace] if namespace else []
                 sockets = subprocess.run(prefix + ["ss", "-H", "-tn", "state", "established"], capture_output=True, timeout=30, check=False)
                 facts[kind + "_established"] = [row.split()[3] + "->" + row.split()[4] for row in sockets.stdout.decode(errors="replace").splitlines() if len(row.split()) > 4]
+                listening = subprocess.run(prefix + ["ss", "-H", "-ltn"], capture_output=True, timeout=30, check=False)
+                facts[kind + "_listeners"] = [row.split()[3] for row in listening.stdout.decode(errors="replace").splitlines() if len(row.split()) > 3]
             self.evidence["public_transfer_facts"] = facts
         except Exception:
             self.evidence["public_transfer_facts"] = "unavailable"
@@ -1044,6 +1046,12 @@ class Lab:
         candidate, _ = self.render()
         self.stage = "core-config-activation"
         self.activate_configs(candidate)
+        self.stage = "direct-reality-handshake"
+        credential = self.secret["profiles_credentials"]["exit"]
+        handshake = {"address": self.topology["exit"]["public_ipv4"] + ":18443", "sni": "cover.example.test", "public_key": credential["public_key"], "short_id": credential["short_ids"][0], "offset_seconds": 0, "capture": str(self.work / "direct-handshake.private.bin"), "state": str(self.work / "direct-handshake-state.private.json"), "trust": str(self.trust), "fragment": 0}
+        handshake_file = self.work / "direct-handshake.private.json"
+        private_json(handshake_file, handshake)
+        self.evidence["scenarios"]["direct_handshake"] = json.loads(self.run("client", [self.probe_binary, handshake_file]))
         self.stage = "direct-profile-application-transfer"
         self.client(candidate, "direct-0", 2080)
         self.transfer(2080)
