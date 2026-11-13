@@ -166,11 +166,12 @@
     base_uncovered: >-
       {{ base_listeners.stdout | vpn_base_uncovered_listeners(base_ssh_port,
          base_firewall_vpn_ports, base_firewall_acknowledged_closed_ports,
-         base_firewall_allow_dhcpv6_client) }}
+         base_firewall_allow_dhcpv6_client, base_firewall_source_ports) }}
   ansible.builtin.assert:
     that: base_uncovered | length == 0
     fail_msg: >-
       Firewall закроет слушающие порты {{ base_uncovered | join(', ') }}. Добавьте их в
-      base_firewall_vpn_ports или подтвердите закрытие в base_firewall_acknowledged_closed_ports.
+      base_firewall_vpn_ports, объявите base_firewall_source_ports или подтвердите закрытие
+      в base_firewall_acknowledged_closed_ports.
     quiet: true
   when: base_firewall_enabled

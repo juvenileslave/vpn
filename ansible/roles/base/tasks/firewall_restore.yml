@@ -1,0 +1,140 @@
+---
+# Each restoration boundary attempts the next one even if it fails. In
+# particular, systemd recovery must not prevent restoration of live SSH/ACLs.
+- name: Restore persistent configuration and loader with independent live recovery
+  block:
+    - name: Restore policy file before any previous loader can start
+      block:
+        - name: Restore previous persistent owned configuration
+          ansible.builtin.copy:
+            src: "{{ base_firewall_transaction.path }}/previous.nft"
+            dest: /etc/vpn-base/firewall.nft
+            remote_src: true
+            owner: "{{ base_firewall_previous.stat.uid }}"
+            group: "{{ base_firewall_previous.stat.gid }}"
+            mode: "{{ base_firewall_previous.stat.mode }}"
+          when: base_firewall_previous.stat.exists
+          no_log: true
+          diff: false
+
+        - name: Remove only newly created policy configuration
+          ansible.builtin.file:
+            path: /etc/vpn-base/firewall.nft
+            state: absent
+          when: not base_firewall_previous.stat.exists
+      always:
+        # Stop only a newly started loader, never the previously active one.
+        - name: Stop a loader that was not previously active
+          ansible.builtin.systemd_service:
+            name: vpn-base-firewall.service
+            state: stopped
+          when:
+            - base_firewall_previous_loader_state.ActiveState != 'active'
+            - base_firewall_loader_start is changed or base_firewall_loader_start is failed
+
+        - name: Remove new persistent loader enablement before restoring the old unit
+          ansible.builtin.command:
+            argv: [systemctl, disable, vpn-base-firewall.service]
+          when:
+            - base_firewall_previous_loader_state.UnitFileState != 'enabled'
+            - base_firewall_loader_start is changed or base_firewall_loader_start is failed
+          changed_when: true
+
+        - name: Restore previous regular loader configuration
+          ansible.builtin.copy:
+            src: "{{ base_firewall_transaction.path }}/previous.service"
+            dest: /etc/systemd/system/vpn-base-firewall.service
+            remote_src: true
+            owner: "{{ base_firewall_previous_unit.stat.uid }}"
+            group: "{{ base_firewall_previous_unit.stat.gid }}"
+            mode: "{{ base_firewall_previous_unit.stat.mode }}"
+            follow: false
+          when: base_firewall_previous_unit.stat.isreg | default(false)
+          no_log: true
+          diff: false
+
+        - name: Restore previous loader link or mask without touching its target
+          ansible.builtin.file:
+            path: /etc/systemd/system/vpn-base-firewall.service
+            src: "{{ base_firewall_previous_unit.stat.lnk_target }}"
+            state: link
+            force: true
+            follow: false
+            owner: "{{ base_firewall_previous_unit.stat.uid }}"
+            group: "{{ base_firewall_previous_unit.stat.gid }}"
+          when: base_firewall_previous_unit.stat.islnk | default(false)
+
+        - name: Remove only newly installed owned loader unit
+          ansible.builtin.file:
+            path: /etc/systemd/system/vpn-base-firewall.service
+            state: absent
+          when: not base_firewall_previous_unit.stat.exists
+
+        - name: Reload restored systemd unit definitions
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+          when: >-
+            base_firewall_unit is changed or base_firewall_unit is failed
+            or base_firewall_loader_start is changed or base_firewall_loader_start is failed
+
+        - name: Restore previous persistent loader enablement
+          ansible.builtin.systemd_service:
+            name: vpn-base-firewall.service
+            enabled: true
+          when:
+            - base_firewall_previous_loader_state.UnitFileState == 'enabled'
+            - base_firewall_loader_start is changed or base_firewall_loader_start is failed
+
+        - name: Restore previous runtime-only loader enablement
+          ansible.builtin.command:
+            argv: [systemctl, enable, --runtime, vpn-base-firewall.service]
+          when:
+            - base_firewall_previous_loader_state.UnitFileState == 'enabled-runtime'
+            - base_firewall_loader_start is changed or base_firewall_loader_start is failed
+          changed_when: true
+
+        - name: Restore a previously active loader if start failed after replacement
+          ansible.builtin.systemd_service:
+            name: vpn-base-firewall.service
+            state: started
+          when:
+            - base_firewall_previous_loader_state.ActiveState == 'active'
+            - base_firewall_loader_start is changed or base_firewall_loader_start is failed
+  always:
+    # A restored loader can read the persistent file while starting. Restore
+    # exact live state last, even when some file/systemd restoration failed.
+    - name: Restore previously loaded owned policy
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, -f, "{{ base_firewall_transaction.path }}/rollback.nft"]
+      when: base_firewall_live.rc == 0
+      changed_when: true
+      no_log: true
+
+    - name: Inspect first-application failure state
+      ansible.builtin.command: /usr/sbin/nft list table inet vpn_base
+      register: base_firewall_failed_live
+      when: base_firewall_live.rc != 0
+      changed_when: false
+      failed_when: base_firewall_failed_live.rc not in [0, 1]
+      no_log: true
+
+    - name: Remove only newly created owned table
+      ansible.builtin.command: /usr/sbin/nft delete table inet vpn_base
+      when:
+        - base_firewall_live.rc != 0
+        - base_firewall_failed_live.rc == 0
+      changed_when: true
+
+    - name: Inspect the new configuration directory after first-application failure
+      ansible.builtin.stat:
+        path: /etc/vpn-base
+      register: base_firewall_failed_directory
+      when: not base_firewall_previous_directory.stat.exists
+
+    - name: Remove only a new empty owned configuration directory
+      ansible.builtin.command:
+        argv: [rmdir, --ignore-fail-on-non-empty, /etc/vpn-base]
+      when:
+        - not base_firewall_previous_directory.stat.exists
+        - base_firewall_failed_directory.stat.isdir | default(false)
+      changed_when: true

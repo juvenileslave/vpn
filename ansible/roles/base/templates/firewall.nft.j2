@@ -41,5 +41,14 @@ table inet vpn_base {
 {% if udp_ports %}
     udp dport { {{ udp_ports | join(', ') }} } accept
 {% endif %}
+{% for entry in base_firewall_source_ports | sort(attribute='port') %}
+{% set sources = entry.source_cidrs | vpn_base_split_cidrs %}
+{% if sources.v4 %}
+    ip saddr { {{ sources.v4 | join(', ') }} } {{ entry.proto }} dport {{ entry.port }} accept
+{% endif %}
+{% if sources.v6 %}
+    ip6 saddr { {{ sources.v6 | join(', ') }} } {{ entry.proto }} dport {{ entry.port }} accept
+{% endif %}
+{% endfor %}
   }
 }

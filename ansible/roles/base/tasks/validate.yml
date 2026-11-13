@@ -23,6 +23,7 @@
         'base_ssh_trusted_cidrs': base_ssh_trusted_cidrs,
         'base_firewall_enabled': base_firewall_enabled,
         'base_firewall_vpn_ports': base_firewall_vpn_ports,
+        'base_firewall_source_ports': base_firewall_source_ports,
         'base_firewall_allow_icmp_echo': base_firewall_allow_icmp_echo,
         'base_firewall_allow_dhcpv6_client': base_firewall_allow_dhcpv6_client,
         'base_firewall_acknowledged_closed_ports': base_firewall_acknowledged_closed_ports,
