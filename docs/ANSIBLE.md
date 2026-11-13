@@ -24,6 +24,10 @@ ansible/
     └── tests/test_validate_inventory.py
 ```
 
+> Примечание: помимо перечисленного, каталог содержит playbook'и и роли
+> (`playbooks/`, `roles/`) принятых компонентов; их контракты описаны в
+> документации соответствующих ролей (см. README).
+
 `hosts.yml` содержит под `all.children` ровно три группы: `exit`, `relay`, `cp`.
 Хосты задаются только внутри этих групп; один хост не может входить в две группы.
 Переменные групп и хостов хранятся в файлах `group_vars/<группа>.yml` и
@@ -59,6 +63,13 @@ callback `ansible.builtin.default` через секцию `[callback_default]`
 | `xhttp_mode` | `auto`, `packet-up`, `stream-up`, `stream-one` | `all` или `host_vars` |
 | `image_tags` | mapping «компонент → тег», строки | `group_vars/all` |
 | `panel_bind` | адрес привязки панели | `cp` |
+
+Роли вроде `node_exporter` и `victoriametrics` используют собственные
+переменные (`node_exporter_listen_address`, `victoriametrics_listen_address`
+и другие); они не являются частью контракта inventory и описаны в документации
+ролей ([NODE_EXPORTER.md](NODE_EXPORTER.md), [METRICS_ROLE.md](METRICS_ROLE.md)).
+Пример inventory задаёт для `victoriametrics` loopback-адрес и порт `8428`
+в `group_vars/cp`.
 
 Правила топологии:
 

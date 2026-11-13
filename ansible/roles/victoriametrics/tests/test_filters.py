@@ -1,0 +1,114 @@
+"""Unit tests for the victoriametrics role validation filters."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import unittest
+
+PLUGIN = Path(__file__).resolve().parents[1] / "filter_plugins" / "victoriametrics.py"
+_spec = importlib.util.spec_from_file_location("victoriametrics_filters", PLUGIN)
+filters = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(filters)
+
+
+class ListenAddressTests(unittest.TestCase):
+    def test_accepts_literal_unicast(self):
+        loopback = {"127.0.0.1", "::1"}
+        for value in ["127.0.0.1", "::1", "192.0.2.10", "2001:db8:10::10", "10.0.0.5"]:
+            with self.subTest(value=value):
+                result = filters.victoriametrics_ip(value)
+                self.assertEqual(result["address"], value)
+                self.assertEqual(result["loopback"], value in loopback)
+
+    def test_rejects_wildcards_hostnames_and_zones(self):
+        for value in ["0.0.0.0", "::", "vm.example.com", "fe80::1%eth0", "", "127.0.0.1:8428", None, 42]:
+            with self.subTest(value=value):
+                with self.assertRaises(filters.AnsibleFilterError):
+                    filters.victoriametrics_ip(value)
+
+    def test_rejects_multicast(self):
+        with self.assertRaises(filters.AnsibleFilterError):
+            filters.victoriametrics_ip("224.0.0.1")
+
+    def test_canonicalizes_ipv6(self):
+        result = filters.victoriametrics_ip("2001:0DB8:10::10")
+        self.assertEqual(result["address"], "2001:db8:10::10")
+        self.assertEqual(result["version"], 6)
+
+
+class SourceAclTests(unittest.TestCase):
+    def test_loopback_needs_no_acl(self):
+        self.assertTrue(filters.victoriametrics_sources_ok({"loopback": True}, []))
+        self.assertTrue(filters.victoriametrics_sources_ok({"loopback": True}, None))
+
+    def test_non_loopback_requires_exact_private_sources(self):
+        listen = {"loopback": False}
+        self.assertTrue(filters.victoriametrics_sources_ok(listen, ["10.0.0.5/32"]))
+        self.assertTrue(filters.victoriametrics_sources_ok(listen, ["fd00::5/128"]))
+
+    def test_non_loopback_rejects_missing_wide_or_public_sources(self):
+        listen = {"loopback": False}
+        for sources in [[], None, "10.0.0.5/32", ["0.0.0.0/0"], ["::/0"], ["10.0.0.0/8"],
+                        ["192.0.2.1/32"], ["203.0.113.0/24"], ["127.0.0.1/32"],
+                        ["10.0.0.5/32", "10.0.0.5/32"], ["garbage"]]:
+            with self.subTest(sources=sources):
+                self.assertFalse(filters.victoriametrics_sources_ok(listen, sources))
+
+
+class TargetsTests(unittest.TestCase):
+    def test_renders_host_port_pairs(self):
+        self.assertEqual(
+            filters.victoriametrics_targets(["exit-a", "relay-a"], 9100),
+            ["exit-a:9100", "relay-a:9100"],
+        )
+
+    def test_rejects_bad_nodes_and_ports(self):
+        with self.assertRaises(filters.AnsibleFilterError):
+            filters.victoriametrics_targets("exit-a", 9100)
+        with self.assertRaises(filters.AnsibleFilterError):
+            filters.victoriametrics_targets([""], 9100)
+        with self.assertRaises(filters.AnsibleFilterError):
+            filters.victoriametrics_targets(["a b"], 9100)
+        for port in ["9100", True, 0, 65536, None]:
+            with self.subTest(port=port):
+                with self.assertRaises(filters.AnsibleFilterError):
+                    filters.victoriametrics_targets(["exit-a"], port)
+
+
+class PanelTargetTests(unittest.TestCase):
+    def test_splits_url(self):
+        self.assertEqual(
+            filters.victoriametrics_panel_target("http://127.0.0.1:3001/metrics"),
+            {"scheme": "http", "hostport": "127.0.0.1:3001", "path": "/metrics"},
+        )
+        self.assertEqual(
+            filters.victoriametrics_panel_target("https://panel:8443"),
+            {"scheme": "https", "hostport": "panel:8443", "path": "/metrics"},
+        )
+        self.assertEqual(
+            filters.victoriametrics_panel_target("http://127.0.0.1:3001/custom/path"),
+            {"scheme": "http", "hostport": "127.0.0.1:3001", "path": "/custom/path"},
+        )
+
+    def test_rejects_non_http_urls(self):
+        for value in ["ftp://x/metrics", "127.0.0.1:3001", "", None, "https:///metrics"]:
+            with self.subTest(value=value):
+                with self.assertRaises(filters.AnsibleFilterError):
+                    filters.victoriametrics_panel_target(value)
+
+
+class RetentionTests(unittest.TestCase):
+    def test_accepts_explicit_units(self):
+        for value in ["30d", "24h", "1M", "1y", "2w", "3600s"]:
+            with self.subTest(value=value):
+                self.assertTrue(filters.victoriametrics_duration_ok(value))
+
+    def test_rejects_bare_numbers_and_garbage(self):
+        for value in ["30", "", "1m", "1M2d", "d30", "-5d", "0d", None, 30]:
+            with self.subTest(value=value):
+                self.assertFalse(filters.victoriametrics_duration_ok(value))
+
+
+if __name__ == "__main__":
+    unittest.main()

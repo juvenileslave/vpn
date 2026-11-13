@@ -24,6 +24,9 @@
   операторский контент и Certbot; не публичный альтернативный backend.
 - [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
   management-путь с mTLS/JWT и source ACL роли base.
+- [VictoriaMetrics](docs/METRICS_ROLE.md) — закреплённый single-node store
+  метрик со скрейпом node_exporter и панели, retention 30 дней и query API
+  только на loopback или по source ACL; не алертинг и не production-стек.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
   (`version`, `config validate`) плюс read-only Telegram-бот
   ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)); панель только читает, узлы не

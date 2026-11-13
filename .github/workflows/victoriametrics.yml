@@ -1,0 +1,100 @@
+name: VictoriaMetrics role
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  victoriametrics:
+    name: victoriametrics role
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: ansible
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Установить закреплённый ansible-core
+        run: make -C ansible bootstrap
+      - name: Unit-тесты фильтров роли
+        run: ../.venv/bin/python -m unittest discover --start-directory roles/victoriametrics/tests --pattern 'test_*.py' --verbose
+      - name: Проверить синтаксис playbook
+        run: ../.venv/bin/ansible-playbook --syntax-check playbooks/victoriametrics.yml
+      # GitHub-hosted runner — одноразовая VM с systemd: роль применяется
+      # только к нему, включая полный сервисный сценарий.
+      - name: Отклонить wildcard-адрес и не-ACL не-loopback до изменений
+        run: |
+          PLAYBOOK="../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml"
+          if $PLAYBOOK -e victoriametrics_listen_address=0.0.0.0; then exit 1; fi
+          if $PLAYBOOK -e victoriametrics_listen_address=10.0.0.5; then exit 1; fi
+          if $PLAYBOOK -e victoriametrics_listen_address=10.0.0.5 -e victoriametrics_allowed_sources=['0.0.0.0/0']; then exit 1; fi
+          test ! -e /opt/victoriametrics && test ! -e /var/lib/victoriametrics
+      - name: Check mode на чистом runner
+        run: |
+          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml --check
+          test ! -e /opt/victoriametrics
+          test ! -e /var/lib/victoriametrics
+          test ! -e /etc/systemd/system/victoriametrics.service
+          getent passwd victoriametrics && exit 1 || true
+      - name: Runtime-сценарий на одноразовом runner
+        run: |
+          set -euo pipefail
+          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml
+          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml | tee "$RUNNER_TEMP/second.log"
+          grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$RUNNER_TEMP/second.log"
+          curl --fail --silent --show-error http://127.0.0.1:8428/health | grep -q OK
+          # Self-scrape: собственные метрики VictoriaMetrics дают up=1.
+          curl --fail --silent --show-error -g 'http://127.0.0.1:8428/api/v1/query?query=up' \
+            | grep -q '"value":1'
+          test "$(ss -Hltn 'sport = :8428' | wc -l)" -eq 1
+          grep -q ' 127\.0\.0\.1:8428 ' <(ss -Hltn 'sport = :8428')
+          systemctl is-active victoriametrics.service
+          test "$(systemctl show --property=MainPID --value victoriametrics.service)" != 0
+          test "$(ps -o user= -p "$(systemctl show --property=MainPID --value victoriametrics.service)")" = victoriametrics
+          stat -c '%a %U' /var/lib/victoriametrics | grep -q '^750 victoriametrics$'
+          test "$(stat -c '%a' /etc/victoriametrics/scrape.yml)" = 640
+          tr '\0' ' ' </proc/"$(systemctl show --property=MainPID --value victoriametrics.service)"/cmdline | grep -oE '\-retentionPeriod=30d'
+          tr '\0' ' ' </proc/"$(systemctl show --property=MainPID --value victoriametrics.service)"/cmdline | grep -oE '\-httpListenAddr=127\.0\.0\.1:8428'
+          # Персистентность: вставка, перезапуск сервиса, повторный запрос.
+          curl --fail --silent --show-error -X POST http://127.0.0.1:8428/api/v1/import/prometheus \
+            --data-binary 'vm_acceptance_probe{host="disposable"} 42'
+          sleep 2
+          sudo systemctl restart victoriametrics.service
+          sleep 3
+          for _ in $(seq 1 20); do
+            curl --fail --silent --show-error http://127.0.0.1:8428/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl --fail --silent --show-error -g 'http://127.0.0.1:8428/api/v1/query?query=vm_acceptance_probe' \
+            | grep -q '"value":42'
+          # Слушатель по-прежнему только loopback.
+          if ss -Hltn | grep -v 127.0.0.1 | grep -q 8428; then exit 1; fi
+
+      - name: Не-CP источник не достигает API (network namespace)
+        run: |
+          set -euo pipefail
+          # Отдельный network namespace имеет собственный loopback; соединение
+          # к 127.0.0.1:8428 в нём не достигает слушателя хоста — это модель
+          # постороннего источника без маршрута к узлу VictoriaMetrics.
+          sudo ip netns add vm-unrelated
+          if sudo ip netns exec vm-unrelated python3 -c 'import socket; s=socket.socket(); s.settimeout(2); raise SystemExit(0 if s.connect_ex(("127.0.0.1", 8428)) == 0 else 1)'; then
+            echo "unrelated namespace reached the query API" >&2
+            exit 1
+          fi
+          sudo ip netns del vm-unrelated

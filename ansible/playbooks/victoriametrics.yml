@@ -1,0 +1,12 @@
+---
+# Pinned single-node VictoriaMetrics (architecture task 10.1). See docs/METRICS_ROLE.md.
+# Example: ansible-playbook -i <inventory> playbooks/victoriametrics.yml
+# Default target is the CP group; with cp_placement: exit run with
+# -e victoriametrics_hosts=exit.
+- name: Install pinned single-node VictoriaMetrics
+  hosts: "{{ victoriametrics_hosts | default('cp') }}"
+  become: true
+  gather_facts: true
+  roles:
+    # Project-local path relative to this playbook; no ANSIBLE_ROLES_PATH needed.
+    - role: ../roles/victoriametrics

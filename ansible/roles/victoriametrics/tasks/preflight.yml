@@ -1,0 +1,47 @@
+---
+# Read-only preflight: refuse to take over an existing unmanaged installation.
+
+- name: Check whether the data directory already exists
+  ansible.builtin.stat:
+    path: "{{ victoriametrics_data_dir }}"
+  register: _victoriametrics_data_dir
+
+- name: Read the existing scrape configuration, if any
+  ansible.builtin.slurp:
+    src: "{{ victoriametrics_config_dir }}/scrape.yml"
+  register: _victoriametrics_existing_scrape
+  failed_when: false
+  check_mode: false
+
+- name: Refuse to take over an unmanaged installation
+  vars:
+    _managed_scrape: >-
+      {{ _victoriametrics_existing_scrape.content is defined
+         and 'Managed by the Ansible role victoriametrics'
+             in (_victoriametrics_existing_scrape.content | b64decode) }}
+  ansible.builtin.assert:
+    that: >-
+      not _victoriametrics_data_dir.stat.exists or _managed_scrape
+    fail_msg: >-
+      {{ victoriametrics_data_dir }} exists without a scrape configuration
+      managed by this role; refusing to take it over. Nothing was changed;
+      migrate or remove the existing installation manually
+      (see docs/METRICS_ROLE.md).
+    quiet: true
+
+- name: Read the existing unit file, if any
+  ansible.builtin.slurp:
+    src: "{{ victoriametrics_unit_path }}"
+  register: _victoriametrics_existing_unit
+  failed_when: false
+  check_mode: false
+
+- name: Require an existing unit to reference victoria-metrics-prod
+  ansible.builtin.assert:
+    that: >-
+      _victoriametrics_existing_unit.content is not defined
+      or 'victoria-metrics-prod' in (_victoriametrics_existing_unit.content | b64decode)
+    fail_msg: >-
+      {{ victoriametrics_unit_path }} exists but does not reference
+      victoria-metrics-prod; refusing to take it over.
+    quiet: true

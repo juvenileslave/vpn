@@ -1,0 +1,48 @@
+# {{ ansible_managed }}
+[Unit]
+Description=VictoriaMetrics single-node {{ victoriametrics_version }}
+Documentation=https://github.com/juvenileslave/vpn/blob/master/docs/METRICS_ROLE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ victoriametrics_user }}
+Group={{ victoriametrics_group }}
+WorkingDirectory={{ victoriametrics_data_dir }}
+ExecStart={{ victoriametrics_binary }} -httpListenAddr={{ victoriametrics_listen }} -storageDataPath={{ victoriametrics_data_dir }} -retentionPeriod={{ victoriametrics_retention }} -promscrape.config={{ victoriametrics_config_dir }}/scrape.yml
+Restart=on-failure
+RestartSec=5s
+
+# Bounded footprint for a small exit; both limits are operator-tunable.
+{% if victoriametrics_memory_max | length > 0 %}
+MemoryMax={{ victoriametrics_memory_max }}
+{% endif %}
+{% if victoriametrics_cpu_quota | length > 0 %}
+CPUQuota={{ victoriametrics_cpu_quota }}
+{% endif %}
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths={{ victoriametrics_data_dir }}
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

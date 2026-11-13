@@ -1,0 +1,133 @@
+---
+# Order matters: every check that can fail runs before the first mutation.
+
+- name: Validate victoriametrics listen address
+  ansible.builtin.set_fact:
+    victoriametrics_listen_ip: "{{ victoriametrics_listen_address | victoriametrics_ip }}"
+
+- name: Validate source ACL against the listen address
+  ansible.builtin.assert:
+    that:
+      - victoriametrics_listen_ip | victoriametrics_sources_ok(victoriametrics_allowed_sources)
+    fail_msg: >-
+      victoriametrics_allowed_sources must be a non-empty list of exact private
+      /32 and /128 source CIDRs when victoriametrics_listen_address is not a
+      loopback address; loopback listen addresses need no ACL.
+    quiet: true
+
+- name: Validate retention, scrape interval, limits and port
+  ansible.builtin.assert:
+    that:
+      - victoriametrics_retention | victoriametrics_duration_ok
+      - victoriametrics_scrape_interval is string
+      - victoriametrics_scrape_interval is match('^[0-9]+[smhd]$')
+      - victoriametrics_listen_port is integer and victoriametrics_listen_port is not boolean
+      - victoriametrics_listen_port >= 1
+      - victoriametrics_listen_port <= 65535
+      - victoriametrics_memory_max is string
+      - victoriametrics_memory_max is match('^$|^[0-9]+[KMGT]?$')
+      - victoriametrics_cpu_quota is string
+      - victoriametrics_cpu_quota is match('^$|^[0-9]+%$')
+      - victoriametrics_health_path is string
+      - victoriametrics_health_path is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: >-
+      victoriametrics_retention must be a positive duration with an explicit unit
+      (s, h, d, w, M, y; bare numbers are months and are rejected),
+      victoriametrics_scrape_interval a duration in s/m/h/d,
+      victoriametrics_listen_port an integer 1-65535,
+      victoriametrics_memory_max a systemd size and
+      victoriametrics_cpu_quota a percentage or empty.
+    quiet: true
+
+- name: Validate panel metrics credentials source
+  ansible.builtin.assert:
+    that:
+      - victoriametrics_panel_metrics is mapping
+      - victoriametrics_panel_metrics.keys() | list | length == 0
+        or victoriametrics_panel_metrics.keys() | list
+        | difference(['url', 'username', 'password', 'username_file', 'password_file'])
+        | length == 0
+      - victoriametrics_panel_metrics.password is not defined or victoriametrics_panel_metrics.password_file is not defined
+      - victoriametrics_panel_metrics.username is not defined or victoriametrics_panel_metrics.username_file is not defined
+    fail_msg: >-
+      victoriametrics_panel_metrics accepts url, username, password, username_file
+      and password_file keys; exactly one of username/username_file and one of
+      password/password_file.
+    quiet: true
+
+- name: Check the controller-side credential files, if any
+  when: >-
+    victoriametrics_panel_metrics.username_file is defined
+    or victoriametrics_panel_metrics.password_file is defined
+  vars:
+    _repo_root: "{{ (role_path ~ '/../../..') | realpath }}"
+  block:
+    - name: Stat the credential files on the controller
+      ansible.builtin.stat:
+        path: "{{ victoriametrics_panel_metrics[item] | expanduser }}"
+      delegate_to: localhost
+      become: false
+      register: _victoriametrics_credential_stats
+      loop: "{{ _files }}"
+      loop_control:
+        label: "credential file"
+
+    - name: Require existing absolute credential files outside the repository
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.path is abs
+          - not ((item.stat.path | realpath) ~ '/').startswith(_repo_root ~ '/')
+        fail_msg: >-
+          Panel credential files must be existing regular files outside the
+          repository checkout.
+        quiet: true
+      loop: "{{ _victoriametrics_credential_stats.results }}"
+      loop_control:
+        label: "credential file"
+
+    - name: Load the panel username from the controller file
+      when: victoriametrics_panel_metrics.username_file is defined
+      ansible.builtin.set_fact:
+        _victoriametrics_panel_username: "{{ lookup('ansible.builtin.file', victoriametrics_panel_metrics.username_file | expanduser) }}"
+      no_log: true
+
+    - name: Load the panel password from the controller file
+      when: victoriametrics_panel_metrics.password_file is defined
+      ansible.builtin.set_fact:
+        _victoriametrics_panel_password: "{{ lookup('ansible.builtin.file', victoriametrics_panel_metrics.password_file | expanduser) }}"
+      no_log: true
+
+- name: Reject unsupported platforms before any change
+  vars:
+    # The disposable CI container runs no systemd; the full service scenario
+    # then runs in the GitHub-hosted VM job, which is a systemd guest.
+    _require_systemd: "{{ lookup('ansible.builtin.env', 'VICTORIAMETRICS_DISPOSABLE_CONTAINER', default='') != 'yes' }}"
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.system == 'Linux'
+      - ansible_facts.architecture in victoriametrics_arch_map
+      - not _require_systemd | bool or ansible_facts.service_mgr == 'systemd'
+    fail_msg: >-
+      victoriametrics role supports only Linux with systemd on
+      {{ victoriametrics_arch_map.keys() | join(', ') }}; found
+      {{ ansible_facts.system }}/{{ ansible_facts.architecture }}/{{ ansible_facts.service_mgr }}
+    quiet: true
+
+- name: Reject listen settings that cannot be bound on this host
+  ansible.builtin.assert:
+    that:
+      - victoriametrics_listen_ip.loopback
+        or victoriametrics_listen_ip.address in (ansible_facts.all_ipv4_addresses | default([])
+        + ansible_facts.all_ipv6_addresses | default([]))
+    fail_msg: >-
+      victoriametrics_listen_address must be a loopback address or an address
+      assigned to this host
+    quiet: true
+
+- name: Compose the victoriametrics listen socket
+  ansible.builtin.set_fact:
+    victoriametrics_listen: >-
+      {{ ('[' ~ victoriametrics_listen_ip.address ~ ']') if victoriametrics_listen_ip.version == 6
+      else victoriametrics_listen_ip.address }}:{{ victoriametrics_listen_port }}

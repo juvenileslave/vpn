@@ -1,0 +1,16 @@
+---
+# Order matters: every check that can fail runs before the first mutation.
+- name: Validate inputs on the controller and the host
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Render and dry-run the scrape configuration
+  ansible.builtin.import_tasks: stage.yml
+
+- name: Refuse to take over an unmanaged installation
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Install files and converge the service
+  ansible.builtin.import_tasks: apply.yml
+
+- name: Verify the query API answers
+  ansible.builtin.import_tasks: health.yml

@@ -1,0 +1,36 @@
+---
+# Pinned single-node VictoriaMetrics release. Changing the version requires
+# updating every checksum in the same change.
+# SHA256 values are copied from the official checksums files of the release,
+# https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v1.155.0/
+# victoria-metrics-linux-{amd64,arm64}-v1.155.0_checksums.txt:
+#   - *_checksums.victoriametrics_arch: the release archive itself, verified by
+#     get_url before extraction;
+#   - *_checksums.victoria_metrics_prod: the extracted victoria-metrics-prod
+#     binary, verified after extraction (the role checks both).
+victoriametrics_version: "1.155.0"
+victoriametrics_checksums:
+  amd64:
+    archive: 7180e65913d55ab99c0be8f4a3ad17a0fafe5598a21ff6327fecba3190d7b176
+    victoria_metrics_prod: aca3c49816db88c0e48012772fcf2a94eb66aaccd925b35d397b8b6f7f40fb43
+  arm64:
+    archive: c6af3f35c597e2cb45c9bbb7a7fc1638c6f1ec10a8198c2861aa14531bf439d7
+    victoria_metrics_prod: 5024a2a13237fbfbf7b276e60b7942cf0efb3bea5f53b5ca4b690e4d0719ca58
+victoriametrics_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+
+victoriametrics_user: victoriametrics
+victoriametrics_group: victoriametrics
+victoriametrics_base_dir: /opt/victoriametrics
+victoriametrics_unit_path: /etc/systemd/system/victoriametrics.service
+# Scrape configuration and panel credentials live here; not world-readable.
+victoriametrics_config_dir: /etc/victoriametrics
+
+# Role constants, not meant to be overridden.
+victoriametrics_arch: "{{ victoriametrics_arch_map[ansible_facts.architecture] }}"
+victoriametrics_release: victoria-metrics-linux-{{ victoriametrics_arch }}-v{{ victoriametrics_version }}
+victoriametrics_archive: "{{ victoriametrics_base_dir }}/{{ victoriametrics_release }}.tar.gz"
+victoriametrics_binary: "{{ victoriametrics_base_dir }}/{{ victoriametrics_release }}/victoria-metrics-prod"
+victoriametrics_url: >-
+  https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v{{ victoriametrics_version }}/{{ victoriametrics_release }}.tar.gz
