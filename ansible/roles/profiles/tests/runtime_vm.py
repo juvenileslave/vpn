@@ -606,16 +606,32 @@ class Lab:
         private_json(path, config)
         process = self.spawn("client", [self.xray, "run", "-config", path], "client-" + name, env=self.core_env)
         self.client_processes[name] = process
-        for _ in range(100):
-            if process.poll() is not None:
-                self.evidence["public_client_start_error"] = (self.work / ("client-" + name + ".private.log")).read_text(errors="replace")[-400:]
-                raise AssertionError("Xray client exited before its listener opened")
-            if self.run("client", [ROOT / ".venv/bin/python", __file__, "tcp", "127.0.0.1", str(port)]).strip() == b"open":
-                break
-            time.sleep(.1)
-        else:
-            self.evidence["public_client_start_error"] = (self.work / ("client-" + name + ".private.log")).read_text(errors="replace")[-400:]
-            raise AssertionError("real local client listener unavailable")
+
+        def client_facts():
+            try:
+                self.evidence["public_client_log"] = (self.work / ("client-" + name + ".private.log")).read_text(errors="replace")[-500:]
+                self.evidence["public_client_exit"] = process.poll()
+                namespace = self.ns("client")
+                listeners = subprocess.run(["ip", "netns", "exec", namespace, "ss", "-H", "-ltn"], capture_output=True, timeout=30, check=False)
+                self.evidence["public_client_listeners"] = [line.split()[3] for line in listeners.stdout.decode(errors="replace").splitlines() if len(line.split()) > 3]
+            except Exception:
+                self.evidence["public_client_facts"] = "unavailable"
+
+        try:
+            for _ in range(300):
+                if process.poll() is not None:
+                    client_facts()
+                    raise AssertionError("Xray client exited before its listener opened")
+                if self.run("client", [ROOT / ".venv/bin/python", __file__, "tcp", "127.0.0.1", str(port)]).strip() == b"open":
+                    break
+                time.sleep(.1)
+            else:
+                client_facts()
+                raise AssertionError("real local client listener unavailable")
+        except AssertionError:
+            if "public_client_listeners" not in self.evidence:
+                client_facts()
+            raise
 
     def transfer(self, port=1080, size=1048576, *, expected=True, address="192.0.2.100", target=18080):
         return self.run("client", [ROOT / ".venv/bin/python", HERE / "traffic.py", "transfer", port, size, address, target], expected=expected, timeout=240)
