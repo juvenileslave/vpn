@@ -14,6 +14,7 @@ victoriametrics_data_dir: /var/lib/victoriametrics
 
 # Retention passed as -retentionPeriod. Explicit unit suffixes: s, h, d, w, M, y.
 # Bare numbers mean months in VictoriaMetrics and are rejected here.
+# Values shorter than 24 hours or non-finite durations are rejected.
 # 30d is the accepted default of architecture decision D-010.
 victoriametrics_retention: 30d
 
@@ -37,7 +38,7 @@ victoriametrics_allowed_sources: []
 # outside the checkout are accepted, and the scrape config references 0640
 # copies on the target host.
 #   url           — optional; default http://127.0.0.1:3001/metrics
-#   username_file / password_file — absolute controller paths, given together
+#   username_file / password_file — absolute controller paths, one value per file
 # The panel endpoint is reachable only where the compose stack publishes it;
 # on a host without the panel the role works without this variable.
 victoriametrics_panel_metrics: {}

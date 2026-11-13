@@ -11,7 +11,7 @@ scrape_configs:
   - job_name: victoriametrics
     static_configs:
       - targets:
-          - {{ ('[' ~ victoriametrics_listen_ip.address ~ ']') if victoriametrics_listen_ip.version == 6 else victoriametrics_listen_ip.address }}:{{ victoriametrics_listen_port }}
+          - {{ victoriametrics_listen | to_json }}
 
   # node_exporter on the declared nodes; port 9100 is the accepted contract of
   # the node_exporter role (docs/NODE_EXPORTER.md). Scraping remote targets
@@ -20,7 +20,7 @@ scrape_configs:
     static_configs:
       - targets:
 {% for target in victoriametrics_scrape_nodes | victoriametrics_targets(9100) %}
-          - {{ target }}
+          - {{ target | to_json }}
 {% endfor %}
 {% if victoriametrics_panel_metrics %}
 {% set panel = victoriametrics_panel_metrics.url | default('http://127.0.0.1:3001/metrics') | victoriametrics_panel_target %}
@@ -28,11 +28,11 @@ scrape_configs:
   # published only inside the compose stack; on the CP host it is reachable
   # via the loopback mapping only when explicitly allowed).
   - job_name: panel
-    scheme: {{ panel.scheme }}
-    metrics_path: {{ panel.path }}
+    scheme: {{ panel.scheme | to_json }}
+    metrics_path: {{ panel.path | to_json }}
     static_configs:
       - targets:
-          - {{ panel.hostport }}
+          - {{ panel.hostport | to_json }}
 {% if victoriametrics_panel_metrics.username_file is defined %}
     basic_auth:
       username_file: {{ victoriametrics_config_dir }}/panel-metrics-username

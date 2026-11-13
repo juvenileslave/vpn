@@ -18,15 +18,19 @@
          or victoriametrics_version not in _victoriametrics_existing_version.stdout }}
 
 - name: Allocate the scratch directory
+  # Keep the candidate private and owned by the connecting user. Unlike /run
+  # on some hosts, /tmp normally permits executing the validation binary.
   ansible.builtin.tempfile:
     state: directory
     prefix: victoriametrics-
-    path: /run
+    path: /tmp
   register: _victoriametrics_scratch
+  become: false
   check_mode: false
   changed_when: false
 
 - name: Render and dry-run the candidate scrape configuration
+  become: false
   block:
     - name: Render the candidate scrape configuration
       ansible.builtin.template:
@@ -53,7 +57,7 @@
         src: "{{ _victoriametrics_scratch.path }}/{{ victoriametrics_release }}.tar.gz"
         dest: "{{ _victoriametrics_scratch.path }}"
         remote_src: true
-        mode: "0700"
+        extra_opts: [--no-same-owner]
       when: _victoriametrics_need_binary | bool and not ansible_check_mode
       check_mode: false
       changed_when: false
@@ -66,6 +70,7 @@
         argv:
           - "{{ (_victoriametrics_scratch.path ~ '/victoria-metrics-prod') if _victoriametrics_need_binary | bool else victoriametrics_binary }}"
           - "-promscrape.config={{ _victoriametrics_scratch.path }}/scrape.yml"
+          - "-retentionPeriod={{ victoriametrics_retention }}"
           - -promscrape.config.dryRun
       environment:
         GOMAXPROCS: "1"

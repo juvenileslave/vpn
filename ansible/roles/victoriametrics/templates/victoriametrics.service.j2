@@ -10,7 +10,7 @@ Type=simple
 User={{ victoriametrics_user }}
 Group={{ victoriametrics_group }}
 WorkingDirectory={{ victoriametrics_data_dir }}
-ExecStart={{ victoriametrics_binary }} -httpListenAddr={{ victoriametrics_listen }} -storageDataPath={{ victoriametrics_data_dir }} -retentionPeriod={{ victoriametrics_retention }} -promscrape.config={{ victoriametrics_config_dir }}/scrape.yml
+ExecStart={{ victoriametrics_binary }} -enableTCP6 -httpListenAddr={{ victoriametrics_listen }} -storageDataPath={{ victoriametrics_data_dir }} -retentionPeriod={{ victoriametrics_retention }} -promscrape.config={{ victoriametrics_config_dir }}/scrape.yml
 Restart=on-failure
 RestartSec=5s
 

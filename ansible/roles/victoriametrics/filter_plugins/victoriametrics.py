@@ -8,9 +8,14 @@ only with an exact source rule in the base role's firewall contract.
 from __future__ import annotations
 
 import ipaddress
+import math
 import re
+from urllib.parse import urlsplit
 
 from ansible.errors import AnsibleFilterError
+
+# VictoriaMetrics retention units: month = 31 days, year = 365 days.
+RETENTION_SECONDS = {"s": 1, "h": 3600, "d": 86400, "w": 604800, "M": 2678400, "y": 31536000}
 
 HOST_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
 # Source ACLs and non-loopback listen addresses stay inside private space;
@@ -133,27 +138,38 @@ def victoriametrics_targets(nodes: object, port: object) -> list[str]:
     for node in nodes:
         if not isinstance(node, str) or not HOST_NAME.fullmatch(node):
             raise AnsibleFilterError(
-                "victoriametrics_scrape_nodes must be a list of DNS host names; "
-                f"got {node!r}"
+                "victoriametrics_scrape_nodes must be a list of DNS host names"
             )
         targets.append(f"{node}:{port}")
     return targets
 
 
 def victoriametrics_panel_target(url: object) -> dict[str, str]:
-    """Split a panel metrics URL into scheme, hostport and metrics path."""
+    """Split an HTTP metrics URL without embedding credentials or parameters."""
     if not isinstance(url, str):
         raise AnsibleFilterError("the panel metrics url must be a string")
-    scheme, separator, remainder = url.partition("://")
-    if not separator or scheme not in ("http", "https"):
-        raise AnsibleFilterError("the panel metrics url must be an http(s) URL")
-    hostport, _, path = remainder.partition("/")
-    if not hostport:
-        raise AnsibleFilterError("the panel metrics url has no host")
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.port == 0
+            or any(character.isspace() for character in url)
+        ):
+            raise ValueError
+    except ValueError:
+        raise AnsibleFilterError(
+            "the panel metrics url must be an http(s) endpoint without "
+            "credentials, query parameters, fragments or whitespace"
+        ) from None
     return {
-        "scheme": scheme,
-        "hostport": hostport,
-        "path": "/" + path if path else "/metrics",
+        "scheme": parsed.scheme,
+        "hostport": parsed.netloc,
+        "path": parsed.path or "/metrics",
     }
 
 
@@ -163,18 +179,10 @@ def victoriametrics_duration_ok(value: object) -> bool:
     Bare numbers mean months in VictoriaMetrics; the role rejects them so the
     accepted default (30 days) can never silently degrade to a month count.
     """
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?[shdwMy]", value):
         return False
-    if value.isdigit():
-        return False
-    number, suffix = value[:-1], value[-1]
-    if suffix not in "shdwMy":
-        return False
-    try:
-        amount = float(number)
-    except ValueError:
-        return False
-    return amount > 0
+    amount = float(value[:-1])
+    return math.isfinite(amount) and amount * RETENTION_SECONDS[value[-1]] >= 86400
 
 
 class FilterModule:

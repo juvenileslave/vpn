@@ -6,10 +6,10 @@
 - name: Wait for the query API to answer on the health path
   ansible.builtin.uri:
     url: >-
-      http://{{ ('[' ~ victoriametrics_listen_ip.address ~ ']') if victoriametrics_listen_ip.version == 6
-      else victoriametrics_listen_ip.address }}:{{ victoriametrics_listen_port }}{{ victoriametrics_health_path }}
+      http://{{ victoriametrics_listen }}{{ victoriametrics_health_path }}
     status_code: 200
     timeout: 10
+    use_proxy: false
   register: _victoriametrics_health
   until: _victoriametrics_health.status == 200
   retries: 12

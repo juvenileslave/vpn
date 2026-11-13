@@ -151,15 +151,37 @@ class PanelTargetTests(unittest.TestCase):
                 with self.assertRaises(filters.AnsibleFilterError):
                     filters.victoriametrics_panel_target(value)
 
+    def test_ipv6_endpoint(self):
+        self.assertEqual(
+            filters.victoriametrics_panel_target("http://[::1]:3001/metrics"),
+            {"scheme": "http", "hostport": "[::1]:3001", "path": "/metrics"},
+        )
+
+    def test_rejects_embedded_credentials_without_echoing_them(self):
+        url = "http://synthetic-user:synthetic-password@127.0.0.1:3001/metrics"
+        with self.assertRaises(filters.AnsibleFilterError) as caught:
+            filters.victoriametrics_panel_target(url)
+        self.assertNotIn("synthetic-user", str(caught.exception))
+        self.assertNotIn("synthetic-password", str(caught.exception))
+
+    def test_rejects_parameters_fragments_and_invalid_ports(self):
+        for url in ["http://panel/metrics?token=synthetic", "http://panel/metrics#fragment",
+                    "http://panel:0/metrics", "http://panel:65536/metrics", "http://panel:bad/metrics",
+                    "http://panel/metrics\n"]:
+            with self.subTest(url=url):
+                with self.assertRaises(filters.AnsibleFilterError):
+                    filters.victoriametrics_panel_target(url)
+
 
 class RetentionTests(unittest.TestCase):
     def test_accepts_explicit_units(self):
-        for value in ["30d", "24h", "1M", "1y", "2w", "3600s"]:
+        for value in ["30d", "24h", "1M", "1y", "2w", "86400s", "1.5d"]:
             with self.subTest(value=value):
                 self.assertTrue(filters.victoriametrics_duration_ok(value))
 
     def test_rejects_bare_numbers_and_garbage(self):
-        for value in ["30", "", "1m", "1M2d", "d30", "-5d", "0d", None, 30]:
+        for value in ["30", "", "1m", "1M2d", "d30", "-5d", "0d", "3600s", "23h", "0.5d",
+                      "0.1w", "0.01M", "0.001y", "infd", "1e6d", "1_000d", None, 30]:
             with self.subTest(value=value):
                 self.assertFalse(filters.victoriametrics_duration_ok(value))
 

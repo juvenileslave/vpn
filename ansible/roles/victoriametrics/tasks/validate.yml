@@ -30,19 +30,19 @@
     that:
       - victoriametrics_retention | victoriametrics_duration_ok
       - victoriametrics_scrape_interval is string
-      - victoriametrics_scrape_interval is match('^[0-9]+[smhd]$')
+      - victoriametrics_scrape_interval is match('^[1-9][0-9]*[smhd]$')
       - victoriametrics_listen_port is integer and victoriametrics_listen_port is not boolean
       - victoriametrics_listen_port >= 1
       - victoriametrics_listen_port <= 65535
       - victoriametrics_memory_max is string
-      - victoriametrics_memory_max is match('^$|^[0-9]+[KMGT]?$')
+      - victoriametrics_memory_max is match('^$|^[1-9][0-9]*[KMGT]?$')
       - victoriametrics_cpu_quota is string
-      - victoriametrics_cpu_quota is match('^$|^[0-9]+%$')
+      - victoriametrics_cpu_quota is match('^$|^[1-9][0-9]*%$')
       - victoriametrics_health_path is string
       - victoriametrics_health_path is match('^/[A-Za-z0-9._/-]*$')
     fail_msg: >-
-      victoriametrics_retention must be a positive duration with an explicit unit
-      (s, h, d, w, M, y; bare numbers are months and are rejected),
+      victoriametrics_retention must be a finite duration of at least 24h
+      with an explicit unit (s, h, d, w, M, y; bare numbers are rejected),
       victoriametrics_scrape_interval a duration in s/m/h/d,
       victoriametrics_listen_port an integer 1-65535,
       victoriametrics_memory_max a systemd size and
@@ -107,15 +107,11 @@
       no_log: true
 
 - name: Reject unsupported platforms before any change
-  vars:
-    # The disposable CI container runs no systemd; the full service scenario
-    # then runs in the GitHub-hosted VM job, which is a systemd guest.
-    _require_systemd: "{{ lookup('ansible.builtin.env', 'VICTORIAMETRICS_DISPOSABLE_CONTAINER', default='') != 'yes' }}"
   ansible.builtin.assert:
     that:
       - ansible_facts.system == 'Linux'
       - ansible_facts.architecture in victoriametrics_arch_map
-      - not _require_systemd | bool or ansible_facts.service_mgr == 'systemd'
+      - ansible_facts.service_mgr == 'systemd'
     fail_msg: >-
       victoriametrics role supports only Linux with systemd on
       {{ victoriametrics_arch_map.keys() | join(', ') }}; found
