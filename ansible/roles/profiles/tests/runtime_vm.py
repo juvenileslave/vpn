@@ -233,10 +233,12 @@ class Lab:
         Path("/etc/hosts").write_bytes(self.old_hosts + b"\n192.0.2.10 cover.example.test\n2001:db8:47::10 cover.example.test\n")
 
     def prerequisites(self):
+        self.stage = "accepted-docker-installation"
         self.play(["docker"], variables={"docker_allow_version_change": True})
         existing = subprocess.run(["docker", "inspect", "vpn-remnanode"], capture_output=True, check=False)
         if existing.returncode == 0:
             raise AssertionError("fresh guest required; refusing an existing Node container")
+        self.stage = "verified-embedded-core-extraction"
         command(["docker", "pull", "--quiet", bundle.NODE_IMAGE])
         command(["docker", "save", "-o", self.work / "node-image.tar", bundle.NODE_IMAGE])
         extract = self.prefix + "-extract"
@@ -252,16 +254,22 @@ class Lab:
             raise AssertionError("embedded core version differs from verified pin")
         self.evidence["embedded_core_sha256"] = hashlib.sha256(self.xray.read_bytes()).hexdigest()
         self.evidence["stock_geoip_sha256"] = hashlib.sha256((self.assets / "geoip.dat").read_bytes()).hexdigest()
+        self.stage = "disposable-geodata-fixture"
         fixture_geoip(self.assets / "geoip.dat")
         self.evidence["fixture_geoip_sha256"] = hashlib.sha256((self.assets / "geoip.dat").read_bytes()).hexdigest()
         self.core_env = {**os.environ, "XRAY_LOCATION_ASSET": str(self.assets)}
+        self.stage = "pinned-reality-probe-build"
         build = self.work / "reality-probe-source"
         shutil.copytree(HERE / "reality_probe", build)
         self.probe_binary = self.work / "reality-probe"
         # Build from a copied private directory; never modify the checkout/go.sum.
         result = subprocess.run(["go", "build", "-mod=readonly", "-o", str(self.probe_binary), "."], cwd=build, env={**os.environ, "GOTOOLCHAIN": "auto", "GOWORK": "off"}, capture_output=True, timeout=900, check=False)
         if result.returncode:
+            # Compiler input contains public source/dependencies only, no PKI.
+            self.evidence["public_build_error"] = result.stderr.decode(errors="replace")
+            self.evidence["public_go_version"] = command(["go", "version"]).decode().strip()
             raise AssertionError("pinned disposable REALITY probe build failed")
+        self.stage = "pinned-local-acme-tool-build"
         command(["go", "install", "github.com/letsencrypt/pebble/v2/cmd/pebble@v2.6.0"], env={**os.environ, "GOBIN": str(self.work / "bin"), "GOTOOLCHAIN": "auto"}, timeout=900)
 
     def relay_daemon(self):
@@ -278,6 +286,7 @@ class Lab:
             time.sleep(1)
         else:
             raise AssertionError("isolated relay Docker daemon not ready")
+        self.stage = "isolated-relay-image-load"
         command(["docker", "load", "-i", self.work / "node-image.tar"], env=self.relay_env)
 
     def cover(self):
@@ -751,6 +760,7 @@ class Lab:
         self.network()
         self.stage = "verified-runtime-prerequisites"
         self.prerequisites()
+        self.stage = "isolated-relay-docker-daemon"
         self.relay_daemon()
         self.stage = "owned-cover-local-ACME"
         self.cover()
