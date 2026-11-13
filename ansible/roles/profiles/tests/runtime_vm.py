@@ -701,7 +701,7 @@ class Lab:
     def capture_routes(self, label, action, *, slot=0, expected_family=6):
         capture = self.work / (label + ".private.pcap")
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        process = self.spawn("exit", ["tcpdump", "-i", "any", "-nn", "-U", "-w", capture, "tcp port 18444 or tcp port 18082 or tcp port 18080"], "capture-" + label)
+        process = self.spawn("exit", ["tcpdump", "--immediate-mode", "-i", "any", "-nn", "-U", "-w", capture, "tcp port 18444 or tcp port 18082 or tcp port 18080"], "capture-" + label)
         samples = {"exit": [], "relay": []}
         stop = threading.Event()
         sampling_errors = []
@@ -745,6 +745,9 @@ class Lab:
             family_bytes[str(version)] = {"upload": sum(item[2] for item in candidates), "download": sum(item[3] for item in candidates)}
             carrying = [item for item in candidates if item[2] >= size and item[3] >= size]
             established[str(version)] = any(established_pair(samples["relay"], source, dest) and established_pair(samples["exit"], source, dest) for source, dest, _up, _down in carrying)
+        fixture_ips = [self.topology[kind]["public_ipv" + str(version)] for kind in ("exit", "relay") for version in (4, 6)]
+        socket_endpoints = {kind: sorted({field.replace("[", "").replace("]", "") for sample in snapshots for field in sample.decode().split() if any(address in field for address in fixture_ips)}) for kind, snapshots in samples.items()}
+        self.evidence.setdefault("route_observation_attempts", {})[label] = {"expected_family": expected_family, "application": application, "unique_tcp_payload_bytes": family_bytes, "established_accepted_socket": established, "fixture_socket_endpoints": socket_endpoints, "pcap_sha256": hashlib.sha256(capture.read_bytes()).hexdigest()}
         other = str(4 if expected_family == 6 else 6)
         # Probes use HTTP204/18081, never the application's hash protocol.
         # Bound alternate-family payload below 64 KiB, versus >=1 MiB/flow.
