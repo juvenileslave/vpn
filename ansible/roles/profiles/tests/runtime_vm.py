@@ -767,7 +767,6 @@ class Lab:
 
     def capture_routes(self, label, action, *, slot=0, expected_family=6):
         capture = self.work / (label + ".private.pcap")
-        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         process = self.spawn("exit", ["tcpdump", "--immediate-mode", "-s", "256", "-B", "32768", "-i", self.prefix + "br", "-nn", "-U", "-w", capture, "tcp port 18444"], "capture-" + label)
         samples = {"exit": [], "relay": []}
         stop = threading.Event()
@@ -784,6 +783,8 @@ class Lab:
         time.sleep(.5)
         watcher.start()
         try:
+            unix_seconds, nanoseconds = divmod(time.time_ns(), 1_000_000_000)
+            since = f"{unix_seconds}.{nanoseconds:09d}"
             application = json.loads(action())
             # A new fallback H2 socket may open after the watcher's first exit
             # sample. Finish one real snapshot of both peers before stopping.

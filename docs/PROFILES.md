@@ -250,6 +250,12 @@ tags. Правильный record вместе с дополнительным d
 У exit допускается фактический `transit-v4` или `transit-v6`. Адресная семья
 по-прежнему доказывается payload и accepted socket на обоих концах second hop,
 а не именем listener. Рендер и production-конфигурация ради этого не меняются.
+Граница access-log window снимается непосредственно перед текущей передачей,
+после запуска capture/sampler: `time.time_ns()` передаётся в
+[`docker logs --since`](https://github.com/docker/cli/blob/master/docs/reference/commandline/container_logs.md)
+как Unix `seconds.nanoseconds` с девятью fractional digits. Предыдущий flow в
+той же секунде не входит в окно; дополнительный accepted route внутри окна
+по-прежнему приводит к отказу gate.
 PCAP собирает только second-hop TCP/18444 на synthetic bridge с
 `--immediate-mode -U`, snaplen 256 и буфером 32 MiB. Для sequence-byte accounting
 нужны IP/TCP headers; полная payload integrity измеряется отдельно на sink.
