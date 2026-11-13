@@ -604,12 +604,17 @@ class Lab:
             change(config)
         path = self.work / ("client-" + name + ".private.json")
         private_json(path, config)
-        self.client_processes[name] = self.spawn("client", [self.xray, "run", "-config", path], "client-" + name, env=self.core_env)
+        process = self.spawn("client", [self.xray, "run", "-config", path], "client-" + name, env=self.core_env)
+        self.client_processes[name] = process
         for _ in range(100):
+            if process.poll() is not None:
+                self.evidence["public_client_start_error"] = (self.work / ("client-" + name + ".private.log")).read_text(errors="replace")[-400:]
+                raise AssertionError("Xray client exited before its listener opened")
             if self.run("client", [ROOT / ".venv/bin/python", __file__, "tcp", "127.0.0.1", str(port)]).strip() == b"open":
                 break
             time.sleep(.1)
         else:
+            self.evidence["public_client_start_error"] = (self.work / ("client-" + name + ".private.log")).read_text(errors="replace")[-400:]
             raise AssertionError("real local client listener unavailable")
 
     def transfer(self, port=1080, size=1048576, *, expected=True, address="192.0.2.100", target=18080):
