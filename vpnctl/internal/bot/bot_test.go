@@ -245,8 +245,7 @@ func TestGroupChatRequiresExplicitAllow(t *testing.T) {
 	b := newTestBot(t, api, &fakePanel{}, newTestStore(t), defaultOperators(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runInBackground(t, b, ctx)
-	waitFor(t, "group update consumption", func() bool { return len(api.pollCalls()) >= 1 })
-	time.Sleep(20 * time.Millisecond)
+	waitFor(t, "group update consumption", func() bool { return len(api.pollCalls()) >= 2 })
 	if err := stopBot(t, cancel, done); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -302,7 +301,7 @@ func TestDuplicateUpdateIsAnsweredOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runInBackground(t, b, ctx)
 	waitFor(t, "single reply", func() bool { return len(api.sentReplies()) >= 1 })
-	time.Sleep(20 * time.Millisecond)
+	waitFor(t, "next poll", func() bool { return len(api.pollCalls()) >= 2 })
 	if err := stopBot(t, cancel, done); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -331,8 +330,7 @@ func TestRestartResumesOffsetAndIgnoresReplay(t *testing.T) {
 	b2 := newTestBot(t, api2, &fakePanel{}, state, defaultOperators(), nil)
 	ctx, cancel = context.WithCancel(context.Background())
 	done = runInBackground(t, b2, ctx)
-	waitFor(t, "restart poll", func() bool { return len(api2.pollCalls()) >= 1 })
-	time.Sleep(30 * time.Millisecond)
+	waitFor(t, "restart replay", func() bool { return len(api2.pollCalls()) >= 2 })
 	if err := stopBot(t, cancel, done); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}

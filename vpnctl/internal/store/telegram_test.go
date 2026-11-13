@@ -96,6 +96,55 @@ func TestClaimBotUpdateIsAtomicAcrossConcurrentCallers(t *testing.T) {
 	}
 }
 
+func TestClaimBotUpdateAcrossTwoStores(t *testing.T) {
+	ctx := context.Background()
+	path := tempPath(t)
+	a, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	type result struct {
+		claimed bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, s := range []*Store{a, b} {
+		go func(s *Store) {
+			<-start
+			claimed, err := s.ClaimBotUpdate(ctx, 77)
+			results <- result{claimed, err}
+		}(s)
+	}
+	close(start)
+
+	wins := 0
+	for range 2 {
+		res := <-results
+		if res.err != nil {
+			t.Fatalf("claim error: %v", res.err)
+		}
+		if res.claimed {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("%d of two stores claimed the update, want 1", wins)
+	}
+	for name, s := range map[string]*Store{"first": a, "second": b} {
+		if offset, err := s.BotOffset(ctx); err != nil || offset != 78 {
+			t.Errorf("%s store offset = %d, %v; want 78", name, offset, err)
+		}
+	}
+}
+
 func TestClaimBotUpdatePrunesOldIDs(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTemp(t)

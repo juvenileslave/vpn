@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -64,7 +65,7 @@ func (b *Bot) command(ctx context.Context, role config.Role, text string) string
 		}
 		return b.users(ctx)
 	case "user":
-		if len(args) != 1 {
+		if len(args) != 1 || !digitsPattern.MatchString(args[0]) {
 			return userUsage
 		}
 		id, err := strconv.ParseInt(args[0], 10, 64)
@@ -92,6 +93,8 @@ func parseCommand(text string) (string, []string) {
 const helpUsage = "Использование: /help"
 
 const userUsage = "Использование: /user <id>"
+
+var digitsPattern = regexp.MustCompile(`^[0-9]+$`)
 
 func helpText(role config.Role) string {
 	return "vpnctl bot — доступ только на чтение.\n" +

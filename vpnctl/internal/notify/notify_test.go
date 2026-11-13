@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juvenileslave/vpn/vpnctl/internal/config"
 	"github.com/juvenileslave/vpn/vpnctl/internal/telegram"
 )
 
@@ -352,6 +353,29 @@ func TestAlertValidation(t *testing.T) {
 	}
 	if err := testAlert().Validate(); err != nil {
 		t.Errorf("valid alert: %v", err)
+	}
+}
+
+func TestNewAdminSinkAlertsOnlyAdmins(t *testing.T) {
+	fake := &fakeSender{}
+	operators := []config.Operator{
+		{ID: 10, Role: config.RoleAdmin},
+		{ID: 11, Role: config.RoleViewer},
+		{ID: 12, Role: config.RoleAdmin},
+	}
+	s, err := NewAdminSink(fake, operators, WithRateLimit(0, 0), WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatalf("NewAdminSink: %v", err)
+	}
+	if err := s.Send(context.Background(), testAlert()); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	msgs := fake.messages()
+	if len(msgs) != 2 || msgs[0].chatID != 10 || msgs[1].chatID != 12 {
+		t.Fatalf("alerts went to %+v, want admins 10 and 12", msgs)
+	}
+	if _, err := NewAdminSink(fake, []config.Operator{{ID: 11, Role: config.RoleViewer}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("viewer-only list err = %v, want ErrInvalidConfig", err)
 	}
 }
 

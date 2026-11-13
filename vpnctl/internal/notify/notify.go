@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juvenileslave/vpn/vpnctl/internal/config"
 	"github.com/juvenileslave/vpn/vpnctl/internal/telegram"
 )
 
@@ -149,6 +150,21 @@ type BotSink struct {
 	mu   sync.Mutex
 	next time.Time
 	seen map[string]dedupeEntry
+}
+
+// NewAdminSink returns a sink that alerts only the configured admin operators.
+// Viewer IDs are skipped; an operator list without admins is invalid.
+func NewAdminSink(sender Sender, operators []config.Operator, opts ...Option) (*BotSink, error) {
+	recipients := make([]int64, 0, len(operators))
+	for _, op := range operators {
+		if op.Role == config.RoleAdmin {
+			recipients = append(recipients, op.ID)
+		}
+	}
+	if len(recipients) == 0 {
+		return nil, fmt.Errorf("%w: at least one admin operator is required", ErrInvalidConfig)
+	}
+	return NewBotSink(sender, recipients, opts...)
 }
 
 // NewBotSink returns a sink that sends to recipients. Delivery is synchronous:
