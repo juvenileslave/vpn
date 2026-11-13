@@ -213,11 +213,20 @@ class Lab:
                 for definition in (directory / "tasks").glob("*.yml"):
                     task_names(yaml.safe_load(definition.read_text()) or [])
             failed_task = None
+            failed_tasks = []
+            current = None
             for line in result.stdout.decode(errors="replace").splitlines():
                 match = re.match(r"^TASK \[(.*)\]", line)
                 if match:
-                    name = match.group(1).split(" : ", 1)[-1]
-                    failed_task = name if name in approved else None
+                    current = match.group(1).split(" : ", 1)[-1]
+                    continue
+                if current is not None and ("FAILED! =>" in line or line.startswith("fatal:")):
+                    if current in approved and current not in failed_tasks:
+                        failed_tasks.append(current)
+                        if failed_task is None:
+                            failed_task = current
+            if failed_tasks:
+                self.evidence["public_failed_role_tasks"] = failed_tasks[:5]
             if failed_task is not None:
                 self.evidence["public_failed_role_task"] = failed_task
             if failed_task == "Bootstrap HTTP-01 without configuring nonexistent TLS files":
@@ -404,6 +413,7 @@ class Lab:
         self.play([{"name": str(ROOT / "ansible/roles/base"), "tasks_from": "firewall.yml"}], kind=kind, variables=variables)
 
     def deploy_node(self, kind):
+        self.stage = kind + "-node-deployment"
         pki = self.work / (kind + "-pki")
         secret, credentials = PKI.fixture(pki)
         directory = "/opt/" + self.prefix + "-" + kind
