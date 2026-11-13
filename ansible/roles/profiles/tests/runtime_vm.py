@@ -639,7 +639,15 @@ class Lab:
             raise
 
     def transfer(self, port=1080, size=1048576, *, expected=True, address="192.0.2.100", target=18080):
-        return self.run("client", [ROOT / ".venv/bin/python", HERE / "traffic.py", "transfer", port, size, address, target], expected=expected, timeout=240)
+        self.stage = "application-transfer-" + str(port)
+        namespace = self.ns("client")
+        prefix = ["ip", "netns", "exec", namespace] if namespace else []
+        result = subprocess.run(prefix + [str(ROOT / ".venv/bin/python"), str(HERE / "traffic.py"), "transfer", str(port), str(size), address, str(target)], capture_output=True, timeout=240, check=False)
+        if (result.returncode == 0) != expected:
+            self.evidence["public_transfer_error"] = result.stderr.decode(errors="replace")[-600:]
+            self.evidence["public_transfer_exit"] = result.returncode
+            raise AssertionError("application transfer result differs from expected")
+        return result.stdout
 
     def tls_matrix(self):
         expected = (self.work / "site/index.html").read_bytes()
