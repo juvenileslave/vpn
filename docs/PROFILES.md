@@ -168,8 +168,16 @@ Startup-логи остаются private; публичный report содер�
 Итоговый `result: PASS` записывается и печатается **после** lab cleanup и
 удаления private temporary directory; `behavioral_result` отдельно описывает
 функциональные сценарии. Cleanup failure делает итоговый result `FAIL` и сохраняет
-только phase/stage/type/errno, без raw exception text. Stdout содержит один
-compact JSON на операцию с flush, чтобы stderr не разрывал многострочный report.
+только phase/stage/type/errno и авторские constraints, без raw exception text.
+Полный JSON на операцию печатается после cleanup с flush; ошибки вне этого
+report отдельно дают короткий `operation: runner-error` с type/errno. Ошибка
+cleanup больше не может разорвать или следовать за преждевременным PASS.
+Cleanup пытается обработать все owned ресурсы даже после ошибки. Успех требует
+подтверждённого отсутствия containers, tracked processes, namespace names, bridge,
+owned table и файлов, а также inactive/not-found service state. Уже отсутствующий
+ресурс допустим; ошибка запроса/удаления или оставшийся ресурс попадает в
+`cleanup_failures`, оставляет `lab_completed: false` и запрещает итоговый PASS.
+Ошибки directory removal не скрываются через `ignore_errors`.
 Перед полной проверкой wrapper отдельно проверяет cleanup частично подготовленного
 стенда: реальные namespaces, pinned image, containerd и Docker daemon, без
 туннелей/cover/нагрузки. Это `operation: cleanup-smoke`, не полный VPN acceptance;

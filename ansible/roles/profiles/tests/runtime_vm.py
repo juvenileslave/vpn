@@ -1059,14 +1059,42 @@ class Lab:
         self.evidence["scenarios"]["idempotence_rollback"] = {"byte_identical_reapply": True, "site_profile_ACL_path_restored": True, "authorized_relay_transfer": relay_transfer, "authorized_direct_transfer": direct_transfer, "independent_revocation_preserved": True, "restored_bundle_id": restored.name}
 
     def cleanup(self):
-        # Root-owned credentials/captures stay private and are erased; public
-        # report carries only synthetic endpoints and measured aggregate data.
-        self.cleanup_stage = "remove-owned-nodes"
-        for env in (self.relay_env, None):
-            if env is not None or hasattr(self, "extract"):
-                subprocess.run(["docker", "rm", "-f", "vpn-remnanode"], env=env, capture_output=True, check=False)
-        self.cleanup_stage = "stop-owned-processes"
-        for process in reversed(self.processes):
+        """Attempt every owned removal; return safe failures, never raw output."""
+        failures = []
+
+        def attempt(stage, action):
+            self.cleanup_stage = stage
+            try:
+                action()
+            except BaseException as error:
+                failure = {"phase": "lab-cleanup", "stage": stage, "type": type(error).__name__, "errno": getattr(error, "errno", None)}
+                if type(error) is AssertionError:
+                    failure["constraint"] = str(error)
+                failures.append(failure)
+
+        def remove_path(path):
+            path = Path(path)
+            try:
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.exists():
+                    shutil.rmtree(path)
+            except FileNotFoundError:
+                if os.path.lexists(path):
+                    raise
+            if os.path.lexists(path):
+                raise AssertionError("owned path remains after removal")
+
+        def remove_container(name, environment):
+            def names():
+                rows = command(["docker", "container", "ls", "--all", "--format", "{{.Names}}"], env=environment).decode().splitlines()
+                return {value.strip() for row in rows for value in row.split(",")}
+            if name in names():
+                subprocess.run(["docker", "rm", "-f", name], env=environment, capture_output=True, timeout=60, check=False)
+            if name in names():
+                raise AssertionError("owned container remains after removal")
+
+        def stop_process(process):
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -1074,27 +1102,58 @@ class Lab:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=10)
-        self.cleanup_stage = "remove-owned-extractor"
+            if process.poll() is None:
+                raise AssertionError("owned process remains after stop")
+
+        def remove_namespace(namespace):
+            subprocess.run(["ip", "netns", "del", namespace], capture_output=True, timeout=30, check=False)
+            if os.path.lexists("/run/netns/" + namespace):
+                raise AssertionError("owned network namespace remains after removal")
+
+        def remove_bridge():
+            name = self.prefix + "br"
+            subprocess.run(["ip", "link", "del", name], capture_output=True, timeout=30, check=False)
+            if os.path.lexists("/sys/class/net/" + name):
+                raise AssertionError("owned bridge remains after removal")
+
+        def restore_hosts():
+            path = Path("/etc/hosts")
+            path.write_bytes(self.old_hosts)
+            if path.read_bytes() != self.old_hosts:
+                raise AssertionError("original host mappings were not restored")
+
+        def stop_service(name):
+            subprocess.run(["systemctl", "stop", name], capture_output=True, timeout=60, check=False)
+            properties = command(["systemctl", "show", "--property=LoadState", "--property=ActiveState", name]).decode().splitlines()
+            state = dict(line.split("=", 1) for line in properties if "=" in line)
+            if state.get("LoadState") != "not-found" and state.get("ActiveState") != "inactive":
+                raise AssertionError("owned service remains active or has unknown state")
+
+        def remove_firewall():
+            subprocess.run(["nft", "delete", "table", "inet", "vpn_base"], capture_output=True, timeout=30, check=False)
+            tables = json.loads(command(["nft", "-j", "list", "tables"]))["nftables"]
+            if any(record.get("table", {}).get("family") == "inet" and record["table"].get("name") == "vpn_base" for record in tables):
+                raise AssertionError("owned firewall table remains after removal")
+
+        for kind in self.node_inputs:
+            environment = self.relay_env if kind == "relay" else None
+            attempt("remove-owned-node-" + kind, lambda environment=environment: remove_container("vpn-remnanode", environment))
+        for process in reversed(self.processes):
+            attempt("stop-owned-processes", lambda process=process: stop_process(process))
         if hasattr(self, "extract"):
-            subprocess.run(["docker", "rm", "-f", self.extract], capture_output=True, check=False)
-        self.cleanup_stage = "delete-owned-network"
-        for ns in self.namespaces.values():
-            subprocess.run(["ip", "netns", "del", ns], capture_output=True, check=False)
-        subprocess.run(["ip", "link", "del", self.prefix + "br"], capture_output=True, check=False)
-        self.cleanup_stage = "restore-host-mappings"
-        Path("/etc/hosts").write_bytes(self.old_hosts)
+            attempt("remove-owned-extractor", lambda: remove_container(self.extract, None))
+        for namespace in self.namespaces.values():
+            attempt("delete-owned-network", lambda namespace=namespace: remove_namespace(namespace))
+        attempt("delete-owned-bridge", remove_bridge)
+        attempt("restore-host-mappings", restore_hosts)
         for kind in ("exit", "relay"):
-            shutil.rmtree("/opt/" + self.prefix + "-" + kind, ignore_errors=True)
-        self.cleanup_stage = "stop-owned-services"
-        subprocess.run(["systemctl", "stop", "cover-site-renew.timer", "nginx", "vpn-base-firewall.service"], capture_output=True, check=False)
-        subprocess.run(["nft", "delete", "table", "inet", "vpn_base"], capture_output=True, check=False)
-        self.cleanup_stage = "remove-owned-role-state"
-        for path in ("/etc/nginx/sites-enabled/cover-site.conf",):
-            p = Path(path)
-            if p.is_symlink() or p.exists():
-                p.unlink()
-        for path in ("/etc/cover-site", "/var/lib/cover-site", "/var/log/cover-site", "/var/www/cover-site-acme"):
-            shutil.rmtree(path, ignore_errors=True)
+            attempt("remove-owned-node-state", lambda kind=kind: remove_path("/opt/" + self.prefix + "-" + kind))
+        for name in ("cover-site-renew.timer", "nginx", "vpn-base-firewall.service"):
+            attempt("stop-owned-services", lambda name=name: stop_service(name))
+        attempt("remove-owned-firewall", remove_firewall)
+        for path in ("/etc/nginx/sites-enabled/cover-site.conf", "/etc/cover-site", "/var/lib/cover-site", "/var/log/cover-site", "/var/www/cover-site-acme"):
+            attempt("remove-owned-role-state", lambda path=path: remove_path(path))
+        return failures
 
     def execute(self):
         self.stage = "accepted-runtime-role-contracts"
@@ -1274,8 +1333,12 @@ def main(*, cleanup_only=False):
             finally:
                 phase = "lab-cleanup"
                 try:
-                    lab.cleanup()
-                    lab_cleanup_completed = True
+                    resource_failures = lab.cleanup()
+                    if resource_failures:
+                        failed = True
+                        cleanup_failures.extend(resource_failures)
+                    else:
+                        lab_cleanup_completed = True
                 except BaseException as error:
                     failed = True
                     cleanup_failures.append({"phase": phase, "stage": getattr(lab, "cleanup_stage", phase), "type": type(error).__name__, "errno": getattr(error, "errno", None)})
@@ -1294,7 +1357,7 @@ def main(*, cleanup_only=False):
     report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     name = "profiles-cleanup-smoke.json" if cleanup_only else "profiles-runtime.json"
     private_json(report_dir / name, lab.evidence)
-    print(json.dumps(lab.evidence, sort_keys=True), flush=True)
+    print(json.dumps(lab.evidence, sort_keys=True, indent=2), flush=True)
     if failed:
         raise RuntimeError("disposable scenario failed; private diagnostics withheld")
 
@@ -1305,6 +1368,6 @@ if __name__ == "__main__":
             child()
         else:
             main()
-    except Exception:
-        print("Profile disposable acceptance failed; private diagnostics withheld", file=sys.stderr)
+    except Exception as error:
+        print(json.dumps({"operation": "runner-error", "result": "FAIL", "public_error_type": type(error).__name__, "errno": getattr(error, "errno", None)}), file=sys.stderr, flush=True)
         raise SystemExit(1) from None
