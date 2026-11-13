@@ -228,11 +228,65 @@ def http_observation(response, method, tls):
     return {"method": method, "status": int(status), "HTTP": version.removeprefix("HTTP/"), "TLS": tls, "headers": headers, "body_bytes": len(body), "body_sha256": hashlib.sha256(body).hexdigest()}
 
 
-def core_routes(logs, inbound_tags, outbound):
-    """Retain accepted application route tags; socket/pcap prove IP family."""
-    tags = "|".join(re.escape(tag) for tag in inbound_tags)
-    pattern = re.compile(r"\bfrom\s+\S+\s+accepted\s+tcp:192\.0\.2\.100:18080\s+\[(?P<inbound>" + tags + r")\s*(?:->|>>)\s*" + re.escape(outbound) + r"\]")
-    return [match.group("inbound") for line in logs.decode().splitlines() if (match := pattern.search(line)) is not None]
+def core_observation(logs, inbound_tags, outbound):
+    """Validate all accepted application records, retaining only fixture tags."""
+    destination = re.compile(r"\bfrom\s+\S+\s+accepted\s+tcp:192\.0\.2\.100:18080(?=\s|$)")
+    fixture_tag = r"(?:slot-\d+-v[46]|transit-v[46]|egress-\d+|direct-v[46]|block)"
+    route = re.compile(r"\s+\[(?P<inbound>" + fixture_tag + r")\s*(?:->|>>)\s*(?P<outbound>" + fixture_tag + r")\]")
+    records = []
+    for line in logs.decode().splitlines():
+        accepted = destination.search(line)
+        if accepted is None:
+            continue
+        match = route.match(line, accepted.end())
+        records.append({"inbound": match.group("inbound") if match else None, "outbound": match.group("outbound") if match else None})
+    valid = len(records) == 1 and records[0]["inbound"] in inbound_tags and records[0]["outbound"] == outbound
+    return {"valid": valid, "allowed_inbounds": list(inbound_tags), "expected_outbound": outbound, "application_flow_observations": len(records), "accepted_application_routes": records, "container_log_bytes": len(logs)}
+
+
+def hello_response(address, port, data):
+    """Measure one complete Hello without TLS Finished, keys or VLESS payload."""
+    if len(data) < 9 or data[0] != 22 or int.from_bytes(data[3:5], "big") != len(data) - 5 or data[5] != 1 or int.from_bytes(data[6:9], "big") != len(data) - 9:
+        raise AssertionError("raw replay requires one exact complete ClientHello TLS record")
+    response = bytearray()
+    first_response = None
+    terminal = "peer-close"
+    with socket.create_connection((address, port), timeout=5) as sock:
+        sock.settimeout(3)
+        started = time.monotonic()
+        deadline = started + 3
+        sock.sendall(data)
+        while len(response) < 65536:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminal = "read-deadline"
+                break
+            sock.settimeout(remaining)
+            try:
+                part = sock.recv(65536 - len(response))
+            except TimeoutError:
+                terminal = "read-deadline"
+                break
+            except OSError:
+                terminal = "read-error"
+                break
+            if not part:
+                break
+            if first_response is None:
+                first_response = time.monotonic() - started
+            response.extend(part)
+        else:
+            terminal = "byte-limit"
+        seconds = time.monotonic() - started
+    record_types = []
+    position = 0
+    while position + 5 <= len(response):
+        end = position + 5 + int.from_bytes(response[position + 3:position + 5], "big")
+        if end > len(response):
+            break
+        record_types.append(response[position])
+        position = end
+    return {"operation": "complete-hello-without-finished-or-vless", "request_bytes": len(data), "record_sha256": hashlib.sha256(data).hexdigest(), "hello_sha256": hashlib.sha256(data[5:]).hexdigest(), "response_bytes": len(response), "response_sha256": hashlib.sha256(response).hexdigest(), "response_record_types": record_types, "trailing_response_bytes": len(response) - position, "first_response_seconds": first_response, "observation_seconds": seconds, "terminal": terminal, "authentication_verdict": "not-performed"}
 
 
 class Lab:
@@ -413,8 +467,7 @@ class Lab:
         # Build from a copied private directory; never modify the checkout/go.sum.
         result = subprocess.run(["go", "build", "-mod=readonly", "-o", str(self.probe_binary), "."], cwd=build, env={**os.environ, "GOTOOLCHAIN": "auto", "GOWORK": "off"}, capture_output=True, timeout=900, check=False)
         if result.returncode:
-            # Compiler input contains public source/dependencies only, no PKI.
-            self.evidence["public_build_error"] = result.stderr.decode(errors="replace")
+            self.evidence["public_build_exit"] = result.returncode
             self.evidence["public_go_version"] = command(["go", "version"]).decode().strip()
             raise AssertionError("pinned disposable REALITY probe build failed")
         self.stage = "pinned-local-acme-tool-build"
@@ -628,7 +681,6 @@ class Lab:
         prefix = ["ip", "netns", "exec", namespace] if namespace else []
         result = subprocess.run(prefix + [str(ROOT / ".venv/bin/python"), str(HERE / "traffic.py"), "transfer", str(port), str(size), address, str(target)], capture_output=True, timeout=240, check=False)
         if (result.returncode == 0) != expected:
-            self.evidence["public_transfer_error"] = result.stderr.decode(errors="replace")[-600:]
             self.evidence["public_transfer_exit"] = result.returncode
             raise AssertionError("application transfer result differs from expected")
         return result.stdout
@@ -733,6 +785,10 @@ class Lab:
         watcher.start()
         try:
             application = json.loads(action())
+            # A new fallback H2 socket may open after the watcher's first exit
+            # sample. Finish one real snapshot of both peers before stopping.
+            for kind in samples:
+                samples[kind].append(self.run(kind, ["ss", "-H", "-tn", "state", "established"]))
         finally:
             stop.set()
             watcher.join(timeout=10)
@@ -780,13 +836,9 @@ class Lab:
             logs = command(["docker", "logs", "--since", since, "vpn-remnanode"], env=self.relay_env if kind == "relay" else None, combined=True)
             inbounds = ("slot-" + str(slot) + "-v4",) if kind == "relay" else ("transit-v4", "transit-v6")
             outbound = "slot-" + str(slot) + "-v" + str(expected_family) if kind == "relay" else "egress-" + str(slot)
-            destination_lines = [line for line in logs.decode().splitlines() if "tcp:192.0.2.100:18080" in line]
-            observed = core_routes(logs, inbounds, outbound)
-            fixture_tag = r"(?:slot-\d+-v[46]|transit-v[46]|egress-\d+|direct-v[46]|block)"
-            detours = sorted({match.group(0) for line in destination_lines for match in re.finditer(r"\[" + fixture_tag + r"\s*(?:==>|->|>>)\s*" + fixture_tag + r"\]", line)})
-            observations[kind] = {"inbound": observed[0] if len(observed) == 1 else None, "allowed_inbounds": list(inbounds), "outbound": outbound, "application_flow_observations": len(observed), "application_destination_lines": len(destination_lines), "container_log_bytes": len(logs), "fixture_detours": detours}
+            observations[kind] = core_observation(logs, inbounds, outbound)
             self.evidence["route_observation_attempts"][label]["core_observations"] = observations
-            if len(observed) != 1:
+            if not observations[kind]["valid"]:
                 raise AssertionError("application-specific real core inbound/outbound observation is missing or ambiguous")
         report = {"application": application, "sink_receipt": matching[0], "winner_family": expected_family, "unique_tcp_payload_bytes": family_bytes, "established_accepted_socket": established, "core_observations": observations, "alternate_family_probe_bound_bytes": 65536, "pcap_sha256": hashlib.sha256(capture.read_bytes()).hexdigest()}
         self.evidence["scenarios"][label] = report
@@ -851,6 +903,10 @@ class Lab:
             raise AssertionError("positive exact-replay authentication control failed")
         if replay["record_sha256"] != recorded_digest or any(replay[key] != original[key] for key in ("hello_sha256", "record_sha256", "recorded_unix")):
             raise AssertionError("positive replay did not transmit the exact recorded ClientHello")
+        raw_fresh = json.loads(self.run("client", [ROOT / ".venv/bin/python", __file__, "replay-hello", "192.0.2.10", "18443", fresh]))
+        if any(raw_fresh[key] != original[key] for key in ("hello_sha256", "record_sha256")) or time.time() - original["recorded_unix"] >= 300:
+            raise AssertionError("unauthenticated fresh replay did not send the exact Hello inside its time window")
+        self.evidence["scenarios"]["fresh_unauthenticated_replay"] = raw_fresh
         self.evidence["scenarios"]["fresh_replay"] = replay
         if len((self.work / "sink-sources.private.jsonl").read_text().splitlines()) != count_before:
             raise AssertionError("timestamp/replay probe reached an application sink")
@@ -870,9 +926,15 @@ class Lab:
         if time.time() - expired["recorded_unix"] < 302:
             raise AssertionError("exact replay expiry wait was not real wall time")
         self.evidence["scenarios"]["expired_replay"] = expired
+        raw_expired = json.loads(self.run("client", [ROOT / ".venv/bin/python", __file__, "replay-hello", "192.0.2.10", "18443", fresh]))
+        if any(raw_expired[key] != original[key] for key in ("hello_sha256", "record_sha256")):
+            raise AssertionError("unauthenticated expired replay changed the recorded Hello")
+        self.evidence["scenarios"]["expired_unauthenticated_replay"] = raw_expired
+        first_times = (raw_fresh["first_response_seconds"], raw_expired["first_response_seconds"])
+        self.evidence["scenarios"]["replay_response_difference"] = {"fresh_minus_expired_response_bytes": raw_fresh["response_bytes"] - raw_expired["response_bytes"], "fresh_minus_expired_first_response_seconds": first_times[0] - first_times[1] if None not in first_times else None, "same_record_type_sequence": raw_fresh["response_record_types"] == raw_expired["response_record_types"], "same_terminal": raw_fresh["terminal"] == raw_expired["terminal"], "scope": "same exact Hello; first response from write; raw 3-second/64-KiB window; not an authentication verdict"}
         if len((self.work / "sink-sources.private.jsonl").read_text().splitlines()) != count_before:
             raise AssertionError("malformed/expired replay reached an application sink")
-        self.evidence["scenarios"]["replay_limit"] = "Exact fresh Hello with privately retained ephemeral keys authenticates TLS; after real 302s the same Hello receives a verified origin certificate, not REALITY authentication. No VLESS/application payload is sent by the probe. maxTimeDiff is a time window, not a replay cache."
+        self.evidence["scenarios"]["replay_limit"] = "Exact fresh Hello with privately retained ephemeral keys completes authenticated TLS; after real 302s the same Hello completes TLS with a verified origin certificate, not REALITY authentication. Complete Hello-only fresh/expired replays separately measure response bytes, record types and timing without ephemeral keys, TLS Finished or VLESS. Their close/deadline/byte counts are not authentication verdicts. maxTimeDiff is a time window, not a replay cache."
         self.transfer(1080)
 
     def fanout(self, candidate):
@@ -981,7 +1043,9 @@ class Lab:
         self.base("exit")
         self.activate_configs(restored)
         self.client(restored, "relay-0", 1080)
-        self.transfer(1080)
+        relay_transfer = json.loads(self.transfer(1080))
+        self.client(restored, "direct-0", 2080)
+        direct_transfer = json.loads(self.transfer(2080))
         self.client(candidate, "relay-1", 1081)
         self.transfer(1081, expected=False)
         if (restored / "clients/relay-1.json").exists() or revoked in (restored / "relay.json").read_text():
@@ -991,7 +1055,7 @@ class Lab:
         if b"Atlas field journal" not in body:
             raise AssertionError("rollback did not restore demonstrated original site")
         self.usable(restored)
-        self.evidence["scenarios"]["idempotence_rollback"] = {"byte_identical_reapply": True, "site_profile_ACL_path_restored": True, "independent_revocation_preserved": True, "restored_bundle_id": restored.name}
+        self.evidence["scenarios"]["idempotence_rollback"] = {"byte_identical_reapply": True, "site_profile_ACL_path_restored": True, "authorized_relay_transfer": relay_transfer, "authorized_direct_transfer": direct_transfer, "independent_revocation_preserved": True, "restored_bundle_id": restored.name}
 
     def cleanup(self):
         # Root-owned credentials/captures stay private and are erased; public
@@ -1144,6 +1208,9 @@ def child():
                     print(json.dumps(observation))
         except (OSError, ssl.SSLError):
             print(json.dumps({"method": method, "TLS": "handshake-or-stream-rejected"}))
+    elif mode == "replay-hello":
+        data = Path(sys.argv[4]).read_bytes()
+        print(json.dumps(hello_response(sys.argv[2], int(sys.argv[3]), data)))
     elif mode == "malformed":
         address, port = sys.argv[2], int(sys.argv[3])
         data = Path(sys.argv[4]).read_bytes()[:int(sys.argv[5])]

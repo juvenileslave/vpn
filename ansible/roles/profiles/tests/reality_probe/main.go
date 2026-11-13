@@ -58,12 +58,15 @@ type replayState struct {
 }
 
 type verdict struct {
-	Authenticated     bool   `json:"reality_authenticated"`
-	OriginVerified    bool   `json:"origin_chain_verified"`
-	HandshakeComplete bool   `json:"tls_handshake_complete"`
-	HelloSHA256       string `json:"hello_sha256"`
-	RecordSHA256      string `json:"record_sha256"`
-	RecordedUnix      int64  `json:"recorded_unix"`
+	Authenticated        bool    `json:"reality_authenticated"`
+	OriginVerified       bool    `json:"origin_chain_verified"`
+	HandshakeComplete    bool    `json:"tls_handshake_complete"`
+	HelloSHA256          string  `json:"hello_sha256"`
+	RecordSHA256         string  `json:"record_sha256"`
+	RecordedUnix         int64   `json:"recorded_unix"`
+	FirstResponseSeconds float64 `json:"first_response_seconds"`
+	HandshakeSeconds     float64 `json:"handshake_seconds"`
+	ServerResponseBytes  int     `json:"server_response_bytes"`
 }
 
 func privatePath(path string, existing bool) error {
@@ -112,12 +115,27 @@ func writePrivate(path string, data []byte) (err error) {
 
 type tapConn struct {
 	net.Conn
-	fragment    int
-	state       *replayState
-	capture     string
-	statePath   string
-	isReplay    bool
-	hasCaptured bool
+	fragment        int
+	state           *replayState
+	capture         string
+	statePath       string
+	isReplay        bool
+	hasCaptured     bool
+	firstWriteAt    time.Time
+	firstResponseAt time.Time
+	responseBytes   int
+}
+
+func (c *tapConn) Read(data []byte) (int, error) {
+	n, err := c.Conn.Read(data)
+	if n > 0 {
+		if c.firstResponseAt.IsZero() {
+			c.firstResponseAt = time.Now()
+		}
+		c.responseBytes += n
+	}
+	// Preserve net.Conn read errors for the TLS library's own handling.
+	return n, err
 }
 
 func (c *tapConn) Write(data []byte) (int, error) {
@@ -149,6 +167,9 @@ func (c *tapConn) Write(data []byte) (int, error) {
 			}
 		}
 		c.hasCaptured = true
+	}
+	if c.firstWriteAt.IsZero() {
+		c.firstWriteAt = time.Now()
 	}
 	if c.fragment == 0 {
 		return c.Conn.Write(data)
@@ -389,13 +410,21 @@ func probe(ctx context.Context, opt options) (result verdict, probeErr error) {
 			return result, err
 		}
 	}
+	handshakeStarted := time.Now()
 	if err := client.HandshakeContext(ctx); err != nil {
 		return result, fmt.Errorf("probe handshake: %w", err)
 	}
 	result.HandshakeComplete = client.ConnectionState().HandshakeComplete
+	result.HandshakeSeconds = time.Since(handshakeStarted).Seconds()
 	if !result.HandshakeComplete || (!result.Authenticated && !result.OriginVerified) || !tap.hasCaptured {
 		return result, errors.New("probe: no verified authentication verdict")
 	}
+	hasResponseTiming := !tap.firstWriteAt.IsZero() && !tap.firstResponseAt.IsZero()
+	if !hasResponseTiming || tap.responseBytes == 0 {
+		return result, errors.New("probe: no actual server response timing")
+	}
+	result.FirstResponseSeconds = tap.firstResponseAt.Sub(tap.firstWriteAt).Seconds()
+	result.ServerResponseBytes = tap.responseBytes
 	helloDigest, recordDigest := sha256.Sum256(state.Hello), sha256.Sum256(state.Record)
 	result.HelloSHA256 = hex.EncodeToString(helloDigest[:])
 	result.RecordSHA256 = hex.EncodeToString(recordDigest[:])

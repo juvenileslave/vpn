@@ -114,6 +114,8 @@ def serve(logfile):
 
 
 if __name__ == "__main__":
+    from runtime_vm import guard_identity
+    guard_identity()
     if sys.argv[1] == "serve":
         serve(sys.argv[2])
     elif sys.argv[1] == "load":

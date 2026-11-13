@@ -162,6 +162,9 @@ refusal возвращает exit 2 до чтения private input или се�
 отсутствия owned state применяется только к начальному запуску lab.
 Startup-логи остаются private; публичный report содержит категории и exit codes,
 не сырые diagnostics.
+Этот же guard применяется к `traffic.py serve|load|transfer`, включая прямой
+запуск child. Compiler/transfer stderr не входит в report: только exit code и
+авторское failure constraint, без усечения или публикации raw diagnostics.
 
 ```sh
 make -C ansible bootstrap
@@ -232,13 +235,19 @@ external IP этот gate не проходят. Ограничение 64 KiB �
 одноразового сценария, не добавляет production timeout или fallback cutoff.
 Socket endpoints сравниваются как IP/port tuples: IPv4-mapped IPv6 из `ss`
 нормализуется к тому же wire IPv4, без ослабления проверки адреса или порта.
+После успешной передачи driver снимает завершающий `ss` snapshot обоих peers
+до остановки фонового sampler: новый быстрый IPv4 fallback socket не должен
+потеряться между последовательными начальными snapshots. Это реальное
+наблюдение тех же IP/port tuples, не подмена отсутствующего socket предположением.
 Семейство нельзя выводить из имени inbound: pinned
 [`system_listener.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/transport/internet/system_listener.go)
 передаёт wildcard `0.0.0.0` в Go `ListenConfig` с network `tcp`, который может
 принимать IPv6. Реальный IPv6 flow дал `[transit-v4 -> egress-0]` на exit.
-Access gate сохраняет фактический `transit-v4` или `transit-v6`, но допускает
-ровно один accepted application record с нужным outbound и точным адресом/портом;
-direct, чужой slot, rejected и observatory record не подходят. Адресная семья
+Access gate сначала считает **все** accepted records для точного application
+адреса/порта и требует ровно один; затем проверяет его фактические inbound/outbound
+tags. Правильный record вместе с дополнительным direct/чужим slot/egress record
+не проходит. Rejected и отдельный observatory record не считаются application.
+У exit допускается фактический `transit-v4` или `transit-v6`. Адресная семья
 по-прежнему доказывается payload и accepted socket на обоих концах second hop,
 а не именем listener. Рендер и production-конфигурация ради этого не меняются.
 PCAP собирает только second-hop TCP/18444 на synthetic bridge с
@@ -247,8 +256,9 @@ PCAP собирает только second-hop TCP/18444 на synthetic bridge с
 Kernel-drop statistics записываются числами; отсутствие подтверждения zero drops
 отвергает route proof.
 Даже при отказе gate report хранит measured family bytes, признаки accepted
-socket, fixture endpoints и whitelist transit/slot/egress tags с количеством
-application log observations. Raw log lines и credentials не публикуются.
+socket, fixture endpoints и все accepted application routes с whitelist tags.
+Неизвестный detour учитывается, но его tags публикуются как `null`, и gate не
+проходит. Raw log lines и credentials не публикуются.
 Это measurements неуспешной попытки, не доказательство принятого маршрута.
 
 Scenario включает wrong keys/shortIds/VLESS, malformed и TCP-fragmented
@@ -260,6 +270,10 @@ relay/direct leaks, idempotence и actual prior-site/profile/ACL restoration
 с текущим независимым revocation overlay. Public-safe report:
 `artifacts/active-probing/profiles-runtime.json` (ignored); latency/throughput
 вычисляются по реальным передачам. Raw captures/configs/keys удаляются.
+Rollback перед публикацией restored receipt/current повторяет **авторизованные**
+relay и explicit-direct transfers с клиентами restored bundle. Оба measured
+flow ID/bytes/SHA256 остаются в `idempotence_rollback`; HTTPS visitor не заменяет
+проверку direct tunnel. Независимый revoked relay UUID всё ещё обязан отказать.
 
 Fresh replay без TLS Finished/VLESS может получить ответ и характерный timing.
 `maxTimeDiff` — time budget, **не полный replay cache** и не обещание отсутствия
@@ -276,6 +290,20 @@ Timeout, ошибка handshake, длина ответа или hardcoded `appli
 не являются отрицательным authentication verdict. Helper не отправляет VLESS
 или application payload; реальные туннели/load использует stock embedded core.
 Unknown runtime результат не объявляется PASS.
+
+Полный captured ClientHello отдельно отправляется без ephemeral keys,
+TLS Finished и VLESS до и после expiry. `fresh_unauthenticated_replay` и
+`expired_unauthenticated_replay` содержат точные request hashes, response
+bytes/SHA256, последовательность полных TLS record types, trailing bytes,
+first-response timing от записи Hello и terminal state. Наблюдение ограничено
+3 s/64 KiB; EOF/deadline/read error остаются наблюдениями, не authentication
+verdict. `replay_response_difference` описывает измеренные различия byte count,
+first response, record types и terminal state того же Hello.
+У authenticated fresh/expired uTLS controls также измеряются
+`first_response_seconds`, `handshake_seconds`, `server_response_bytes`;
+CertificateVerify/Finished и chain/SAN/expiry не обходятся. Raw window и
+завершённый TLS имеют разные конечные milestones; это диагностика остаточного
+response/timing риска, не доказательство неотличимости на ТСПУ.
 
 ## Проверки и публикация в панели
 

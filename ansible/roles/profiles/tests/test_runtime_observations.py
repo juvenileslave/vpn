@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from runtime_vm import captured_streams, core_routes, established_pair, http_observation
+from runtime_vm import captured_streams, core_observation, established_pair, http_observation
 
 
 class RuntimeObservationParserTest(unittest.TestCase):
@@ -41,7 +41,9 @@ class RuntimeObservationParserTest(unittest.TestCase):
 
     def test_core_route_retains_actual_transit_tag_without_inferring_wire_family(self):
         logs = b"2026/11/13 19:00:00.000001 from tcp:192.0.2.20:31000 accepted tcp:192.0.2.100:18080 [transit-v4 -> egress-0] email: egress-0\n"
-        self.assertEqual(core_routes(logs, ("transit-v4", "transit-v6"), "egress-0"), ["transit-v4"])
+        observed = core_observation(logs, ("transit-v4", "transit-v6"), "egress-0")
+        self.assertTrue(observed["valid"])
+        self.assertEqual(observed["accepted_application_routes"], [{"inbound": "transit-v4", "outbound": "egress-0"}])
 
     def test_core_route_rejects_unrelated_or_rejected_application_observations(self):
         for status, target, detour in (
@@ -54,9 +56,22 @@ class RuntimeObservationParserTest(unittest.TestCase):
         ):
             with self.subTest(status=status, target=target, detour=detour):
                 logs = ("from tcp:192.0.2.20:31000 " + status + " tcp:" + target + " [" + detour + "]\n").encode()
-                self.assertEqual(core_routes(logs, ("transit-v4", "transit-v6"), "egress-0"), [])
+                self.assertFalse(core_observation(logs, ("transit-v4", "transit-v6"), "egress-0")["valid"])
         logs = b"from tcp:192.0.2.30:31000 accepted tcp:192.0.2.100:18080 [slot-1-v4 -> slot-1-v6]\n"
-        self.assertEqual(core_routes(logs, ("slot-0-v4",), "slot-0-v6"), [])
+        self.assertFalse(core_observation(logs, ("slot-0-v4",), "slot-0-v6")["valid"])
+
+    def test_correct_route_cannot_hide_an_additional_direct_leak(self):
+        logs = b"from tcp:192.0.2.20:31000 accepted tcp:192.0.2.100:18080 [transit-v4 -> egress-0]\nfrom tcp:192.0.2.30:31001 accepted tcp:192.0.2.100:18080 [direct-v4 -> egress-0]\n"
+        observed = core_observation(logs, ("transit-v4", "transit-v6"), "egress-0")
+        self.assertFalse(observed["valid"])
+        self.assertEqual(observed["application_flow_observations"], 2)
+
+    def test_unknown_route_is_counted_but_not_published(self):
+        logs = b"from tcp:192.0.2.20:31000 accepted tcp:192.0.2.100:18080 [private-route-canary -> egress-0] reason: [transit-v4 -> egress-0]\n"
+        observed = core_observation(logs, ("transit-v4", "transit-v6"), "egress-0")
+        self.assertFalse(observed["valid"])
+        self.assertEqual(observed["application_flow_observations"], 1)
+        self.assertEqual(observed["accepted_application_routes"], [{"inbound": None, "outbound": None}])
 
 
 class RuntimeVisitorRepresentationTest(unittest.TestCase):
@@ -104,21 +119,26 @@ class RuntimeChildRefusalTest(unittest.TestCase):
                 ["tcp", "127.0.0.1", port],
                 ["visitor", "127.0.0.1", port, str(private_input)],
                 ["malformed", "127.0.0.1", port, str(private_input), "1"],
+                ["replay-hello", "127.0.0.1", port, str(private_input)],
             ]
-            script = Path(__file__).with_name("runtime_vm.py")
+            scripts = (
+                (Path(__file__).with_name("runtime_vm.py"), operations),
+                (Path(__file__).with_name("traffic.py"), [["serve"], ["load", port], ["transfer", port, "1"]]),
+            )
             for missing in required:
                 environment = {**os.environ, **required}
                 environment.pop(missing, None)
-                for operation in operations:
-                    with self.subTest(missing=missing, operation=operation[:1]):
-                        result = subprocess.run([sys.executable, str(script), *operation], env=environment, capture_output=True, timeout=10, check=False)
-                        # Exit 2 is the CLI identity refusal, not an unrelated
-                        # missing-contract/invalid-input/runtime failure (1).
-                        self.assertEqual(result.returncode, 2)
-                        self.assertEqual(result.stdout, b"")
-                        with self.assertRaises(TimeoutError):
-                            connection, _peer = listener.accept()
-                            connection.close()
+                for script, script_operations in scripts:
+                    for operation in script_operations:
+                        with self.subTest(missing=missing, script=script.name, operation=operation[:1]):
+                            result = subprocess.run([sys.executable, str(script), *operation], env=environment, capture_output=True, timeout=10, check=False)
+                            # Exit 2 is the CLI identity refusal, not an unrelated
+                            # missing-contract/invalid-input/runtime failure (1).
+                            self.assertEqual(result.returncode, 2)
+                            self.assertEqual(result.stdout, b"")
+                            with self.assertRaises(TimeoutError):
+                                connection, _peer = listener.accept()
+                                connection.close()
 
 
 
