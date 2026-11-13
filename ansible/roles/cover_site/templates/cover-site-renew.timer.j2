@@ -1,0 +1,11 @@
+# Managed by cover_site
+[Unit]
+Description=Check private cover-site certificate renewal twice daily
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

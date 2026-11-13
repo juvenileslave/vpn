@@ -1,0 +1,169 @@
+---
+- name: Require supported OS and explicit cover inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04'
+      - reality_sni is defined and reality_sni is string
+      - reality_sni is match('^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      - cover_tls_port is integer and cover_tls_port is not boolean
+      - cover_tls_port >= 1 and cover_tls_port <= 65535
+      - cover_tls_port != 80 and cover_tls_port != (base_ssh_port | default(22))
+      - cover_site_source is string and cover_site_source.startswith('/')
+      - cover_acme_email is string and cover_acme_email is match('^[^\s@]+@[^\s@]+\.[^\s@]+$')
+      - cover_acme_agree_tos is boolean and cover_acme_agree_tos
+      - cover_acme_http_reachable is boolean and cover_acme_http_reachable
+      - cover_disposable_test is boolean
+      - cover_nginx_version == '1.24.0'
+      - cover_certificate_min_lifetime is integer and cover_certificate_min_lifetime >= 3600
+      - cover_disposable_test or (cover_acme_test_ca == '' and cover_certificate_trust == '/etc/ssl/certs/ca-certificates.crt' and cover_acme_directory in ['https://acme-v02.api.letsencrypt.org/directory', 'https://acme-staging-v02.api.letsencrypt.org/directory'])
+    fail_msg: "Нужны Ubuntu 24.04, один reality_sni, статический сайт, ACME contact/TOS и подтверждение DNS/TCP/80."
+    quiet: true
+
+- name: Require disposable guard for local ACME testing
+  when: cover_disposable_test
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.env', 'VPN_COVER_SITE_DISPOSABLE_GUEST') == 'yes'
+      - lookup('ansible.builtin.env', 'GITHUB_ACTIONS') == 'true'
+      - lookup('ansible.builtin.env', 'RUNNER_ENVIRONMENT') == 'github-hosted'
+      - cover_acme_directory == 'https://localhost:14000/dir'
+      - cover_acme_test_ca.startswith('/') and cover_certificate_trust.startswith('/')
+    fail_msg: "Локальный ACME разрешён только в явно обозначенном одноразовом GitHub Linux guest."
+    quiet: true
+
+- name: Validate controller static content before host changes
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ role_path }}/files/validate_content.py"
+      - "{{ cover_site_source }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  check_mode: false
+
+- name: Validate existing listeners before persistent changes
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Install distribution nginx and Certbot
+  ansible.builtin.apt:
+    name: [nginx, certbot, openssl, curl, iproute2]
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+
+- name: Create owned lifecycle directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /etc/cover-site, mode: '0700'}
+    - {path: /usr/local/libexec/cover-site, mode: '0755'}
+    - {path: /var/lib/cover-site, mode: '0755'}
+    - {path: /var/lib/cover-site/releases, mode: '0755'}
+    - {path: /var/lib/cover-site/acme-work, mode: '0700'}
+    - {path: /var/log/cover-site, mode: '0700'}
+    - {path: /var/www/cover-site-acme/.well-known, mode: '0755'}
+    - {path: /var/www/cover-site-acme/.well-known/acme-challenge, mode: '0755'}
+
+- name: Install lifecycle executables
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/libexec/cover-site/{{ item }}"
+    owner: root
+    group: root
+    mode: '0755'
+  loop: [lifecycle.py, validate_content.py, ownership.py]
+
+- name: Install owned renewal and recovery units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [cover-site-renew.service, cover-site-renew.timer, cover-site-recover.service]
+  register: cover_units
+
+- name: Load changed lifecycle units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: cover_units is changed
+
+- name: Enable recovery dependency before any HTTP or TLS activation
+  ansible.builtin.systemd_service:
+    name: cover-site-recover.service
+    enabled: true
+    state: started
+
+- name: Stage candidate inputs without replacing checked renewal settings
+  ansible.builtin.template:
+    src: settings.json.j2
+    dest: /etc/cover-site/candidate-settings.json
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  diff: false
+
+- name: Read-only listener and nginx preflight
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/cover-site/lifecycle.py, preflight, --settings-file, /etc/cover-site/candidate-settings.json]
+  changed_when: false
+  check_mode: false
+
+- name: Copy operator static content to an owned staging tree
+  ansible.builtin.copy:
+    src: "{{ cover_site_source }}/"
+    dest: /var/lib/cover-site/input/
+    owner: root
+    group: root
+    mode: '0644'
+    directory_mode: '0755'
+
+# A separate input manifest means deleted source files are never left active.
+- name: Copy exact controller file manifest
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.pipe', (ansible_playbook_python | quote) ~ ' ' ~ ((role_path ~ '/files/validate_content.py') | quote) ~ ' ' ~ (cover_site_source | quote) ~ ' --manifest') }}"
+    dest: /var/lib/cover-site/manifest.json
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Bootstrap HTTP-01 without configuring nonexistent TLS files
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/cover-site/lifecycle.py, bootstrap, --settings-file, /etc/cover-site/candidate-settings.json]
+  register: cover_bootstrap
+  changed_when: (cover_bootstrap.stdout | from_json).changed
+  when: not ansible_check_mode
+
+- name: Obtain or keep the certificate with real Certbot
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/cover-site/lifecycle.py, issue, --settings-file, /etc/cover-site/candidate-settings.json]
+  register: cover_issue
+  changed_when: (cover_issue.stdout | from_json).changed
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Validate and transactionally activate content and certificate
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/cover-site/lifecycle.py, apply, --settings-file, /etc/cover-site/candidate-settings.json]
+  register: cover_apply
+  changed_when: (cover_apply.stdout | from_json).changed
+  when: not ansible_check_mode
+
+
+- name: Enable renewal only after a checked TLS origin exists
+  ansible.builtin.systemd_service:
+    name: cover-site-renew.timer
+    enabled: true
+    state: started
+
+- name: Enable nginx without altering unrelated sites
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started

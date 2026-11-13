@@ -1,0 +1,52 @@
+---
+- name: Allocate private read-only preflight staging
+  ansible.builtin.tempfile:
+    state: directory
+    path: /run
+    prefix: cover-preflight-
+  register: cover_preflight_stage
+  check_mode: false
+  changed_when: false
+
+- name: Validate actual listeners before persistent host changes
+  block:
+    - name: Stage preflight helpers
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ cover_preflight_stage.path }}/{{ item }}"
+        mode: '0600'
+      loop: [lifecycle.py, validate_content.py, ownership.py]
+      check_mode: false
+      changed_when: false
+
+    - name: Stage candidate inputs without replacing checked settings
+      ansible.builtin.template:
+        src: settings.json.j2
+        dest: "{{ cover_preflight_stage.path }}/settings.json"
+        mode: '0600'
+      check_mode: false
+      changed_when: false
+      no_log: true
+      diff: false
+
+    - name: Inspect existing nginx ownership and conflicting listeners
+      ansible.builtin.command:
+        argv: [python3, "{{ cover_preflight_stage.path }}/lifecycle.py", preflight, --settings-file, "{{ cover_preflight_stage.path }}/settings.json", --before-install]
+      check_mode: false
+      changed_when: false
+      no_log: true
+
+    - name: Atomically claim only absent persistent role roots
+      ansible.builtin.command:
+        argv: [python3, "{{ cover_preflight_stage.path }}/ownership.py", initialize]
+      register: cover_ownership
+      changed_when: (cover_ownership.stdout | from_json).changed
+      when: not ansible_check_mode
+  always:
+    - name: Remove temporary preflight inputs
+      ansible.builtin.file:
+        path: "{{ cover_preflight_stage.path }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+      no_log: true
