@@ -22,6 +22,8 @@
   порты, SSH/IPv6 и транзакционная собственная таблица nftables.
 - [Приватный TLS cover-site](docs/COVER_SITE.md) — nginx на host-loopback,
   операторский контент и Certbot; не публичный альтернативный backend.
+- [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
+  management-путь с mTLS/JWT и source ACL роли base.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
   (`version`, `config validate`); к панели и узлам не обращается.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
@@ -62,7 +64,7 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
 
-Runtime-сценарии [base](.github/workflows/base.yml) и [cover-site](.github/workflows/cover-site.yml) запускаются только на
+Runtime-сценарии [base](.github/workflows/base.yml), [cover-site](.github/workflows/cover-site.yml) и [RemnaNode](.github/workflows/remnawave-node.yml) запускаются только на
 одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
 компонента, фактические результаты — в его PR. Production-rollout и российский
 пилот этим не выполняются.
