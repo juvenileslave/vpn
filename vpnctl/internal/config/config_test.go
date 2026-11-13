@@ -29,6 +29,15 @@ probe:
   timeout: 5s
   interval: 60s
 log_level: info
+bot:
+  token_env: VPNCTL_BOT_TOKEN
+  state_db: state.db
+  operators:
+    - id: 100000001
+      role: admin
+    - id: 100000002
+      role: viewer
+  chat_ids: [-1000000000001]
 `
 
 func writeConfig(t *testing.T, content string) string {
@@ -93,6 +102,24 @@ func TestLoadValid(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q", cfg.LogLevel)
 	}
+	if cfg.Bot.TokenEnv != "VPNCTL_BOT_TOKEN" || cfg.Bot.StateDB != "state.db" {
+		t.Errorf("bot = %+v", cfg.Bot)
+	}
+	if cfg.Bot.APIBase != nil {
+		t.Errorf("bot.api_base = %v, want nil", cfg.Bot.APIBase)
+	}
+	wantOperators := []Operator{{ID: 100000001, Role: RoleAdmin}, {ID: 100000002, Role: RoleViewer}}
+	if len(cfg.Bot.Operators) != len(wantOperators) {
+		t.Fatalf("operators = %+v", cfg.Bot.Operators)
+	}
+	for i := range wantOperators {
+		if cfg.Bot.Operators[i] != wantOperators[i] {
+			t.Errorf("operators[%d] = %+v, want %+v", i, cfg.Bot.Operators[i], wantOperators[i])
+		}
+	}
+	if len(cfg.Bot.ChatIDs) != 1 || cfg.Bot.ChatIDs[0] != -1000000000001 {
+		t.Errorf("chat_ids = %v", cfg.Bot.ChatIDs)
+	}
 }
 
 func TestExampleConfigIsValid(t *testing.T) {
@@ -108,6 +135,8 @@ func TestLoadAcceptsBoundaryValues(t *testing.T) {
 		"single-label dns": mutate(t, "address: cp.example.com", "address: cp"),
 		"url with path":    mutate(t, "url: https://panel.example.com", "url: https://panel.example.com:8443/api"),
 		"debug level":      mutate(t, "log_level: info", "log_level: debug"),
+		"loopback bot api": mutate(t, "bot:\n", "bot:\n  api_base: http://127.0.0.1:8081\n"),
+		"https bot api":    mutate(t, "bot:\n", "bot:\n  api_base: https://bot.example.com\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(writeConfig(t, content)); err != nil {
@@ -208,6 +237,62 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"missing log level", func(t *testing.T) string {
 			return mutate(t, "log_level: info\n", "")
 		}, "log_level"},
+		{"missing bot", func(t *testing.T) string {
+			start := strings.Index(validYAML, "bot:\n")
+			return validYAML[:start]
+		}, "bot"},
+		{"missing bot token_env", func(t *testing.T) string {
+			return mutate(t, "  token_env: VPNCTL_BOT_TOKEN\n", "")
+		}, "bot.token_env"},
+		{"lowercase bot token_env", func(t *testing.T) string {
+			return mutate(t, "token_env: VPNCTL_BOT_TOKEN", "token_env: vpnctl_bot_token")
+		}, "bot.token_env"},
+		{"missing state_db", func(t *testing.T) string {
+			return mutate(t, "  state_db: state.db\n", "")
+		}, "bot.state_db"},
+		{"empty operators", func(t *testing.T) string {
+			start := strings.Index(validYAML, "  operators:\n")
+			end := strings.Index(validYAML, "  chat_ids:")
+			return validYAML[:start] + "  operators: []\n" + validYAML[end:]
+		}, "bot.operators"},
+		{"missing operators", func(t *testing.T) string {
+			start := strings.Index(validYAML, "  operators:\n")
+			end := strings.Index(validYAML, "  chat_ids:")
+			return validYAML[:start] + validYAML[end:]
+		}, "bot.operators"},
+		{"duplicate operator id", func(t *testing.T) string {
+			return mutate(t, "id: 100000002", "id: 100000001")
+		}, "bot.operators[1].id"},
+		{"zero operator id", func(t *testing.T) string {
+			return mutate(t, "id: 100000001", "id: 0")
+		}, "bot.operators[0].id"},
+		{"negative operator id", func(t *testing.T) string {
+			return mutate(t, "id: 100000001", "id: -5")
+		}, "bot.operators[0].id"},
+		{"missing operator id", func(t *testing.T) string {
+			return mutate(t, "    - id: 100000001\n      role: admin", "    - role: admin")
+		}, "bot.operators[0].id"},
+		{"invalid operator role", func(t *testing.T) string {
+			return mutate(t, "role: viewer", "role: root")
+		}, "bot.operators[1].role"},
+		{"missing operator role", func(t *testing.T) string {
+			return mutate(t, "      role: viewer\n", "")
+		}, "bot.operators[1].role"},
+		{"zero chat id", func(t *testing.T) string {
+			return mutate(t, "chat_ids: [-1000000000001]", "chat_ids: [0]")
+		}, "bot.chat_ids[0]"},
+		{"duplicate chat id", func(t *testing.T) string {
+			return mutate(t, "chat_ids: [-1000000000001]", "chat_ids: [-1000000000001, -1000000000001]")
+		}, "bot.chat_ids[1]"},
+		{"cleartext remote bot api", func(t *testing.T) string {
+			return mutate(t, "bot:\n", "bot:\n  api_base: http://bot.example.com\n")
+		}, "bot.api_base"},
+		{"bot api with path", func(t *testing.T) string {
+			return mutate(t, "bot:\n", "bot:\n  api_base: https://bot.example.com/api\n")
+		}, "bot.api_base"},
+		{"bot api with userinfo", func(t *testing.T) string {
+			return mutate(t, "bot:\n", "bot:\n  api_base: https://user:secret@bot.example.com\n")
+		}, "bot.api_base"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -229,6 +314,14 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 	want := []string{"panel.url", "nodes[0].port", "log_level"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("problem paths = %q, want %q", got, want)
+	}
+}
+
+func TestBotAPIBaseUserinfoIsNotEchoed(t *testing.T) {
+	content := mutate(t, "bot:\n", "bot:\n  api_base: https://user:hunter2@bot.example.com\n")
+	_, err := Load(writeConfig(t, content))
+	if err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("error must exist and must not echo userinfo: %v", err)
 	}
 }
 

@@ -27,7 +27,9 @@
 - [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
   серверных и клиентских конфигураций; не публикация через панель.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
-  (`version`, `config validate`); к панели и узлам не обращается.
+  (`version`, `config validate`) плюс read-only Telegram-бот
+  ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)); панель только читает, узлы не
+  изменяет.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
   условия слияния и откат.
 - [Безопасность](SECURITY.md) — приватное сообщение об уязвимости.
