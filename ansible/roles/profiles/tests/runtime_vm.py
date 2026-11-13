@@ -278,13 +278,18 @@ class Lab:
         endpoint = "unix://" + str(data / "docker.sock")
         self.relay_env = {**os.environ, "DOCKER_HOST": endpoint}
         private_json(data / "daemon.json", {})
-        self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker")
+        daemon = self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker")
         for _ in range(90):
+            if daemon.poll() is not None:
+                # No Node/container PKI has been loaded into this daemon yet.
+                self.evidence["public_daemon_startup_error"] = (self.work / "relay-docker.private.log").read_text(errors="replace")
+                raise AssertionError("isolated relay Docker daemon exited before API readiness")
             result = subprocess.run(["docker", "info"], env=self.relay_env, capture_output=True, check=False)
             if result.returncode == 0:
                 break
             time.sleep(1)
         else:
+            self.evidence["public_daemon_startup_error"] = (self.work / "relay-docker.private.log").read_text(errors="replace")
             raise AssertionError("isolated relay Docker daemon not ready")
         self.stage = "isolated-relay-image-load"
         command(["docker", "load", "-i", self.work / "node-image.tar"], env=self.relay_env)
