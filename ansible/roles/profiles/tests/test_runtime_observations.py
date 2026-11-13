@@ -2,12 +2,13 @@
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from runtime_vm import captured_streams, core_observation, established_pair, http_observation
+from runtime_vm import captured_streams, core_observation, established_pair, http_observation, owned_mountpoints, path_status
 
 
 class RuntimeObservationParserTest(unittest.TestCase):
@@ -72,6 +73,39 @@ class RuntimeObservationParserTest(unittest.TestCase):
         self.assertFalse(observed["valid"])
         self.assertEqual(observed["application_flow_observations"], 1)
         self.assertEqual(observed["accepted_application_routes"], [{"inbound": None, "outbound": None}])
+
+    def test_cleanup_path_probe_distinguishes_absence_from_query_errors(self):
+        with tempfile.TemporaryDirectory(prefix="cleanup-path-") as temporary:
+            root = Path(temporary)
+            missing = root / "missing"
+            self.assertIsNone(path_status(missing))
+            parent_file = root / "parent-file"
+            parent_file.write_bytes(b"owned test data")
+            self.assertTrue(stat.S_ISREG(path_status(parent_file).st_mode))
+            with self.assertRaises(NotADirectoryError):
+                path_status(parent_file / "child")
+            dangling = root / "dangling"
+            dangling.symlink_to(missing)
+            self.assertTrue(stat.S_ISLNK(path_status(dangling).st_mode))
+
+    def test_owned_mount_selection_excludes_neighbors_and_orders_nested_targets(self):
+        root = Path("/var/tmp/vpn-profiles-owned")
+        records = "\n".join((
+            "40 1 0:40 / /var/tmp/vpn-profiles-owned/daemon rw - tmpfs tmpfs rw",
+            "41 40 0:41 / /var/tmp/vpn-profiles-owned/daemon/netns/default rw - nsfs nsfs rw",
+            "42 1 0:42 / /var/tmp/vpn-profiles-owned-neighbor/daemon rw - tmpfs tmpfs rw",
+            "43 1 0:43 / /var/lib/docker/overlay rw - overlay overlay rw",
+            "44 1 0:44 / /var/tmp/vpn-profiles-owned/mount\\040space rw - tmpfs tmpfs rw",
+        ))
+        self.assertEqual(owned_mountpoints(records, root), [
+            root / "daemon/netns/default", root / "daemon", root / "mount space",
+        ])
+
+    def test_mount_query_rejects_malformed_or_parent_traversing_targets(self):
+        for records in ("incomplete", "40 1 0:40 / /var/tmp/vpn-profiles-owned/../foreign rw - tmpfs tmpfs rw"):
+            with self.subTest(records=records):
+                with self.assertRaises(ValueError):
+                    owned_mountpoints(records, Path("/var/tmp/vpn-profiles-owned"))
 
 
 class RuntimeVisitorRepresentationTest(unittest.TestCase):

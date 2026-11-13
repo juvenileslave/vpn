@@ -172,12 +172,23 @@ Startup-логи остаются private; публичный report содер�
 Полный JSON на операцию печатается после cleanup с flush; ошибки вне этого
 report отдельно дают короткий `operation: runner-error` с type/errno. Ошибка
 cleanup больше не может разорвать или следовать за преждевременным PASS.
+Проверка файлов использует `lstat`: только `FileNotFoundError` означает отсутствие;
+permission/lookup errors не превращаются в false absence. Уникальное имя
+extractor фиксируется до `docker create`, чтобы cleanup учитывал и неоднозначный
+исход создания (timeout/потеря ответа) и проверял его фактическое отсутствие.
 Cleanup пытается обработать все owned ресурсы даже после ошибки. Успех требует
 подтверждённого отсутствия containers, tracked processes, namespace names, bridge,
 owned table и файлов, а также inactive/not-found service state. Уже отсутствующий
 ресурс допустим; ошибка запроса/удаления или оставшийся ресурс попадает в
 `cleanup_failures`, оставляет `lab_completed: false` и запрещает итоговый PASS.
 Ошибки directory removal не скрываются через `ignore_errors`.
+Перед удалением private temporary directory читается `/proc/self/mountinfo`:
+driver выбирает только canonical mount targets внутри собственного lab root,
+декодирует kernel octal escapes и вызывает обычный `umount` от deepest targets
+к родителям. Соседние каталоги и системные Docker mounts не затрагиваются;
+force/lazy unmount не используется. Ошибка query/unmount или оставшийся owned
+mount запрещает cleanup PASS, а temporary-directory removal остаётся отдельной
+обязательной проверкой.
 Перед полной проверкой wrapper отдельно проверяет cleanup частично подготовленного
 стенда: реальные namespaces, pinned image, containerd и Docker daemon, без
 туннелей/cover/нагрузки. Это `operation: cleanup-smoke`, не полный VPN acceptance;

@@ -15,6 +15,7 @@ import select
 import shutil
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -118,6 +119,35 @@ def command(args, *, expected=True, env=None, timeout=600, combined=False):
 def private_json(path, value):
     path.write_text(json.dumps(value, sort_keys=True))
     path.chmod(0o600)
+
+
+def path_status(path):
+    """Only genuine ENOENT means absent; other filesystem errors propagate."""
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def owned_mountpoints(mountinfo, root):
+    """Select only canonical mount targets inside the private lab, deepest first."""
+    root = Path(root)
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError("owned mount root must be absolute and canonical")
+    points = []
+    for line in mountinfo.splitlines():
+        if not line:
+            continue
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            raise ValueError("malformed mountinfo record")
+        target = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), fields[4])
+        point = Path(target)
+        if not point.is_absolute() or ".." in point.parts:
+            raise ValueError("mount target must be absolute and canonical")
+        if point == root or root in point.parents:
+            points.append(point)
+    return sorted(points, key=lambda point: len(point.parts), reverse=True)
 
 
 def guard_identity():
@@ -444,8 +474,8 @@ class Lab:
         self.stage = "verified-embedded-core-extraction"
         command(["docker", "pull", "--quiet", bundle.NODE_IMAGE])
         extract = self.prefix + "-extract"
-        command(["docker", "create", "--name", extract, "--network=none", "--entrypoint=sleep", bundle.NODE_IMAGE, "3600"])
         self.extract = extract
+        command(["docker", "create", "--name", extract, "--network=none", "--entrypoint=sleep", bundle.NODE_IMAGE, "3600"])
         self.assets = self.work / "core"
         self.assets.mkdir(mode=0o700)
         for name, source in (("xray", "/usr/local/bin/xray"), ("geoip.dat", "/usr/local/share/xray/geoip.dat"), ("geosite.dat", "/usr/local/share/xray/geosite.dat")):
@@ -1065,7 +1095,7 @@ class Lab:
         def attempt(stage, action):
             self.cleanup_stage = stage
             try:
-                action()
+                return action()
             except BaseException as error:
                 failure = {"phase": "lab-cleanup", "stage": stage, "type": type(error).__name__, "errno": getattr(error, "errno", None)}
                 if type(error) is AssertionError:
@@ -1074,15 +1104,18 @@ class Lab:
 
         def remove_path(path):
             path = Path(path)
+            info = path_status(path)
+            if info is None:
+                return
             try:
-                if path.is_symlink() or path.is_file():
-                    path.unlink()
-                elif path.exists():
+                if stat.S_ISDIR(info.st_mode):
                     shutil.rmtree(path)
+                else:
+                    path.unlink()
             except FileNotFoundError:
-                if os.path.lexists(path):
+                if path_status(path) is not None:
                     raise
-            if os.path.lexists(path):
+            if path_status(path) is not None:
                 raise AssertionError("owned path remains after removal")
 
         def remove_container(name, environment):
@@ -1107,13 +1140,13 @@ class Lab:
 
         def remove_namespace(namespace):
             subprocess.run(["ip", "netns", "del", namespace], capture_output=True, timeout=30, check=False)
-            if os.path.lexists("/run/netns/" + namespace):
+            if path_status("/run/netns/" + namespace) is not None:
                 raise AssertionError("owned network namespace remains after removal")
 
         def remove_bridge():
             name = self.prefix + "br"
             subprocess.run(["ip", "link", "del", name], capture_output=True, timeout=30, check=False)
-            if os.path.lexists("/sys/class/net/" + name):
+            if path_status("/sys/class/net/" + name) is not None:
                 raise AssertionError("owned bridge remains after removal")
 
         def restore_hosts():
@@ -1153,6 +1186,14 @@ class Lab:
         attempt("remove-owned-firewall", remove_firewall)
         for path in ("/etc/nginx/sites-enabled/cover-site.conf", "/etc/cover-site", "/var/lib/cover-site", "/var/log/cover-site", "/var/www/cover-site-acme"):
             attempt("remove-owned-role-state", lambda path=path: remove_path(path))
+        mounts = attempt("query-owned-temporary-mounts", lambda: owned_mountpoints(Path("/proc/self/mountinfo").read_text(), self.work))
+        if mounts is not None:
+            for point in mounts:
+                attempt("unmount-owned-temporary-filesystem", lambda point=point: command(["umount", "--", point], timeout=30))
+        def verify_unmounted():
+            if owned_mountpoints(Path("/proc/self/mountinfo").read_text(), self.work):
+                raise AssertionError("owned temporary mount remains after unmount")
+        attempt("verify-owned-temporary-mounts-absent", verify_unmounted)
         return failures
 
     def execute(self):
