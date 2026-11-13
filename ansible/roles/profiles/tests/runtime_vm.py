@@ -367,9 +367,15 @@ class Lab:
         assert Path("/proc/self/ns/net").stat().st_ino != namespace, "relay runtime shares exit network namespace"
         self.evidence["relay_runtime_isolation"] = {"private_containerd": True, "daemon_and_containerd_same_relay_netns": True, "distinct_from_exit": True}
         self.stage = "isolated-relay-image-load"
-        command(["docker", "load", "-i", self.work / "node-image.tar"], env=self.relay_env)
+        load = subprocess.run(["docker", "load", "-i", str(self.work / "node-image.tar")], env=self.relay_env, capture_output=True, timeout=600, check=False)
+        if load.returncode != 0:
+            self.evidence["public_relay_image_load_error"] = load.stderr.decode(errors="replace")[-500:]
+            raise AssertionError("relay daemon rejected the offline Node image")
         loaded = subprocess.run(["docker", "image", "inspect", bundle.NODE_IMAGE], env=self.relay_env, capture_output=True, check=False)
         if loaded.returncode != 0:
+            tags = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], env=self.relay_env, capture_output=True, timeout=60, check=False)
+            self.evidence["public_relay_image_references"] = sorted(tags.stdout.decode(errors="replace").split())
+            self.evidence["public_relay_image_inspect_error"] = loaded.stderr.decode(errors="replace")[-300:]
             raise AssertionError("relay daemon cannot resolve the pinned Node image offline")
 
     def cover(self):
