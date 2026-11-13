@@ -228,6 +228,13 @@ def http_observation(response, method, tls):
     return {"method": method, "status": int(status), "HTTP": version.removeprefix("HTTP/"), "TLS": tls, "headers": headers, "body_bytes": len(body), "body_sha256": hashlib.sha256(body).hexdigest()}
 
 
+def core_routes(logs, inbound_tags, outbound):
+    """Retain accepted application route tags; socket/pcap prove IP family."""
+    tags = "|".join(re.escape(tag) for tag in inbound_tags)
+    pattern = re.compile(r"\bfrom\s+\S+\s+accepted\s+tcp:192\.0\.2\.100:18080\s+\[(?P<inbound>" + tags + r")\s*(?:->|>>)\s*" + re.escape(outbound) + r"\]")
+    return [match.group("inbound") for line in logs.decode().splitlines() if (match := pattern.search(line)) is not None]
+
+
 class Lab:
     def __init__(self, directory):
         self.work = directory
@@ -771,13 +778,13 @@ class Lab:
         observations = {}
         for kind in ("relay", "exit"):
             logs = command(["docker", "logs", "--since", since, "vpn-remnanode"], env=self.relay_env if kind == "relay" else None, combined=True)
-            inbound = "slot-" + str(slot) + "-v4" if kind == "relay" else "transit-v" + str(expected_family)
+            inbounds = ("slot-" + str(slot) + "-v4",) if kind == "relay" else ("transit-v4", "transit-v6")
             outbound = "slot-" + str(slot) + "-v" + str(expected_family) if kind == "relay" else "egress-" + str(slot)
             destination_lines = [line for line in logs.decode().splitlines() if "tcp:192.0.2.100:18080" in line]
-            observed = [line for line in destination_lines if re.search(r"\[" + re.escape(inbound) + r"\s*(?:->|>>)\s*" + re.escape(outbound) + r"\]", line)]
+            observed = core_routes(logs, inbounds, outbound)
             fixture_tag = r"(?:slot-\d+-v[46]|transit-v[46]|egress-\d+|direct-v[46]|block)"
             detours = sorted({match.group(0) for line in destination_lines for match in re.finditer(r"\[" + fixture_tag + r"\s*(?:==>|->|>>)\s*" + fixture_tag + r"\]", line)})
-            observations[kind] = {"inbound": inbound, "outbound": outbound, "application_flow_observations": len(observed), "application_destination_lines": len(destination_lines), "container_log_bytes": len(logs), "fixture_detours": detours}
+            observations[kind] = {"inbound": observed[0] if len(observed) == 1 else None, "allowed_inbounds": list(inbounds), "outbound": outbound, "application_flow_observations": len(observed), "application_destination_lines": len(destination_lines), "container_log_bytes": len(logs), "fixture_detours": detours}
             self.evidence["route_observation_attempts"][label]["core_observations"] = observations
             if len(observed) != 1:
                 raise AssertionError("application-specific real core inbound/outbound observation is missing or ambiguous")

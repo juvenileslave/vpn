@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from runtime_vm import captured_streams, established_pair, http_observation
+from runtime_vm import captured_streams, core_routes, established_pair, http_observation
 
 
 class RuntimeObservationParserTest(unittest.TestCase):
@@ -38,6 +38,25 @@ class RuntimeObservationParserTest(unittest.TestCase):
         self.assertFalse(established_pair(samples, "192.0.2.20.33253", "192.0.2.10.18444"))
         self.assertFalse(established_pair(samples, "192.0.2.20.33252", "192.0.2.11.18444"))
         self.assertFalse(established_pair(samples, "2001:db8:47::20.33252", "2001:db8:47::10.18444"))
+
+    def test_core_route_retains_actual_transit_tag_without_inferring_wire_family(self):
+        logs = b"2026/11/13 19:00:00.000001 from tcp:192.0.2.20:31000 accepted tcp:192.0.2.100:18080 [transit-v4 -> egress-0] email: egress-0\n"
+        self.assertEqual(core_routes(logs, ("transit-v4", "transit-v6"), "egress-0"), ["transit-v4"])
+
+    def test_core_route_rejects_unrelated_or_rejected_application_observations(self):
+        for status, target, detour in (
+            ("rejected", "192.0.2.100:18080", "transit-v4 -> egress-0"),
+            ("accepted", "192.0.2.100:18081", "transit-v4 -> egress-0"),
+            ("accepted", "192.0.2.100:180800", "transit-v4 -> egress-0"),
+            ("accepted", "192.0.2.101:18080", "transit-v4 -> egress-0"),
+            ("accepted", "192.0.2.100:18080", "direct-v4 -> egress-0"),
+            ("accepted", "192.0.2.100:18080", "transit-v4 -> egress-1"),
+        ):
+            with self.subTest(status=status, target=target, detour=detour):
+                logs = ("from tcp:192.0.2.20:31000 " + status + " tcp:" + target + " [" + detour + "]\n").encode()
+                self.assertEqual(core_routes(logs, ("transit-v4", "transit-v6"), "egress-0"), [])
+        logs = b"from tcp:192.0.2.30:31000 accepted tcp:192.0.2.100:18080 [slot-1-v4 -> slot-1-v6]\n"
+        self.assertEqual(core_routes(logs, ("slot-0-v4",), "slot-0-v6"), [])
 
 
 class RuntimeVisitorRepresentationTest(unittest.TestCase):

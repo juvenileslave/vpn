@@ -232,14 +232,24 @@ external IP этот gate не проходят. Ограничение 64 KiB �
 одноразового сценария, не добавляет production timeout или fallback cutoff.
 Socket endpoints сравниваются как IP/port tuples: IPv4-mapped IPv6 из `ss`
 нормализуется к тому же wire IPv4, без ослабления проверки адреса или порта.
+Семейство нельзя выводить из имени inbound: pinned
+[`system_listener.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/transport/internet/system_listener.go)
+передаёт wildcard `0.0.0.0` в Go `ListenConfig` с network `tcp`, который может
+принимать IPv6. Реальный IPv6 flow дал `[transit-v4 -> egress-0]` на exit.
+Access gate сохраняет фактический `transit-v4` или `transit-v6`, но допускает
+ровно один accepted application record с нужным outbound и точным адресом/портом;
+direct, чужой slot, rejected и observatory record не подходят. Адресная семья
+по-прежнему доказывается payload и accepted socket на обоих концах second hop,
+а не именем listener. Рендер и production-конфигурация ради этого не меняются.
 PCAP собирает только second-hop TCP/18444 на synthetic bridge с
 `--immediate-mode -U`, snaplen 256 и буфером 32 MiB. Для sequence-byte accounting
 нужны IP/TCP headers; полная payload integrity измеряется отдельно на sink.
 Kernel-drop statistics записываются числами; отсутствие подтверждения zero drops
 отвергает route proof.
 Даже при отказе gate report хранит measured family bytes, признаки accepted
-socket и только fixture endpoints. Это measurements неуспешной попытки,
-не доказательство принятого маршрута.
+socket, fixture endpoints и whitelist transit/slot/egress tags с количеством
+application log observations. Raw log lines и credentials не публикуются.
+Это measurements неуспешной попытки, не доказательство принятого маршрута.
 
 Scenario включает wrong keys/shortIds/VLESS, malformed и TCP-fragmented
 handshake, timestamp ±301 s, fresh/expired replay (реальный wait 302 s),
