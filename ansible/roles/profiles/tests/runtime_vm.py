@@ -646,8 +646,27 @@ class Lab:
         if (result.returncode == 0) != expected:
             self.evidence["public_transfer_error"] = result.stderr.decode(errors="replace")[-600:]
             self.evidence["public_transfer_exit"] = result.returncode
+            self.transfer_failure_facts()
             raise AssertionError("application transfer result differs from expected")
         return result.stdout
+
+    def transfer_failure_facts(self):
+        facts = {}
+        try:
+            for path in sorted(self.work.glob("client-*.private.log")):
+                facts[path.stem] = path.read_text(errors="replace")[-500:]
+            for kind in ("exit", "relay"):
+                env = self.relay_env if kind == "relay" else None
+                logs = subprocess.run(["docker", "logs", "--tail", "40", "vpn-remnanode"], env=env, capture_output=True, timeout=60, check=False)
+                facts[kind + "_node_log"] = logs.stdout.decode(errors="replace")[-900:] + logs.stderr.decode(errors="replace")[-200:]
+            for kind in ("client", "exit"):
+                namespace = self.ns(kind)
+                prefix = ["ip", "netns", "exec", namespace] if namespace else []
+                sockets = subprocess.run(prefix + ["ss", "-H", "-tn", "state", "established"], capture_output=True, timeout=30, check=False)
+                facts[kind + "_established"] = [row.split()[3] + "->" + row.split()[4] for row in sockets.stdout.decode(errors="replace").splitlines() if len(row.split()) > 4]
+            self.evidence["public_transfer_facts"] = facts
+        except Exception:
+            self.evidence["public_transfer_facts"] = "unavailable"
 
     def tls_matrix(self):
         expected = (self.work / "site/index.html").read_bytes()
