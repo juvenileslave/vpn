@@ -773,10 +773,14 @@ class Lab:
             logs = command(["docker", "logs", "--since", since, "vpn-remnanode"], env=self.relay_env if kind == "relay" else None, combined=True)
             inbound = "slot-" + str(slot) + "-v4" if kind == "relay" else "transit-v" + str(expected_family)
             outbound = "slot-" + str(slot) + "-v" + str(expected_family) if kind == "relay" else "egress-" + str(slot)
-            observed = [line for line in logs.decode().splitlines() if "tcp:192.0.2.100:18080" in line and re.search(r"\[" + re.escape(inbound) + r"\s*(?:->|>>)\s*" + re.escape(outbound) + r"\]", line)]
+            destination_lines = [line for line in logs.decode().splitlines() if "tcp:192.0.2.100:18080" in line]
+            observed = [line for line in destination_lines if re.search(r"\[" + re.escape(inbound) + r"\s*(?:->|>>)\s*" + re.escape(outbound) + r"\]", line)]
+            fixture_tag = r"(?:slot-\d+-v[46]|transit-v[46]|egress-\d+|direct-v[46]|block)"
+            detours = sorted({match.group(0) for line in destination_lines for match in re.finditer(r"\[" + fixture_tag + r"\s*(?:==>|->|>>)\s*" + fixture_tag + r"\]", line)})
+            observations[kind] = {"inbound": inbound, "outbound": outbound, "application_flow_observations": len(observed), "application_destination_lines": len(destination_lines), "container_log_bytes": len(logs), "fixture_detours": detours}
+            self.evidence["route_observation_attempts"][label]["core_observations"] = observations
             if len(observed) != 1:
                 raise AssertionError("application-specific real core inbound/outbound observation is missing or ambiguous")
-            observations[kind] = {"inbound": inbound, "outbound": outbound, "application_flow_observations": len(observed)}
         report = {"application": application, "sink_receipt": matching[0], "winner_family": expected_family, "unique_tcp_payload_bytes": family_bytes, "established_accepted_socket": established, "core_observations": observations, "alternate_family_probe_bound_bytes": 65536, "pcap_sha256": hashlib.sha256(capture.read_bytes()).hexdigest()}
         self.evidence["scenarios"][label] = report
         return report
