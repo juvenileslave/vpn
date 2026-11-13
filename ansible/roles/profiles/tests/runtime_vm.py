@@ -701,7 +701,7 @@ class Lab:
     def capture_routes(self, label, action, *, slot=0, expected_family=6):
         capture = self.work / (label + ".private.pcap")
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        process = self.spawn("exit", ["tcpdump", "--immediate-mode", "-B", "32768", "-i", "any", "-nn", "-U", "-w", capture, "tcp port 18444"], "capture-" + label)
+        process = self.spawn("exit", ["tcpdump", "--immediate-mode", "-s", "256", "-B", "32768", "-i", self.prefix + "br", "-nn", "-U", "-w", capture, "tcp port 18444"], "capture-" + label)
         samples = {"exit": [], "relay": []}
         stop = threading.Event()
         sampling_errors = []
