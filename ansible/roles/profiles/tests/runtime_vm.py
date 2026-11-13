@@ -220,6 +220,20 @@ class Lab:
                     failed_task = name if name in approved else None
             if failed_task is not None:
                 self.evidence["public_failed_role_task"] = failed_task
+            if failed_task == "Bootstrap HTTP-01 without configuring nonexistent TLS files":
+                # This step precedes certificate issuance/Node credentials and
+                # emits only the controlled lifecycle's constraint, not vars.
+                for line in result.stdout.decode(errors="replace").splitlines():
+                    marker = line.find("FAILED! => ")
+                    if marker < 0:
+                        continue
+                    try:
+                        details = json.loads(line[marker + len("FAILED! => "):])
+                    except json.JSONDecodeError:
+                        continue
+                    first = str(details.get("stderr", "")).splitlines()
+                    if first and first[0].startswith("cover_site: "):
+                        self.evidence["public_bootstrap_constraint"] = first[0]
             raise AssertionError("role execution failed; private values withheld")
         return result.stdout
 
