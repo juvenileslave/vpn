@@ -3,10 +3,9 @@
 # Pinned release and checksums live in vars/ and cannot be overridden from inventory.
 
 # Literal IPv4 or IPv6 address of this host; wildcards and hostnames are rejected.
-# Loopback by default: the query API exposes infrastructure metadata.
-# A non-loopback address is allowed only together with an explicit source ACL
-# (victoriametrics_allowed_sources); the port must additionally be restricted in
-# the base role (base_firewall_source_ports). Never publish the query API.
+# Loopback by default: the query API exposes infrastructure metadata. A
+# non-loopback address must be a private RFC 1918/ULA address assigned to this
+# host and requires the base-role source ACL (see victoriametrics_allowed_sources).
 victoriametrics_listen_address: 127.0.0.1
 victoriametrics_listen_port: 8428
 
@@ -26,17 +25,19 @@ victoriametrics_scrape_interval: 30s
 victoriametrics_memory_max: 512M
 victoriametrics_cpu_quota: "50%"
 
-# Source ACL of the query API on a non-loopback listen address: exact private
-# /32 and /128 CIDRs allowed to connect; loopback needs no ACL. Ignored (and
-# must stay empty) for loopback listen addresses.
+# Source ACL of the query API. Empty for the loopback listen address. A
+# non-loopback address requires an exact non-empty list of private /32 and /128
+# CIDRs of the listen address family plus, in the accepted base-role contract,
+# base_firewall_enabled: true and exactly one base_firewall_source_ports tcp
+# rule for this port with the same source_cidrs.
 victoriametrics_allowed_sources: []
 
 # Panel metrics scraping (remnawave_panel METRICS endpoint). Credentials never
-# enter templates, argv or logs: the scrape config references 0600 files on the
-# target host, written from one of these sources:
+# enter templates, argv, logs or the repository: only controller-side files
+# outside the checkout are accepted, and the scrape config references 0640
+# copies on the target host.
 #   url           — optional; default http://127.0.0.1:3001/metrics
-#   username / password        — literal values (e.g. from an encrypted vars file)
-#   username_file / password_file — absolute controller paths outside the repo
+#   username_file / password_file — absolute controller paths, given together
 # The panel endpoint is reachable only where the compose stack publishes it;
 # on a host without the panel the role works without this variable.
 victoriametrics_panel_metrics: {}

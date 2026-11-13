@@ -94,18 +94,15 @@
     dest: "{{ victoriametrics_config_dir }}/{{ item.name }}"
     owner: root
     group: "{{ victoriametrics_group }}"
-    mode: "0600"
+    mode: "0640"
   loop:
     - name: panel-metrics-username
-      content: "{{ _victoriametrics_panel_username | default(victoriametrics_panel_metrics.username | default('')) }}"
+      content: "{{ _victoriametrics_panel_username | default('') }}"
     - name: panel-metrics-password
-      content: "{{ _victoriametrics_panel_password | default(victoriametrics_panel_metrics.password | default('')) }}"
+      content: "{{ _victoriametrics_panel_password | default('') }}"
   loop_control:
     label: "credential {{ item.name }}"
-  when:
-    - victoriametrics_panel_metrics.username_file is defined or victoriametrics_panel_metrics.username is defined
-      or victoriametrics_panel_metrics.password_file is defined or victoriametrics_panel_metrics.password is defined
-    - item.content | length > 0
+  when: victoriametrics_panel_metrics.username_file is defined
   register: victoriametrics_credential_files
   no_log: true
   diff: false
@@ -117,11 +114,7 @@
   loop:
     - panel-metrics-username
     - panel-metrics-password
-  when: >-
-    victoriametrics_panel_metrics.username_file is not defined
-    and victoriametrics_panel_metrics.username is not defined
-    and victoriametrics_panel_metrics.password_file is not defined
-    and victoriametrics_panel_metrics.password is not defined
+  when: victoriametrics_panel_metrics.username_file is not defined
 
 - name: Install the systemd unit
   ansible.builtin.template:

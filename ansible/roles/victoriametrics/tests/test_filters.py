@@ -11,6 +11,14 @@ _spec = importlib.util.spec_from_file_location("victoriametrics_filters", PLUGIN
 filters = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(filters)
 
+LOOPBACK = {"address": "127.0.0.1", "version": 4, "loopback": True, "private": True}
+PRIVATE4 = {"address": "10.203.46.1", "version": 4, "loopback": False, "private": True}
+PRIVATE6 = {"address": "fd46:203::1", "version": 6, "loopback": False, "private": True}
+
+
+def rule(sources, port=8428, proto="tcp"):
+    return {"proto": proto, "port": port, "source_cidrs": list(sources)}
+
 
 class ListenAddressTests(unittest.TestCase):
     def test_accepts_literal_unicast(self):
@@ -36,24 +44,70 @@ class ListenAddressTests(unittest.TestCase):
         self.assertEqual(result["address"], "2001:db8:10::10")
         self.assertEqual(result["version"], 6)
 
+    def test_private_flag_matches_rfc1918_and_ula(self):
+        for value in ["10.0.0.1", "172.16.0.1", "192.168.0.1", "fd00::1"]:
+            with self.subTest(value=value):
+                self.assertTrue(filters.victoriametrics_ip(value)["private"])
+        for value in ["192.0.2.1", "8.8.8.8", "2001:db8::1", "169.254.0.1", "127.0.0.1"]:
+            with self.subTest(value=value):
+                self.assertFalse(filters.victoriametrics_ip(value)["private"])
 
-class SourceAclTests(unittest.TestCase):
-    def test_loopback_needs_no_acl(self):
-        self.assertTrue(filters.victoriametrics_sources_ok({"loopback": True}, []))
-        self.assertTrue(filters.victoriametrics_sources_ok({"loopback": True}, None))
 
-    def test_non_loopback_requires_exact_private_sources(self):
-        listen = {"loopback": False}
-        self.assertTrue(filters.victoriametrics_sources_ok(listen, ["10.0.0.5/32"]))
-        self.assertTrue(filters.victoriametrics_sources_ok(listen, ["fd00::5/128"]))
+class AclTests(unittest.TestCase):
+    def test_loopback_needs_no_acl_and_forbids_one(self):
+        self.assertTrue(filters.victoriametrics_acl_ok(LOOPBACK, 8428, [], [], [], 22, False))
+        self.assertTrue(filters.victoriametrics_acl_ok(LOOPBACK, 8428, None, [], [], 22, False))
+        self.assertFalse(filters.victoriametrics_acl_ok(LOOPBACK, 8428, ["10.0.0.5/32"], [], [], 22, True))
 
-    def test_non_loopback_rejects_missing_wide_or_public_sources(self):
-        listen = {"loopback": False}
+    def test_private_listen_with_exact_rule(self):
+        self.assertTrue(filters.victoriametrics_acl_ok(
+            PRIVATE4, 8428, ["10.0.0.5/32"], [rule(["10.0.0.5/32"])], [], 22, True))
+        self.assertTrue(filters.victoriametrics_acl_ok(
+            PRIVATE6, 8428, ["fd00::5/128"], [rule(["fd00::5/128"])], [], 22, True))
+
+    def test_missing_firewall_or_rule_is_refused(self):
+        cases = [
+            dict(firewall=False, rules=[rule(["10.0.0.5/32"])]),
+            dict(firewall=True, rules=[]),
+            dict(firewall=True, rules=[rule(["10.0.0.6/32"])]),
+            dict(firewall=True, rules=[rule(["10.0.0.5/32", "10.0.0.6/32"])]),
+            dict(firewall=True, rules=[rule(["10.0.0.5/32"], proto="udp")]),
+            dict(firewall=True, rules=[rule(["10.0.0.5/32"]), rule(["10.0.0.5/32"])]),
+            dict(firewall=True, rules=[rule(["10.0.0.5/32"], port=8429)]),
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertFalse(filters.victoriametrics_acl_ok(
+                    PRIVATE4, 8428, ["10.0.0.5/32"], case["rules"], [], 22, case["firewall"]))
+
+    def test_public_listen_and_wrong_family_are_refused(self):
+        public = {"address": "203.0.113.30", "version": 4, "loopback": False, "private": False}
+        self.assertFalse(filters.victoriametrics_acl_ok(
+            public, 8428, ["10.0.0.5/32"], [rule(["10.0.0.5/32"])], [], 22, True))
+        self.assertFalse(filters.victoriametrics_acl_ok(
+            PRIVATE4, 8428, ["fd00::5/128"], [rule(["fd00::5/128"])], [], 22, True))
+        self.assertFalse(filters.victoriametrics_acl_ok(
+            PRIVATE6, 8428, ["10.0.0.5/32"], [rule(["10.0.0.5/32"])], [], 22, True))
+
+    def test_wide_public_or_duplicate_sources_are_refused(self):
         for sources in [[], None, "10.0.0.5/32", ["0.0.0.0/0"], ["::/0"], ["10.0.0.0/8"],
                         ["192.0.2.1/32"], ["203.0.113.0/24"], ["127.0.0.1/32"],
                         ["10.0.0.5/32", "10.0.0.5/32"], ["garbage"]]:
             with self.subTest(sources=sources):
-                self.assertFalse(filters.victoriametrics_sources_ok(listen, sources))
+                rules = [rule(sources)] if isinstance(sources, list) else []
+                self.assertFalse(filters.victoriametrics_acl_ok(
+                    PRIVATE4, 8428, sources, rules, [], 22, True))
+
+    def test_port_conflicts(self):
+        self.assertFalse(filters.victoriametrics_acl_ok(
+            PRIVATE4, 22, ["10.0.0.5/32"], [rule(["10.0.0.5/32"], port=22)], [], 22, True))
+        self.assertFalse(filters.victoriametrics_acl_ok(
+            PRIVATE4, 8428, ["10.0.0.5/32"], [rule(["10.0.0.5/32"])],
+            [{"proto": "tcp", "port": 8428}], 22, True))
+        for port in [True, "8428", 0, 65536]:
+            with self.subTest(port=port):
+                self.assertFalse(filters.victoriametrics_acl_ok(
+                    PRIVATE4, port, ["10.0.0.5/32"], [], [], 22, True))
 
 
 class TargetsTests(unittest.TestCase):

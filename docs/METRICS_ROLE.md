@@ -12,7 +12,7 @@
 
 | Действие | Подробности |
 | --- | --- |
-| Проверка до изменений | ОС Linux, systemd, архитектура `x86_64`/`aarch64`, литеральный адрес прослушивания, retention с явной единицей, интервал скрейпа, лимиты ресурсов, порт. При несоответствии роль завершается ошибкой, ничего не изменив. |
+| Проверка до изменений | ОС Linux, systemd, архитектура `x86_64`/`aarch64`, литеральный адрес прослушивания (loopback либо приватный RFC 1918/ULA), ACL источников против контракта роли `base`, retention с явной единицей, интервал скрейпа, лимиты ресурсов, порт, источник учётных данных панели (только файлы вне репозитория). При несоответствии роль завершается ошибкой, ничего не изменив. |
 | Scrape-конфиг | Рендерится из inventory в scratch-каталог, проверяется закреплённым бинарём `-promscrape.config.dryRun` (строгий разбор, отказ на неизвестных полях) и только затем устанавливается. |
 | Учётная запись | Системные группа и пользователь `victoriametrics`, shell `/usr/sbin/nologin`. |
 | Установка | Официальный архив релиза скачивается с GitHub и проверяется по закреплённому SHA256, затем распаковывается в `/opt/victoriametrics/victoria-metrics-linux-<arch>-v<версия>/`. Файлы принадлежат `root`. |
@@ -30,13 +30,17 @@
 Версия закреплена в `ansible/roles/victoriametrics/vars/main.yml`:
 **VictoriaMetrics v1.155.0** (single-node, бинар `victoria-metrics-prod`).
 SHA256 взяты из официальных
-`victoria-metrics-linux-{amd64,arm64}-v1.155.0_checksums.txt` релиза и
-сверены с распакованными бинарями:
+`victoria-metrics-linux-{amd64,arm64}-v1.155.0_checksums.txt` релиза:
+архив проверяется `get_url` при скачивании, а распакованный бинар
+`victoria-metrics-prod` — отдельной задачей после распаковки
+(см. `vars/main.yml`).
 
-| Архитектура | Архив | SHA256 |
+| Архитектура | Файл | SHA256 |
 | --- | --- | --- |
-| `amd64` | `victoria-metrics-linux-amd64-v1.155.0.tar.gz` | `aca3c49816db88c0e48012772fcf2a94eb66aaccd925b35d397b8b6f7f40fb43` |
-| `arm64` | `victoria-metrics-linux-arm64-v1.155.0.tar.gz` | `5024a2a13237fbfbf7b276e60b7942cf0efb3bea5f53b5ca4b690e4d0719ca58` |
+| `amd64` | `victoria-metrics-linux-amd64-v1.155.0.tar.gz` | `7180e65913d55ab99c0be8f4a3ad17a0fafe5598a21ff6327fecba3190d7b176` |
+| `amd64` | `…/victoria-metrics-linux-amd64-v1.155.0/victoria-metrics-prod` | `aca3c49816db88c0e48012772fcf2a94eb66aaccd925b35d397b8b6f7f40fb43` |
+| `arm64` | `victoria-metrics-linux-arm64-v1.155.0.tar.gz` | `c6af3f35c597e2cb45c9bbb7a7fc1638c6f1ec10a8198c2861aa14531bf439d7` |
+| `arm64` | `…/victoria-metrics-linux-arm64-v1.155.0/victoria-metrics-prod` | `5024a2a13237fbfbf7b276e60b7942cf0efb3bea5f53b5ca4b690e4d0719ca58` |
 
 Версия и суммы находятся в `vars/`, а не в `defaults/`: их нельзя случайно
 переопределить из inventory. Обновление версии — отдельный PR, меняющий
@@ -90,31 +94,33 @@ compose-стека; с хоста она доступна, если compose-пр
 `victoriametrics_panel_metrics` принимает:
 
 - `url` — необязателен, по умолчанию `http://127.0.0.1:3001/metrics`;
-- `username` и `password` — литеральные значения (например, из
-  зашифрованного vars-файла SOPS); либо
 - `username_file` и `password_file` — абсолютные пути на управляющей машине
-  вне репозитория (dotenv-файл оператора).
+  вне репозитория (dotenv-файл оператора), задаются только парой.
 
-Комбинации «value + file» для одного поля запрещены. Значения никогда не
-попадают в шаблоны, argv, логи или diff: роль пишет их в файлы
-`/etc/victoriametrics/panel-metrics-{username,password}` (`0600`), а
-scrape-конфиг ссылается на них ключами `username_file`/`password_file`
-(поддержка VictoriaMetrics, разбор при каждом использовании). Задачи с
-секретами выполняются с `no_log` и `diff: false`.
+Литеральные секреты в переменных запрещены: роль отклоняет любые ключи,
+кроме `url`, `username_file` и `password_file`. Значения никогда не попадают
+в шаблоны, argv, логи или diff: роль копирует содержимое файлов в
+`/etc/victoriametrics/panel-metrics-{username,password}` (`0640`, читаемо
+только группой сервиса `victoriametrics`), а scrape-конфиг ссылается на них
+ключами `username_file`/`password_file` (поддержка VictoriaMetrics, разбор
+при каждом использовании). Задачи с секретами выполняются с `no_log` и
+`diff: false`; при отсутствии учётных данных устаревшие файлы удаляются.
 
 ## Сетевой доступ
 
 - По умолчанию query API слушает `127.0.0.1:8428`. Метрики содержат сведения
   об инфраструктуре (узлы, ядра, память, имена целей); не публикуйте их.
 - Не-loopback адрес требует одновременно:
+  - приватный адрес (RFC 1918 / `fc00::/7`), назначенный хосту; публичные,
+    TEST-NET и link-local адреса отклоняются до изменений;
   - непустой `victoriametrics_allowed_sources` — список точных приватных
-    `/32` и `/128` CIDR (RFC 1918 / `fc00::/7`); широкие сети, публичные и
-    loopback-источники отклоняются до изменений;
-  - правило `base_firewall_source_ports` роли `base` с теми же CIDR
-    (эта роль firewall не меняет);
+    `/32` и `/128` CIDR того же семейства адресов, что и адрес прослушивания;
+    широкие сети, публичные и loopback-источники отклоняются до изменений;
+  - `base_firewall_enabled: true` в переменных хоста и ровно одно правило
+    `base_firewall_source_ports` роли `base` с `proto: tcp`, портом 8428
+    (адресом прослушивания) и теми же CIDR в `source_cidrs` (эта роль firewall
+    не меняет, контракт принимает `base_firewall_*` переменные);
   - адрес должен быть назначен хосту.
-- Публичные источники и указание `0.0.0.0/0` невозможны: preflight отклоняет
-  их до первого изменения.
 - С `cp_placement: exit` переменные живут в `host_vars`/`group_vars` exit
   (роль применяется playbook'ом `-e victoriametrics_hosts=exit`); с
   `cp_placement: dedicated` — на CP-хосте. Механизм ACL один и тот же.
@@ -140,10 +146,12 @@ scrape-конфиг ссылается на них ключами `username_file
   playbooks/victoriametrics.yml
 ```
 
-В check mode архив не загружается, сервис не запускается и restart
+В check mode архив не загружается (и на чистой системе dry-run переносится на
+реальный прогон), файлы не создаются, сервис не запускается, а restart
 регистрируется как `changed` без выполнения; существующие файлы не меняются.
-Применение к рабочим узлам требует отдельного явного разрешения владельца
-(см. [AGENTS.md](../AGENTS.md)).
+На хосте с уже установленным бинарем check mode дополнительно прогоняет
+dry-run рендеренного конфига. Применение к рабочим узлам требует отдельного
+явного разрешения владельца (см. [AGENTS.md](../AGENTS.md)).
 
 ## Проверка на узле
 
@@ -165,12 +173,17 @@ curl -fsS 'http://127.0.0.1:8428/api/v1/query?query=up'
 
 Workflow [`.github/workflows/victoriametrics.yml`](../.github/workflows/victoriametrics.yml)
 (job `victoriametrics role`) запускается для pull request и push в `master` на
-одноразовом runner `ubuntu-24.04` с systemd: синтаксис playbook, отказ для
-`0.0.0.0` до изменений, check mode на чистой системе, установка, `up` по
-self-scrape и node_exporter через `/api/v1/query`, проверка retention-флага,
-персистентность данных после перезапуска, повторный запуск с `changed=0`,
-не-loopback адрес с ACL и запрет доступа из постороннего source namespace.
-Job не входит в обязательные проверки `Repository checks` и `Secret scan`.
+одноразовом runner `ubuntu-24.04` с systemd. Шаги job'а: unit-тесты фильтров
+роли, `--syntax-check` playbook, отказ для `0.0.0.0` и для не-loopback адреса
+без ACL до изменений, check mode на чистой системе (ничего не пишет), установка
+принятого node_exporter и применение роли, повторный запуск с `changed=0`,
+проверка сервиса, прав на файлы, retention-флага, `up` для node_exporter через
+`/api/v1/query` и персистентности данных после перезапуска сервиса. Отдельный
+шаг проверяет не-loopback адрес `10.203.46.1` (TEST-NET-подобный частный адрес
+на veth-парах): firewall роли `base` с правилом только для источника
+`10.203.46.2/32`, применённый в отдельном network namespace, и curl из
+объявленного и постороннего namespace. Job не входит в обязательные проверки
+`Repository checks` и `Secret scan`.
 
 ## Откат
 

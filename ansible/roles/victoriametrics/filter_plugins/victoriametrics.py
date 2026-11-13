@@ -1,6 +1,8 @@
 """Validation helpers for the victoriametrics role.
 
-Error messages never include secret values.
+Error messages never include secret values. The ACL filter mirrors the
+accepted remnawave_node semantics: a non-loopback listen address is allowed
+only with an exact source rule in the base role's firewall contract.
 """
 
 from __future__ import annotations
@@ -11,6 +13,19 @@ import re
 from ansible.errors import AnsibleFilterError
 
 HOST_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
+# Source ACLs and non-loopback listen addresses stay inside private space;
+# TEST-NET documentation ranges are public on real hosts.
+PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+
+
+def _is_private(address: object) -> bool:
+    return any(
+        address.version == network.version and address in network
+        for network in PRIVATE_NETWORKS
+    )
 
 
 def victoriametrics_ip(value: object) -> dict[str, object]:
@@ -37,42 +52,73 @@ def victoriametrics_ip(value: object) -> dict[str, object]:
         "address": address.compressed,
         "version": address.version,
         "loopback": address.is_loopback,
-        "private": address.is_private,
+        "private": _is_private(address),
     }
 
 
-def victoriametrics_sources_ok(listen: dict[str, object], sources: object) -> bool:
-    """True when the source ACL matches the listen address policy.
+def _networks(values: object) -> list[ipaddress._BaseNetwork]:
+    if not isinstance(values, list):
+        raise ValueError("not a list")
+    return [ipaddress.ip_network(str(value), strict=True) for value in values]
 
-    A non-loopback listen address requires an explicit non-empty list of exact
-    private /32 or /128 source CIDRs; loopback needs no ACL at all.
+
+def victoriametrics_acl_ok(
+    listen: dict[str, object],
+    port: object,
+    sources: object,
+    source_ports: object,
+    vpn_ports: object,
+    ssh_port: object,
+    firewall_enabled: object,
+) -> bool:
+    """True when the declared query API ACL matches the accepted base contract.
+
+    Loopback needs no ACL and forbids one. A non-loopback listen address must
+    be private (RFC 1918 / ULA), the base firewall must be enabled, the port
+    must not collide with SSH or VPN ports, and exactly one tcp
+    `base_firewall_source_ports` rule must carry exactly the declared sources
+    of the same address family.
     """
-    if listen["loopback"]:
-        return True
-    if not isinstance(sources, list) or not sources:
-        return False
     try:
-        networks = [ipaddress.ip_network(str(item), strict=True) for item in sources]
-    except (ValueError, TypeError):
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            return False
+        if port == ssh_port:
+            return False
+        if any(rule.get("port") == port for rule in vpn_ports or []):
+            return False
+        if listen["loopback"]:
+            # An ACL on a loopback listener would be misleading dead config.
+            return sources in ([], None)
+        if firewall_enabled not in (True, "true", "True", "yes"):
+            return False
+        if not listen["private"]:
+            return False
+        if not isinstance(sources, list) or not sources:
+            return False
+        networks = _networks(sources)
+        if len(set(networks)) != len(networks):
+            return False
+        for network in networks:
+            # A wider source ACL would silently broaden query API access.
+            if network.prefixlen not in (32, 128):
+                return False
+            if network.is_multicast or network.is_unspecified or network.is_loopback:
+                return False
+            if not _is_private(network.network_address):
+                return False
+            if network.version != listen["version"]:
+                return False
+        matches = [
+            rule for rule in source_ports or [] if rule.get("port") == port
+        ]
+        if len(matches) != 1 or matches[0].get("proto") != "tcp":
+            return False
+        declared = _networks(matches[0].get("source_cidrs"))
+        return sorted(str(network) for network in declared) == sorted(
+            str(network) for network in networks
+        )
+    except (ValueError, TypeError, AttributeError, KeyError):
         return False
-    if len(set(networks)) != len(networks):
-        return False
-    for network in networks:
-        # A wider source ACL would silently broaden query API access.
-        if network.prefixlen not in (32, 128):
-            return False
-        if network.is_multicast or network.is_unspecified or network.is_loopback:
-            return False
-        # TEST-NET documentation ranges are public on real hosts; require
-        # RFC 1918 / ULA private space (matching base-role source ports).
-        if not (
-            network.network_address in ipaddress.ip_network("10.0.0.0/8")
-            or network.network_address in ipaddress.ip_network("172.16.0.0/12")
-            or network.network_address in ipaddress.ip_network("192.168.0.0/16")
-            or network.network_address in ipaddress.ip_network("fc00::/7")
-        ):
-            return False
-    return True
 
 
 def victoriametrics_targets(nodes: object, port: object) -> list[str]:
@@ -135,7 +181,7 @@ class FilterModule:
     def filters(self) -> dict[str, object]:
         return {
             "victoriametrics_ip": victoriametrics_ip,
-            "victoriametrics_sources_ok": victoriametrics_sources_ok,
+            "victoriametrics_acl_ok": victoriametrics_acl_ok,
             "victoriametrics_targets": victoriametrics_targets,
             "victoriametrics_panel_target": victoriametrics_panel_target,
             "victoriametrics_duration_ok": victoriametrics_duration_ok,

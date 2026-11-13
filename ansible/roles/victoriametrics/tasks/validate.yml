@@ -5,14 +5,24 @@
   ansible.builtin.set_fact:
     victoriametrics_listen_ip: "{{ victoriametrics_listen_address | victoriametrics_ip }}"
 
-- name: Validate source ACL against the listen address
+- name: Validate the query API source ACL against the base-role contract
   ansible.builtin.assert:
     that:
-      - victoriametrics_listen_ip | victoriametrics_sources_ok(victoriametrics_allowed_sources)
+      - >-
+        victoriametrics_listen_ip | victoriametrics_acl_ok(
+          victoriametrics_listen_port,
+          victoriametrics_allowed_sources,
+          base_firewall_source_ports | default([]),
+          base_firewall_vpn_ports | default([]),
+          base_ssh_port | default(22),
+          base_firewall_enabled | default(false))
     fail_msg: >-
-      victoriametrics_allowed_sources must be a non-empty list of exact private
-      /32 and /128 source CIDRs when victoriametrics_listen_address is not a
-      loopback address; loopback listen addresses need no ACL.
+      A loopback listen address needs an empty victoriametrics_allowed_sources.
+      A non-loopback address is allowed only when: it is a private RFC 1918/ULA
+      address assigned to this host; base_firewall_enabled is true; the port
+      differs from the SSH and VPN ports; and exactly one
+      base_firewall_source_ports tcp rule for that port lists exactly the
+      declared sources of the same address family.
     quiet: true
 
 - name: Validate retention, scrape interval, limits and port
@@ -45,22 +55,21 @@
       - victoriametrics_panel_metrics is mapping
       - victoriametrics_panel_metrics.keys() | list | length == 0
         or victoriametrics_panel_metrics.keys() | list
-        | difference(['url', 'username', 'password', 'username_file', 'password_file'])
+        | difference(['url', 'username_file', 'password_file'])
         | length == 0
-      - victoriametrics_panel_metrics.password is not defined or victoriametrics_panel_metrics.password_file is not defined
-      - victoriametrics_panel_metrics.username is not defined or victoriametrics_panel_metrics.username_file is not defined
+      - (victoriametrics_panel_metrics.username_file is defined)
+        == (victoriametrics_panel_metrics.password_file is defined)
     fail_msg: >-
-      victoriametrics_panel_metrics accepts url, username, password, username_file
-      and password_file keys; exactly one of username/username_file and one of
-      password/password_file.
+      victoriametrics_panel_metrics accepts only url, username_file and
+      password_file; the two credential files are given together or not at all.
+      Literal secrets are refused: they must stay in files outside the role.
     quiet: true
 
 - name: Check the controller-side credential files, if any
-  when: >-
-    victoriametrics_panel_metrics.username_file is defined
-    or victoriametrics_panel_metrics.password_file is defined
+  when: victoriametrics_panel_metrics.username_file is defined
   vars:
     _repo_root: "{{ (role_path ~ '/../../..') | realpath }}"
+    _files: "{{ ['username_file', 'password_file'] | select('in', victoriametrics_panel_metrics) | list }}"
   block:
     - name: Stat the credential files on the controller
       ansible.builtin.stat:
@@ -88,13 +97,11 @@
         label: "credential file"
 
     - name: Load the panel username from the controller file
-      when: victoriametrics_panel_metrics.username_file is defined
       ansible.builtin.set_fact:
         _victoriametrics_panel_username: "{{ lookup('ansible.builtin.file', victoriametrics_panel_metrics.username_file | expanduser) }}"
       no_log: true
 
     - name: Load the panel password from the controller file
-      when: victoriametrics_panel_metrics.password_file is defined
       ansible.builtin.set_fact:
         _victoriametrics_panel_password: "{{ lookup('ansible.builtin.file', victoriametrics_panel_metrics.password_file | expanduser) }}"
       no_log: true

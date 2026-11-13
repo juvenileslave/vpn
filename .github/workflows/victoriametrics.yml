@@ -16,7 +16,7 @@ jobs:
   victoriametrics:
     name: victoriametrics role
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash
@@ -31,70 +31,153 @@ jobs:
         with:
           python-version: '3.13'
       - name: Установить закреплённый ansible-core
+        working-directory: .
         run: make -C ansible bootstrap
       - name: Unit-тесты фильтров роли
         run: ../.venv/bin/python -m unittest discover --start-directory roles/victoriametrics/tests --pattern 'test_*.py' --verbose
       - name: Проверить синтаксис playbook
         run: ../.venv/bin/ansible-playbook --syntax-check playbooks/victoriametrics.yml
       # GitHub-hosted runner — одноразовая VM с systemd: роль применяется
-      # только к нему, включая полный сервисный сценарий.
+      # только к нему, включая полный сервисный и сетевой сценарий.
       - name: Отклонить wildcard-адрес и не-ACL не-loopback до изменений
         run: |
-          PLAYBOOK="../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml"
-          if $PLAYBOOK -e victoriametrics_listen_address=0.0.0.0; then exit 1; fi
-          if $PLAYBOOK -e victoriametrics_listen_address=10.0.0.5; then exit 1; fi
-          if $PLAYBOOK -e victoriametrics_listen_address=10.0.0.5 -e victoriametrics_allowed_sources=['0.0.0.0/0']; then exit 1; fi
+          PLAYBOOK=(../.venv/bin/ansible-playbook -i localhost, -c local
+            -e victoriametrics_hosts=all playbooks/victoriametrics.yml)
+          if "${PLAYBOOK[@]}" -e victoriametrics_listen_address=0.0.0.0; then exit 1; fi
+          if "${PLAYBOOK[@]}" -e victoriametrics_listen_address=10.203.46.1 \
+              -e '{"victoriametrics_allowed_sources": ["10.203.46.2/32"]}'; then exit 1; fi
+          if "${PLAYBOOK[@]}" -e victoriametrics_listen_address=10.203.46.1 \
+              -e '{"victoriametrics_allowed_sources": ["0.0.0.0/0"]}'; then exit 1; fi
           test ! -e /opt/victoriametrics && test ! -e /var/lib/victoriametrics
       - name: Check mode на чистом runner
         run: |
-          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml --check
+          ../.venv/bin/ansible-playbook -i localhost, -c local -e victoriametrics_hosts=all \
+            playbooks/victoriametrics.yml --check
           test ! -e /opt/victoriametrics
           test ! -e /var/lib/victoriametrics
           test ! -e /etc/systemd/system/victoriametrics.service
           getent passwd victoriametrics && exit 1 || true
-      - name: Runtime-сценарий на одноразовом runner
+      - name: Установить принятый node_exporter и применить роль
         run: |
           set -euo pipefail
-          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml
-          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/victoriametrics.yml | tee "$RUNNER_TEMP/second.log"
+          ../.venv/bin/ansible-playbook -i localhost, -c local playbooks/node_exporter.yml
+          ../.venv/bin/ansible-playbook -i localhost, -c local -e victoriametrics_hosts=all \
+            -e '{"victoriametrics_scrape_nodes": ["localhost"]}' playbooks/victoriametrics.yml
+          ../.venv/bin/ansible-playbook -i localhost, -c local -e victoriametrics_hosts=all \
+            -e '{"victoriametrics_scrape_nodes": ["localhost"]}' playbooks/victoriametrics.yml \
+            | tee "$RUNNER_TEMP/second.log"
           grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$RUNNER_TEMP/second.log"
+      - name: Проверить версию, сервис, права, retention и метрики
+        run: |
+          set -euo pipefail
           curl --fail --silent --show-error http://127.0.0.1:8428/health | grep -q OK
-          # Self-scrape: собственные метрики VictoriaMetrics дают up=1.
-          curl --fail --silent --show-error -g 'http://127.0.0.1:8428/api/v1/query?query=up' \
-            | grep -q '"value":1'
           test "$(ss -Hltn 'sport = :8428' | wc -l)" -eq 1
           grep -q ' 127\.0\.0\.1:8428 ' <(ss -Hltn 'sport = :8428')
           systemctl is-active victoriametrics.service
-          test "$(systemctl show --property=MainPID --value victoriametrics.service)" != 0
-          test "$(ps -o user= -p "$(systemctl show --property=MainPID --value victoriametrics.service)")" = victoriametrics
+          pid="$(systemctl show --property=MainPID --value victoriametrics.service)"
+          test "$pid" != 0
+          test "$(ps -o user= -p "$pid")" = victoriametrics
           stat -c '%a %U' /var/lib/victoriametrics | grep -q '^750 victoriametrics$'
           test "$(stat -c '%a' /etc/victoriametrics/scrape.yml)" = 640
-          tr '\0' ' ' </proc/"$(systemctl show --property=MainPID --value victoriametrics.service)"/cmdline | grep -oE '\-retentionPeriod=30d'
-          tr '\0' ' ' </proc/"$(systemctl show --property=MainPID --value victoriametrics.service)"/cmdline | grep -oE '\-httpListenAddr=127\.0\.0\.1:8428'
+          tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q -- '-retentionPeriod=30d'
+          tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q -- '-httpListenAddr=127.0.0.1:8428'
+          systemctl show --property=MemoryMax --value victoriametrics.service | grep -qx 536870912
+          systemctl show --property=CPUQuotaPerSecUSec --value victoriametrics.service | grep -qx 500000
+          # node_exporter и self-scrape дают up=1; ждём первый интервал.
+          for _ in $(seq 1 45); do
+            if curl --fail --silent --show-error -g \
+                 'http://127.0.0.1:8428/api/v1/query?query=up%7Bjob%3D%22node_exporter%22%7D' \
+                 | grep -q '"value":1'; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error -g \
+            'http://127.0.0.1:8428/api/v1/query?query=up%7Bjob%3D%22node_exporter%22%7D' \
+            | grep -q '"value":1'
           # Персистентность: вставка, перезапуск сервиса, повторный запрос.
           curl --fail --silent --show-error -X POST http://127.0.0.1:8428/api/v1/import/prometheus \
             --data-binary 'vm_acceptance_probe{host="disposable"} 42'
           sleep 2
           sudo systemctl restart victoriametrics.service
-          sleep 3
-          for _ in $(seq 1 20); do
+          for _ in $(seq 1 30); do
             curl --fail --silent --show-error http://127.0.0.1:8428/health >/dev/null 2>&1 && break
             sleep 1
           done
-          curl --fail --silent --show-error -g 'http://127.0.0.1:8428/api/v1/query?query=vm_acceptance_probe' \
-            | grep -q '"value":42'
+          curl --fail --silent --show-error -g \
+            'http://127.0.0.1:8428/api/v1/query?query=vm_acceptance_probe' | grep -q '"value":42'
           # Слушатель по-прежнему только loopback.
           if ss -Hltn | grep -v 127.0.0.1 | grep -q 8428; then exit 1; fi
 
-      - name: Не-CP источник не достигает API (network namespace)
+      - name: Проверить source ACL на не-loopback адресе через роль base
         run: |
           set -euo pipefail
-          # Отдельный network namespace имеет собственный loopback; соединение
-          # к 127.0.0.1:8428 в нём не достигает слушателя хоста — это модель
-          # постороннего источника без маршрута к узлу VictoriaMetrics.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables iproute2
+          cleanup() {
+            sudo ip netns del vm-cp 2>/dev/null || true
+            sudo ip netns del vm-unrelated 2>/dev/null || true
+            sudo nft delete table inet vpn_base 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          # veth-пара, моделирующая CP-источник и посторонний источник.
+          sudo ip netns add vm-cp
           sudo ip netns add vm-unrelated
-          if sudo ip netns exec vm-unrelated python3 -c 'import socket; s=socket.socket(); s.settimeout(2); raise SystemExit(0 if s.connect_ex(("127.0.0.1", 8428)) == 0 else 1)'; then
-            echo "unrelated namespace reached the query API" >&2
+          sudo ip link add vm-cp0 type veth peer name vm-cp1
+          sudo ip link set vm-cp1 netns vm-cp
+          sudo ip addr add 10.203.46.1/30 dev vm-cp0
+          sudo ip link set vm-cp0 up
+          sudo ip netns exec vm-cp ip addr add 10.203.46.2/30 dev vm-cp1
+          sudo ip netns exec vm-cp ip link set vm-cp1 up
+          sudo ip netns exec vm-cp ip link set lo up
+          sudo ip link add vm-un0 type veth peer name vm-un1
+          sudo ip link set vm-un1 netns vm-unrelated
+          sudo ip addr add 10.203.47.1/30 dev vm-un0
+          sudo ip link set vm-un0 up
+          sudo ip netns exec vm-unrelated ip addr add 10.203.47.2/30 dev vm-un1
+          sudo ip netns exec vm-unrelated ip link set vm-un1 up
+          sudo ip netns exec vm-unrelated ip link set lo up
+          sleep 2
+          # Принятая политика base: только CP-источник на порт запросов.
+          cat > "$RUNNER_TEMP/base-firewall.yml" <<EOF
+          - name: Disposable base firewall policy
+            hosts: localhost
+            connection: local
+            gather_facts: false
+            tasks:
+              - name: Apply the accepted base firewall
+                ansible.builtin.include_role:
+                  name: $GITHUB_WORKSPACE/ansible/roles/base
+                  tasks_from: firewall.yml
+          EOF
+          ACL='{"base_firewall_enabled": true,
+            "base_firewall_vpn_ports": [],
+            "base_firewall_source_ports": [{"proto": "tcp", "port": 8428,
+              "source_cidrs": ["10.203.46.2/32"]}],
+            "base_ssh_port": 22, "base_ssh_trusted_cidrs": []}'
+          ../.venv/bin/ansible-playbook -i localhost, -c local \
+            -e "$ACL" "$RUNNER_TEMP/base-firewall.yml"
+          ../.venv/bin/ansible-playbook -i localhost, -c local -e victoriametrics_hosts=all \
+            -e '{"victoriametrics_scrape_nodes": ["localhost"]}' -e "$ACL" \
+            -e '{"victoriametrics_listen_address": "10.203.46.1",
+                 "victoriametrics_allowed_sources": ["10.203.46.2/32"]}' \
+            playbooks/victoriametrics.yml | tee "$RUNNER_TEMP/acl.log"
+          grep -Eq '^localhost +: ok=[0-9]+ +changed=[1-9][0-9]* +unreachable=0 +failed=0 ' "$RUNNER_TEMP/acl.log"
+          ../.venv/bin/ansible-playbook -i localhost, -c local -e victoriametrics_hosts=all \
+            -e '{"victoriametrics_scrape_nodes": ["localhost"]}' -e "$ACL" \
+            -e '{"victoriametrics_listen_address": "10.203.46.1",
+                 "victoriametrics_allowed_sources": ["10.203.46.2/32"]}' \
+            playbooks/victoriametrics.yml | tee "$RUNNER_TEMP/acl-second.log"
+          grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$RUNNER_TEMP/acl-second.log"
+          # Ровно один сокет на объявленном приватном адресе.
+          test "$(ss -Hltn 'sport = :8428' | wc -l)" -eq 1
+          grep -q ' 10\.203\.46\.1:8428 ' <(ss -Hltn 'sport = :8428')
+          # Объявленный CP-источник получает ответ.
+          sudo ip netns exec vm-cp curl --fail --silent --show-error --max-time 10 \
+            http://10.203.46.1:8428/health | grep -q OK
+          # Посторонний источник не достигает API.
+          if sudo ip netns exec vm-unrelated curl --silent --show-error --max-time 3 \
+               http://10.203.46.1:8428/health; then
+            echo "unrelated source reached the query API" >&2
             exit 1
           fi
-          sudo ip netns del vm-unrelated

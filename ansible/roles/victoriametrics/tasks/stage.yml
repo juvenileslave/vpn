@@ -1,7 +1,7 @@
 ---
 # Render the candidate scrape configuration and validate it with the pinned
-# binary (or the installed one) before any host change. The scratch files carry
-# key material only transiently and are removed in the always block.
+# binary (or the installed one) before any host change. The scratch directory
+# holds only non-secret rendering output and is removed in the always block.
 
 - name: Read the installed binary version, if any
   ansible.builtin.command:
@@ -28,32 +28,11 @@
 
 - name: Render and dry-run the candidate scrape configuration
   block:
-    - name: Write the candidate panel credentials into the scratch directory
-      ansible.builtin.copy:
-        content: "{{ item.content }}"
-        dest: "{{ _victoriametrics_scratch.path }}/{{ item.name }}"
-        mode: "0600"
-      loop:
-        - name: panel-metrics-username
-          content: "{{ _victoriametrics_panel_username | default(victoriametrics_panel_metrics.username | default('')) }}"
-        - name: panel-metrics-password
-          content: "{{ _victoriametrics_panel_password | default(victoriametrics_panel_metrics.password | default('')) }}"
-      loop_control:
-        label: "candidate credential {{ item.name }}"
-      when:
-        - victoriametrics_panel_metrics.username_file is defined or victoriametrics_panel_metrics.username is defined
-          or victoriametrics_panel_metrics.password_file is defined or victoriametrics_panel_metrics.password is defined
-        - item.content | length > 0
-      no_log: true
-      diff: false
-      check_mode: false
-      changed_when: false
-
     - name: Render the candidate scrape configuration
       ansible.builtin.template:
         src: scrape.yml.j2
         dest: "{{ _victoriametrics_scratch.path }}/scrape.yml"
-        mode: "0600"
+        mode: "0640"
       check_mode: false
       changed_when: false
       diff: false
@@ -65,7 +44,7 @@
         checksum: sha256:{{ victoriametrics_checksums[victoriametrics_arch].archive }}
         mode: "0600"
         timeout: 120
-      when: _victoriametrics_need_binary
+      when: _victoriametrics_need_binary | bool and not ansible_check_mode
       check_mode: false
       changed_when: false
 
@@ -75,28 +54,29 @@
         dest: "{{ _victoriametrics_scratch.path }}"
         remote_src: true
         mode: "0700"
-      when: _victoriametrics_need_binary
+      when: _victoriametrics_need_binary | bool and not ansible_check_mode
       check_mode: false
       changed_when: false
 
+    # On a fresh host in check mode the binary is not downloaded, so the dry
+    # run is deferred to the real run; on an existing host it still validates
+    # the pending configuration without touching the service.
     - name: Dry-run the candidate scrape configuration
       ansible.builtin.command:
         argv:
-          - "{{ (_victoriametrics_scratch.path ~ '/victoria-metrics-prod') if _victoriametrics_need_binary else victoriametrics_binary }}"
-          - "-storageDataPath={{ _victoriametrics_scratch.path }}/data"
-          - "-httpListenAddr=127.0.0.1:0"
+          - "{{ (_victoriametrics_scratch.path ~ '/victoria-metrics-prod') if _victoriametrics_need_binary | bool else victoriametrics_binary }}"
           - "-promscrape.config={{ _victoriametrics_scratch.path }}/scrape.yml"
           - -promscrape.config.dryRun
       environment:
         GOMAXPROCS: "1"
       changed_when: false
       check_mode: false
+      when: not ansible_check_mode or not (_victoriametrics_need_binary | bool)
   always:
-    - name: Remove the scratch directory with candidate credentials
+    - name: Remove the scratch directory
       ansible.builtin.file:
         path: "{{ _victoriametrics_scratch.path }}"
         state: absent
       when: _victoriametrics_scratch.path is defined
       check_mode: false
       changed_when: false
-      no_log: true

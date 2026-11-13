@@ -1,7 +1,6 @@
 # Managed by the Ansible role victoriametrics; manual edits are overwritten.
-# Panel credentials never appear in this file: the config references files
-# written from controller-side secrets, and the dry run runs against copies
-# in a scratch directory removed after validation.
+# No secret values are rendered here: panel credentials are read by
+# VictoriaMetrics from the 0640 files referenced below.
 global:
   scrape_interval: {{ victoriametrics_scrape_interval }}
   scrape_timeout: {{ victoriametrics_scrape_interval }}
@@ -34,18 +33,9 @@ scrape_configs:
     static_configs:
       - targets:
           - {{ panel.hostport }}
-{% if victoriametrics_panel_metrics.username is defined or victoriametrics_panel_metrics.username_file is defined
-   or victoriametrics_panel_metrics.password is defined or victoriametrics_panel_metrics.password_file is defined %}
+{% if victoriametrics_panel_metrics.username_file is defined %}
     basic_auth:
-{% if victoriametrics_panel_metrics.username is defined %}
-      username: {{ victoriametrics_panel_metrics.username }}
-{% elif victoriametrics_panel_metrics.username_file is defined %}
       username_file: {{ victoriametrics_config_dir }}/panel-metrics-username
-{% endif %}
-{% if victoriametrics_panel_metrics.password is defined %}
-      password: {{ victoriametrics_panel_metrics.password }}
-{% elif victoriametrics_panel_metrics.password_file is defined %}
       password_file: {{ victoriametrics_config_dir }}/panel-metrics-password
-{% endif %}
 {% endif %}
 {% endif %}
