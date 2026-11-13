@@ -41,6 +41,8 @@ class NodeInputTests(unittest.TestCase):
                 self.assertFalse(self.allowed(sources))
 
     def test_strict_port_type_and_conflict(self):
+        inventory_integer = type('InventoryInteger', (int,), {})
+        self.assertTrue(self.allowed(port=inventory_integer(2222)))
         for port in [True, '2222', 0, 65536, 22]:
             self.assertFalse(self.allowed(port=port))
         self.assertFalse(self.allowed(public=[{'proto': 'tcp', 'port': 2222}]))

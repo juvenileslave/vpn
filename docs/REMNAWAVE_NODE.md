@@ -77,6 +77,10 @@ namespace. В исходниках Node нет переменной bind address
 5. Явный management source входит в `node_port_allow`; source и destination
    одной IP-family. `cp_placement` поддерживает `exit` и `dedicated`.
 
+Числовые переменные ansible-core сохраняют integer semantics, включая native
+tagged integer subclasses при разборе inventory. Они принимаются как целые;
+boolean и строки вроде `"2222"` по-прежнему отвергаются.
+
 Firewall создаёт только роль base. Node не добавляет собственные правила, не
 перезагружает Docker и не меняет forwarding/output, чужие tables, сети, volumes
 или containers. Base всегда разрешает интерфейс `lo`; локальные health probes

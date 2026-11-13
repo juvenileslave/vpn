@@ -4,7 +4,7 @@ import ipaddress
 
 def acl_valid(sources, rules, port, public, ssh, placement, source, address):
     try:
-        if type(port) is not int or not 1 <= port <= 65535 or port == ssh:
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535 or port == ssh:
             return False
         if not isinstance(sources, list) or not sources:
             return False
