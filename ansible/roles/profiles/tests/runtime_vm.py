@@ -420,7 +420,11 @@ class Lab:
         self.node_inputs[kind] = {"secret": secret, "credentials": credentials, "port": 2222, "config": {}}
         host = self.topology[kind]
         variables = {**host, "cp_placement": "exit", "remnawave_node_dir": directory, "remnawave_node_secret_key_file": str(pki / "secret"), "remnawave_node_management_credentials_file": str(pki / "credentials.json"), "remnawave_node_management_address": "127.0.0.1", "remnawave_node_management_source": "127.0.0.1", "remnawave_node_management_delegate": kind, "remnawave_node_timeout": 120}
-        self.play(["remnawave_node"], kind=kind, variables=variables)
+        try:
+            self.play(["remnawave_node"], kind=kind, variables=variables)
+        except AssertionError:
+            self.node_diagnostics(kind)
+            raise
         env = self.relay_env if kind == "relay" else None
         command(["docker", "cp", self.assets / "geoip.dat", "vpn-remnanode:/usr/local/share/xray/geoip.dat"], env=env)
         inspect = json.loads(command(["docker", "inspect", "vpn-remnanode"], env=env))[0]
@@ -429,6 +433,49 @@ class Lab:
             raise AssertionError("Node does not share the actual origin network namespace")
         self.evidence["scenarios"][kind + "_node"] = {"network_mode": inspect["HostConfig"]["NetworkMode"], "actual_namespace_matches_origin": True}
         return variables
+
+    def node_diagnostics(self, kind):
+        env = self.relay_env if kind == "relay" else None
+        facts = {}
+
+        def result(args, **kwargs):
+            return subprocess.run([str(x) for x in args], capture_output=True, env=kwargs.get("env"), timeout=30, check=False)
+
+        state = subprocess.run(["cat", "/opt/" + self.prefix + "-" + kind + "/state.json"], capture_output=True, timeout=10, check=False)
+        if state.returncode == 0:
+            try:
+                value = json.loads(state.stdout)
+                facts["state"] = {key: value.get(key) is not None for key in ("checked", "previous", "pending")}
+                facts["restoration_stopped"] = bool((value.get("restoration") or {}).get("stopped"))
+            except json.JSONDecodeError:
+                facts["state"] = "unparseable"
+        inspect = result(["docker", "inspect", "vpn-remnanode"], env=env)
+        if inspect.returncode == 0:
+            data = json.loads(inspect.stdout)[0]
+            state = data.get("State", {})
+            facts["container"] = {key: state.get(key) for key in ("Status", "Running", "ExitCode", "Error", "OOMKilled")}
+            facts["health_output"] = [str(entry.get("Output", ""))[-300:] for entry in state.get("Health", {}).get("Log", [])[-2:]]
+            facts["mounts"] = [str(mount.get("Source")) + ":" + str(mount.get("RW")) for mount in data.get("Mounts", [])]
+        else:
+            facts["container"] = "absent"
+            facts["inspect_error"] = inspect.stderr.decode(errors="replace")[-300:]
+        if kind == "relay":
+            log = (self.work / "relay-docker.private.log")
+            if log.exists():
+                lines = log.read_text(errors="replace").splitlines()
+                facts["daemon_errors"] = [line[-400:] for line in lines if "level=error" in line][-6:]
+                facts["daemon_warnings"] = [line[-300:] for line in lines if "level=warning" in line][-4:]
+        listeners = result((["ip", "netns", "exec", self.ns(kind)] if self.ns(kind) else []) + ["ss", "-H", "-ltn"])
+        facts["listeners"] = [line.split()[3] for line in listeners.stdout.decode(errors="replace").splitlines() if len(line.split()) > 3]
+        acl = result((["ip", "netns", "exec", self.ns(kind)] if self.ns(kind) else []) + ["nft", "-j", "list", "table", "inet", "vpn_base"])
+        if acl.returncode == 0:
+            rules = json.loads(acl.stdout).get("nftables", [])
+            facts["active_acl"] = {"present": True, "elements": len(rules)}
+        else:
+            facts["active_acl"] = {"present": False}
+        releases = Path("/opt/" + self.prefix + "-" + kind + "/releases")
+        facts["release_count"] = len(list(releases.iterdir())) if releases.is_dir() else 0
+        self.evidence["public_node_diagnostics"] = facts
 
     def api_start(self, kind, configuration):
         obj = {**self.node_inputs[kind], "config": configuration}
