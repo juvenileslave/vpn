@@ -1,0 +1,15 @@
+---
+# reality_sni is the shared, required hostname authority.
+cover_tls_port: 9443
+cover_site_source: ""
+cover_acme_email: ""
+cover_acme_agree_tos: false
+# Explicit operator acknowledgement: public DNS and TCP/80 reach this host.
+cover_acme_http_reachable: false
+cover_acme_directory: https://acme-v02.api.letsencrypt.org/directory
+cover_nginx_version: "1.24.0"
+cover_certificate_min_lifetime: 86400
+# These inputs are rejected outside an explicitly guarded disposable CI guest.
+cover_disposable_test: false
+cover_acme_test_ca: ""
+cover_certificate_trust: /etc/ssl/certs/ca-certificates.crt

@@ -1,0 +1,14 @@
+# Managed by cover_site
+[Unit]
+Description=Renew the private cover-site ACME certificate
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/cover-site/lifecycle.py renew
+UMask=0077
+PrivateTmp=true
+{% if cover_disposable_test %}
+Environment=VPN_COVER_SITE_DISPOSABLE_GUEST=yes GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted
+{% endif %}

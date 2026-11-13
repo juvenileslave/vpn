@@ -1,0 +1,11 @@
+{{ {
+  'hostname': reality_sni,
+  'port': cover_tls_port,
+  'email': cover_acme_email,
+  'directory': cover_acme_directory,
+  'nginx_version': cover_nginx_version,
+  'min_lifetime': cover_certificate_min_lifetime,
+  'test': cover_disposable_test,
+  'acme_ca': cover_acme_test_ca,
+  'trust': cover_certificate_trust
+} | to_nice_json }}
