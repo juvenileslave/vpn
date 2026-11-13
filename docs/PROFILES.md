@@ -168,6 +168,14 @@ namespace через `nsenter --net`, не `ip netns exec`, чтобы сохр�
 реального cgroup mount. Driver сравнивает inode net namespace dockerd/containerd
 с relay и требует отличия от exit до запуска Node.
 
+Pinned Node image попадает в приватный daemon одним `docker pull` через
+loopback CONNECT-прокси в exit namespace **до** сценария: классический Docker
+image store не сохраняет repo digest после `docker save`/`load`, а compose с
+digest-pinned reference иначе пытался бы скачать образ без маршрута. После
+pull прокси останавливается, relay по-прежнему без default route; драйвер
+проверяет и публикует отсутствие default routes и точное разрешение pinned
+reference.
+
 Cover выдаётся настоящим Certbot HTTP-01 через pinned local Pebble, без
 challenge bypass; relay запускает тот же role-generated origin snapshot в
 своём host network. Проверяются chain/SAN/expiry, H2, actual namespaces,

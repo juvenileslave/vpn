@@ -11,6 +11,7 @@ import os
 import re
 from pathlib import Path
 import secrets
+import select
 import shutil
 import socket
 import ssl
@@ -52,6 +53,59 @@ def runtime_contracts():
             raise PrerequisiteError("required accepted PR " + pr + ": " + str(path.relative_to(ROOT)))
     LIFE = imported("node_life", NODE / "files/lifecycle.py")
     PKI = imported("node_fixture", NODE / "tests/runtime_vm.py")
+
+
+def proxy_pump(left, right):
+    peers = [left, right]
+    while True:
+        readable, _, _ = select.select(peers, [], [], 30)
+        if not readable:
+            return
+        for source in readable:
+            try:
+                data = source.recv(65536)
+            except OSError:
+                return
+            if not data:
+                return
+            try:
+                (right if source is left else left).sendall(data)
+            except OSError:
+                return
+
+
+def proxy_session(client):
+    with client:
+        try:
+            request = bytearray()
+            while b"\r\n\r\n" not in request:
+                part = client.recv(4096)
+                if not part or len(request) > 65536:
+                    return
+                request.extend(part)
+            head, _, pending = bytes(request).partition(b"\r\n\r\n")
+            method, target, _ = head.split(b"\r\n", 1)[0].decode("latin1").split(" ", 2)
+            if method != "CONNECT":
+                client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                return
+            host, _, port = target.rpartition(":")
+            with socket.create_connection((host.strip("[]"), int(port)), timeout=30) as upstream:
+                client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                if pending:
+                    upstream.sendall(pending)
+                proxy_pump(client, upstream)
+        except (OSError, ValueError):
+            return
+
+
+def connect_proxy(address, port):
+    with socket.socket() as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((address, port))
+        server.listen(32)
+        while True:
+            client, _peer = server.accept()
+            threading.Thread(target=proxy_session, args=(client,), daemon=True).start()
 
 
 def command(args, *, expected=True, env=None, timeout=600, combined=False):
@@ -289,10 +343,6 @@ class Lab:
             raise AssertionError("fresh guest required; refusing an existing Node container")
         self.stage = "verified-embedded-core-extraction"
         command(["docker", "pull", "--quiet", bundle.NODE_IMAGE])
-        # Saving by digest writes no repo tag; compose would then attempt an
-        # offline pull inside the isolated relay namespace. Pin the tag first.
-        command(["docker", "tag", bundle.NODE_IMAGE, "ghcr.io/remnawave/node:3.4.5"])
-        command(["docker", "save", "-o", self.work / "node-image.tar", "ghcr.io/remnawave/node:3.4.5"])
         extract = self.prefix + "-extract"
         command(["docker", "create", "--name", extract, "--network=none", "--entrypoint=sleep", bundle.NODE_IMAGE, "3600"])
         self.extract = extract
@@ -347,8 +397,19 @@ class Lab:
             self.evidence["public_containerd_startup_error"] = (self.work / "relay-containerd.private.log").read_text(errors="replace")
             raise AssertionError("private relay containerd did not become ready")
         private_json(data / "daemon.json", {})
+        self.stage = "isolated-relay-image-proxy"
+        self.proxy = self.spawn("exit", [ROOT / ".venv/bin/python", __file__, "connect-proxy", "192.0.2.10", "3128"], "relay-image-proxy")
+        for _ in range(60):
+            if self.proxy.poll() is not None:
+                raise AssertionError("loopback image proxy exited before readiness")
+            if self.run("relay", [ROOT / ".venv/bin/python", __file__, "tcp", "192.0.2.10", "3128"]).strip() == b"open":
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("loopback image proxy not ready")
+        proxy_env = {**os.environ, "HTTPS_PROXY": "http://192.0.2.10:3128", "HTTP_PROXY": "http://192.0.2.10:3128", "NO_PROXY": "localhost,127.0.0.1,::1"}
         self.stage = "isolated-relay-docker-daemon"
-        daemon = self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--containerd", containerd_socket, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker", network_only=True)
+        daemon = self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--containerd", containerd_socket, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker", env=proxy_env, network_only=True)
         for _ in range(90):
             if daemon.poll() is not None:
                 # No Node/container PKI has been loaded into this daemon yet.
@@ -366,17 +427,18 @@ class Lab:
         assert Path("/proc/" + str(daemon.pid) + "/ns/net").stat().st_ino == namespace, "dockerd is outside relay host-network namespace"
         assert Path("/proc/self/ns/net").stat().st_ino != namespace, "relay runtime shares exit network namespace"
         self.evidence["relay_runtime_isolation"] = {"private_containerd": True, "daemon_and_containerd_same_relay_netns": True, "distinct_from_exit": True}
-        self.stage = "isolated-relay-image-load"
-        load = subprocess.run(["docker", "load", "-i", str(self.work / "node-image.tar")], env=self.relay_env, capture_output=True, timeout=600, check=False)
-        if load.returncode != 0:
-            self.evidence["public_relay_image_load_error"] = load.stderr.decode(errors="replace")[-500:]
-            raise AssertionError("relay daemon rejected the offline Node image")
+        self.stage = "isolated-relay-image-pull"
+        command(["docker", "pull", "--quiet", bundle.NODE_IMAGE], env=self.relay_env, timeout=900)
         loaded = subprocess.run(["docker", "image", "inspect", bundle.NODE_IMAGE], env=self.relay_env, capture_output=True, check=False)
         if loaded.returncode != 0:
-            tags = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], env=self.relay_env, capture_output=True, timeout=60, check=False)
-            self.evidence["public_relay_image_references"] = sorted(tags.stdout.decode(errors="replace").split())
             self.evidence["public_relay_image_inspect_error"] = loaded.stderr.decode(errors="replace")[-300:]
-            raise AssertionError("relay daemon cannot resolve the pinned Node image offline")
+            raise AssertionError("relay daemon cannot resolve the pinned Node image")
+        self.proxy.terminate()
+        self.proxy.wait(timeout=10)
+        routes = self.run("relay", ["ip", "route", "show", "default"]).strip() + self.run("relay", ["ip", "-6", "route", "show", "default"]).strip()
+        if routes:
+            raise AssertionError("relay retains a default route after image staging")
+        self.evidence["relay_image_staging"] = {"transport": "loopback CONNECT proxy during setup", "proxy_stopped": True, "pinned_reference_resolves": True, "relay_default_routes": False}
 
     def cover(self):
         site = self.work / "site"
@@ -970,6 +1032,8 @@ def child():
                 conn, _peer = server.accept()
                 with conn:
                     conn.sendall(b"private-exporter-canary\n")
+    elif mode == "connect-proxy":
+        connect_proxy(sys.argv[2], int(sys.argv[3]))
     elif mode == "ssh-banner":
         with socket.create_connection((sys.argv[2], 22), timeout=5) as sock:
             sock.settimeout(5)
