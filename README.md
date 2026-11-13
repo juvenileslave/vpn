@@ -18,6 +18,8 @@
   способы проверки.
 - [Ansible: контракт inventory](docs/ANSIBLE.md) — синтетическая топология и её
   проверка (`make -C ansible validate`); развёртывание не реализовано.
+- [Source ACL в роли base](docs/BASE_ROLE.md) — публичные и source-restricted
+  порты, SSH/IPv6 и транзакционная собственная таблица nftables.
 - [Приватный TLS cover-site](docs/COVER_SITE.md) — nginx на host-loopback,
   операторский контент и Certbot; не публичный альтернативный backend.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
@@ -60,7 +62,7 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
 
-Runtime-сценарий [cover-site](.github/workflows/cover-site.yml) запускается только на
+Runtime-сценарии [base](.github/workflows/base.yml) и [cover-site](.github/workflows/cover-site.yml) запускаются только на
 одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
 компонента, фактические результаты — в его PR. Production-rollout и российский
 пилот этим не выполняются.

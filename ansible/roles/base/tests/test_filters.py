@@ -44,6 +44,7 @@ def valid_config(**overrides) -> dict:
         "base_ssh_trusted_cidrs": [],
         "base_firewall_enabled": False,
         "base_firewall_vpn_ports": [],
+        "base_firewall_source_ports": [],
         "base_firewall_allow_icmp_echo": True,
         "base_firewall_allow_dhcpv6_client": True,
         "base_firewall_acknowledged_closed_ports": [],
@@ -129,6 +130,15 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(vpn_base.uncovered_listeners(ss, 22, ports, ["tcp/2053", "udp/51820"],
                                                       allow_dhcpv6_client=False), ["udp/546"])
 
+    def test_restricted_listeners_are_managed_without_public_exposure(self):
+        ss = "tcp LISTEN 0 4096 [::]:8443 [::]:*\nudp UNCONN 0 0 *:8444 *:*"
+        restricted = [
+            {"proto": "tcp", "port": 8443, "source_cidrs": ["192.0.2.2/32"]},
+            {"proto": "udp", "port": 8444, "source_cidrs": ["2001:db8::2/128"]},
+        ]
+        self.assertEqual(vpn_base.uncovered_listeners(ss, 22, [], [],
+                                                    source_ports=restricted), [])
+
     def test_sshd_effective(self):
         parsed = vpn_base.sshd_effective("port 22\nport 2222\nPasswordAuthentication no\n")
         self.assertEqual(parsed["port"], ["22", "2222"])
@@ -136,9 +146,6 @@ class NetworkTest(unittest.TestCase):
 
 
 class InputTest(unittest.TestCase):
-    def test_defaults_are_valid(self):
-        self.assertEqual(vpn_base.input_errors(valid_config()), [])
-
     def test_enabled_configuration_is_valid(self):
         config = valid_config(
             base_ssh_enabled=True,
@@ -149,6 +156,70 @@ class InputTest(unittest.TestCase):
             base_firewall_acknowledged_closed_ports=["tcp/8080"],
         )
         self.assertEqual(vpn_base.input_errors(config), [])
+
+    def test_source_ports_allow_safe_management_subnets_and_separate_protocols(self):
+        config = valid_config(base_firewall_source_ports=[
+            {"proto": "tcp", "port": 8443,
+             "source_cidrs": ["192.0.2.0/24", "2001:db8::/48"]},
+            {"proto": "udp", "port": 22, "source_cidrs": ["198.51.100.2/32"]},
+        ], base_firewall_vpn_ports=[{"proto": "udp", "port": 8443}])
+        self.assertEqual(vpn_base.input_errors(config), [])
+
+    def test_colocated_loopback_is_only_a_source_acl_exception(self):
+        for cidr in ("127.0.0.1/32", "::1/128"):
+            self.assertIsNone(vpn_base.source_cidr_error(cidr))
+            self.assertIsNotNone(vpn_base.cidr_error(cidr))
+        self.assertEqual(vpn_base.input_errors(valid_config(base_firewall_source_ports=[
+            {"proto": "tcp", "port": 2222, "source_cidrs": ["127.0.0.1/32", "::1/128"]}
+        ])), [])
+
+    def test_restricted_dhcpv6_conflict_is_rejected_for_each_declared_family(self):
+        for sources in (["198.51.100.77/32"], ["2001:db8:100::77/128"],
+                        ["198.51.100.77/32", "2001:db8:100::77/128"]):
+            for enabled in (False, True):
+                with self.subTest(sources=sources, firewall_enabled=enabled):
+                    config = valid_config(
+                        base_firewall_enabled=enabled,
+                        base_ssh_trusted_cidrs=["192.0.2.0/24"],
+                        base_firewall_allow_dhcpv6_client=True,
+                        base_firewall_source_ports=[
+                            {"proto": "udp", "port": 546, "source_cidrs": sources}])
+                    errors = vpn_base.input_errors(config)
+                    self.assertTrue(any("base_firewall_source_ports[0]" in error
+                                        and "base_firewall_allow_dhcpv6_client" in error
+                                        for error in errors))
+                    self.assertFalse(any(source in error for source in sources for error in errors))
+                    config["base_firewall_allow_dhcpv6_client"] = False
+                    self.assertEqual(vpn_base.input_errors(config), [])
+                    config["base_firewall_allow_dhcpv6_client"] = True
+                    config["base_firewall_source_ports"][0]["proto"] = "tcp"
+                    self.assertEqual(vpn_base.input_errors(config), [])
+
+    def test_source_port_rejections_do_not_echo_sources(self):
+        source = "198.51.100.77/32"
+        valid = {"proto": "tcp", "port": 8443, "source_cidrs": [source]}
+        cases = [None, {}, "8443", [None], [dict(valid, unknown=True)],
+                 [dict(valid, proto=True)], [dict(valid, proto=[])],
+                 [dict(valid, port=True)], [dict(valid, port="8443")],
+                 [dict(valid, port=0)], [dict(valid, port=65536)],
+                 [dict(valid, port=22)], [valid, valid],
+                 [dict(valid, source_cidrs=[])], [dict(valid, source_cidrs=source)],
+                 [dict(valid, source_cidrs=[source, source])]]
+        for bad_cidr in (None, True, 123, "invalid", "0.0.0.0/0", "::/0",
+                         "10.0.0.0/7", "2001:db8::/31", "192.0.2.1/24",
+                         "127.0.0.0/8", "127.0.0.2/32", "::/127", "224.0.0.0/8",
+                         "::ffff:192.0.2.2/128"):
+            cases.append([dict(valid, source_cidrs=[bad_cidr])])
+        for index, entries in enumerate(cases):
+            with self.subTest(index=index):
+                errors = vpn_base.input_errors(valid_config(base_firewall_source_ports=entries))
+                self.assertTrue(errors)
+                self.assertTrue(any("base_firewall_source_ports" in error for error in errors))
+                self.assertFalse(any(source in error for error in errors))
+        errors = vpn_base.input_errors(valid_config(
+            base_firewall_source_ports=[valid],
+            base_firewall_vpn_ports=[{"proto": "tcp", "port": 8443}]))
+        self.assertTrue(any("конфликт" in error for error in errors))
 
     def test_rejections(self):
         key = ed25519_key()
