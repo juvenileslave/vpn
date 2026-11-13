@@ -182,17 +182,23 @@ challenge bypass; relay запускает тот же role-generated origin sna
 visitor TLS1.2/1.3 + H1/H2, actual origin baseline для unknown/missing SNI,
 Host/path, разрешённый direct/relay tunnel, source ACL v4/v6 и закрытые API/origin.
 
-Сеть — synthetic bridge/netns без default routes. Только в fixture подставляется
-**конкретный geoip.dat**: документационные test endpoints исключены из PRIVATE,
+Сеть — synthetic bridge/netns без default routes. В fixture подставляется
+**конкретный geoip.dat**: документационные test endpoints исключены из PRIVATE.
+Дополнительное встроенное private-IP правило stock Xray применяется после VLESS
+независимо от geodata; для синтетического sink одноразовая effective-конфигурация
+добавляет `allow` только к `egress-0`, TCP `192.0.2.100/32:18080-18081`.
 RFC1918/ULA/link-local/loopback остаются blocked. Production routing/finalRules
 не ослабляются; geodata/core SHA256 записываются. Это предел fixture, а не
 доказательство всех stock reserved-IP правил production. Core не заменяется.
 
 Для наблюдений driver добавляет **только в одноразовую effective-конфигурацию**
-`log.access: /dev/stdout`. Immutable `exit.json`/`relay.json`, production logging,
-routing и `finalRules` не меняются. Receipt содержит исходный file SHA256,
-canonical effective-config SHA256 и точное описание overlay для каждого
-bundle/node; instrumented config отдельно проходит настоящий `xray -test`.
+`log.access: /dev/stdout` и указанное точечное разрешение sink. Immutable
+`exit.json`/`relay.json` и production-конфигурация не меняются. Receipt содержит
+исходный file SHA256, canonical effective-config SHA256 и точное описание обеих
+дельт для каждого bundle/node; effective config отдельно проходит настоящий
+`xray -test`. Проверка private-IP denial остаётся отдельным runtime gate.
+Перед deny-проверкой driver подтверждает TCP-доступность RFC1918 sink из exit,
+чтобы недоступная тестовая цель не могла дать ложный положительный результат.
 Route gate связывает один случайный flow ID с измеренными sink bytes/SHA256,
 реальными access observations `[inbound → outbound]` к application port 18080
 на обоих stock cores и уникальными TCP payload sequence bytes того же

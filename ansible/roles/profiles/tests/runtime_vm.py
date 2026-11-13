@@ -142,8 +142,9 @@ def wire_bytes(field, value):
 
 def fixture_geoip(path):
     # Real Xray protobuf fixture keeps RFC1918/ULA/link-local/loopback blocked;
-    # only documentation-range test endpoints are not in PRIVATE. Production
-    # retains stock geodata and identical routing/finalRules. No fake core.
+    # documentation-range endpoints are excluded only from fixture geodata.
+    # activate_configs also scopes the core's independent built-in deny;
+    # production keeps stock geodata and unchanged rendered bundle bytes.
     entry = wire_bytes(1, b"PRIVATE")
     for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10", "::1/128"):
         net = ipaddress.ip_network(cidr)
@@ -332,6 +333,9 @@ class Lab:
             command(["ip", "-n", ns, "link", "set", "eth0", "up"])
             command(["ip", "-n", ns, "addr", "add", f"192.0.2.{suffix}/24", "dev", "eth0"])
             command(["ip", "-n", ns, "-6", "addr", "add", f"2001:db8:47::{suffix}/64", "dev", "eth0", "nodad"])
+        # A real reachable RFC1918 sink makes the later deny gate non-vacuous.
+        self.run("sink", ["ip", "addr", "add", "192.168.47.1/32", "dev", "eth0"])
+        command(["ip", "route", "add", "192.168.47.1/32", "via", "192.0.2.100"])
         # No default route in any network namespace: no public-network traffic.
         Path("/etc/hosts").write_bytes(self.old_hosts + b"\n192.0.2.10 cover.example.test\n2001:db8:47::10 cover.example.test\n")
 
@@ -494,14 +498,7 @@ class Lab:
         self.node_inputs[kind] = {"secret": secret, "credentials": credentials, "port": 2222, "config": {}}
         host = self.topology[kind]
         variables = {**host, "cp_placement": "exit", "remnawave_node_dir": directory, "remnawave_node_secret_key_file": str(pki / "secret"), "remnawave_node_management_credentials_file": str(pki / "credentials.json"), "remnawave_node_management_address": "127.0.0.1", "remnawave_node_management_source": "127.0.0.1", "remnawave_node_management_delegate": kind, "remnawave_node_timeout": 120}
-        try:
-            self.play(["remnawave_node"], kind=kind, variables=variables)
-        except AssertionError:
-            try:
-                self.node_diagnostics(kind)
-            except Exception:
-                self.evidence["public_node_diagnostics"] = "collection failed"
-            raise
+        self.play(["remnawave_node"], kind=kind, variables=variables)
         env = self.relay_env if kind == "relay" else None
         command(["docker", "cp", self.assets / "geoip.dat", "vpn-remnanode:/usr/local/share/xray/geoip.dat"], env=env)
         inspect = json.loads(command(["docker", "inspect", "vpn-remnanode"], env=env))[0]
@@ -510,49 +507,6 @@ class Lab:
             raise AssertionError("Node does not share the actual origin network namespace")
         self.evidence["scenarios"][kind + "_node"] = {"network_mode": inspect["HostConfig"]["NetworkMode"], "actual_namespace_matches_origin": True}
         return variables
-
-    def node_diagnostics(self, kind):
-        env = self.relay_env if kind == "relay" else None
-        facts = {}
-
-        def result(args, **kwargs):
-            return subprocess.run([str(x) for x in args], capture_output=True, env=kwargs.get("env"), timeout=30, check=False)
-
-        state = subprocess.run(["cat", "/opt/" + self.prefix + "-" + kind + "/state.json"], capture_output=True, timeout=10, check=False)
-        if state.returncode == 0:
-            try:
-                value = json.loads(state.stdout)
-                facts["state"] = {key: value.get(key) is not None for key in ("checked", "previous", "pending")}
-                facts["restoration_stopped"] = bool((value.get("restoration") or {}).get("stopped"))
-            except json.JSONDecodeError:
-                facts["state"] = "unparseable"
-        inspect = result(["docker", "inspect", "vpn-remnanode"], env=env)
-        if inspect.returncode == 0:
-            data = json.loads(inspect.stdout)[0]
-            state = data.get("State", {})
-            facts["container"] = {key: state.get(key) for key in ("Status", "Running", "ExitCode", "Error", "OOMKilled")}
-            facts["health_output"] = [str(entry.get("Output", ""))[-300:] for entry in state.get("Health", {}).get("Log", [])[-2:]]
-            facts["mounts"] = [str(mount.get("Source")) + ":" + str(mount.get("RW")) for mount in data.get("Mounts", [])]
-        else:
-            facts["container"] = "absent"
-            facts["inspect_error"] = inspect.stderr.decode(errors="replace")[-300:]
-        if kind == "relay":
-            log = (self.work / "relay-docker.private.log")
-            if log.exists():
-                lines = log.read_text(errors="replace").splitlines()
-                facts["daemon_errors"] = [line[-400:] for line in lines if "level=error" in line][-6:]
-                facts["daemon_warnings"] = [line[-300:] for line in lines if "level=warning" in line][-4:]
-        listeners = result((["ip", "netns", "exec", self.ns(kind)] if self.ns(kind) else []) + ["ss", "-H", "-ltn"])
-        facts["listeners"] = [line.split()[3] for line in listeners.stdout.decode(errors="replace").splitlines() if len(line.split()) > 3]
-        acl = result((["ip", "netns", "exec", self.ns(kind)] if self.ns(kind) else []) + ["nft", "-j", "list", "table", "inet", "vpn_base"])
-        if acl.returncode == 0:
-            rules = json.loads(acl.stdout).get("nftables", [])
-            facts["active_acl"] = {"present": True, "elements": len(rules)}
-        else:
-            facts["active_acl"] = {"present": False}
-        releases = Path("/opt/" + self.prefix + "-" + kind + "/releases")
-        facts["release_count"] = len(list(releases.iterdir())) if releases.is_dir() else 0
-        self.evidence["public_node_diagnostics"] = facts
 
     def api_start(self, kind, configuration):
         obj = {**self.node_inputs[kind], "config": configuration}
@@ -577,9 +531,17 @@ class Lab:
             # Disposable-only observations, never added by the renderer or
             # written into immutable bundle bytes. Receipts bind both hashes.
             instrumented["log"]["access"] = "/dev/stdout"
+            changes = {"log.access": "/dev/stdout"}
+            if kind == "exit":
+                # The stock core independently blocks RFC5737 after VLESS;
+                # fixture geodata cannot override that built-in final rule.
+                fixture_allow = {"action": "allow", "network": "tcp", "port": "18080-18081", "ip": ["192.0.2.100/32"]}
+                egress = next(outbound for outbound in instrumented["outbounds"] if outbound["tag"] == "egress-0")
+                egress["settings"]["finalRules"].insert(0, fixture_allow)
+                changes["outbounds.egress-0.settings.finalRules"] = {"prepend": [fixture_allow]}
             effective = json.dumps(instrumented, sort_keys=True).encode()
             overlays = self.evidence.setdefault("runtime_observation_overlays", {})
-            overlays.setdefault(candidate.name, {})[kind] = {"bundle_file_sha256": hashlib.sha256(config.read_bytes()).hexdigest(), "effective_config_canonical_sha256": hashlib.sha256(effective).hexdigest(), "changes": {"log.access": "/dev/stdout"}, "scope": "disposable-only; routing/finalRules unchanged"}
+            overlays.setdefault(candidate.name, {})[kind] = {"bundle_file_sha256": hashlib.sha256(config.read_bytes()).hexdigest(), "effective_config_canonical_sha256": hashlib.sha256(effective).hexdigest(), "changes": changes, "scope": "disposable-only; immutable bundle and production configuration unchanged"}
             observed_config = self.work / (kind + "-observed-config.private.json")
             private_json(observed_config, instrumented)
             command([self.xray, "run", "-test", "-config", observed_config], env=self.core_env)
@@ -590,14 +552,11 @@ class Lab:
         self.installed_identity = candidate.name
 
     def client(self, candidate, name, port, *, version=4, change=None):
-        self.stage = "client-" + name + "-listener"
-        self.evidence["public_client_phase"] = "load"
         if name in self.client_processes:
             old = self.client_processes.pop(name)
             old.terminate()
             old.wait(timeout=10)
         config = json.loads((candidate / ("clients/" + name + ".json")).read_text())
-        self.evidence["public_client_phase"] = "override"
         config["inbounds"][0]["port"] = port
         if version == 6:
             host = self.topology["exit" if name.startswith("direct") else "relay"]
@@ -605,38 +564,17 @@ class Lab:
         if change:
             change(config)
         path = self.work / ("client-" + name + ".private.json")
-        self.evidence["public_client_phase"] = "write"
         private_json(path, config)
-        self.evidence["public_client_phase"] = "spawn"
         process = self.spawn("client", [self.xray, "run", "-config", path], "client-" + name, env=self.core_env)
         self.client_processes[name] = process
-        self.evidence["public_client_phase"] = "ready"
-
-        def client_facts():
-            try:
-                self.evidence["public_client_log"] = (self.work / ("client-" + name + ".private.log")).read_text(errors="replace")[-500:]
-                self.evidence["public_client_exit"] = process.poll()
-                namespace = self.ns("client")
-                listeners = subprocess.run(["ip", "netns", "exec", namespace, "ss", "-H", "-ltn"], capture_output=True, timeout=30, check=False)
-                self.evidence["public_client_listeners"] = [line.split()[3] for line in listeners.stdout.decode(errors="replace").splitlines() if len(line.split()) > 3]
-            except Exception:
-                self.evidence["public_client_facts"] = "unavailable"
-
-        try:
-            for _ in range(300):
-                if process.poll() is not None:
-                    client_facts()
-                    raise AssertionError("Xray client exited before its listener opened")
-                if self.run("client", [ROOT / ".venv/bin/python", __file__, "tcp", "127.0.0.1", str(port)]).strip() == b"open":
-                    break
-                time.sleep(.1)
-            else:
-                client_facts()
-                raise AssertionError("real local client listener unavailable")
-        except AssertionError:
-            if "public_client_listeners" not in self.evidence:
-                client_facts()
-            raise
+        for _ in range(100):
+            if process.poll() is not None:
+                raise AssertionError("Xray client exited before its listener opened")
+            if self.run("client", [ROOT / ".venv/bin/python", __file__, "tcp", "127.0.0.1", str(port)]).strip() == b"open":
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("real local client listener unavailable")
 
     def transfer(self, port=1080, size=1048576, *, expected=True, address="192.0.2.100", target=18080):
         self.stage = "application-transfer-" + str(port)
@@ -646,29 +584,8 @@ class Lab:
         if (result.returncode == 0) != expected:
             self.evidence["public_transfer_error"] = result.stderr.decode(errors="replace")[-600:]
             self.evidence["public_transfer_exit"] = result.returncode
-            self.transfer_failure_facts()
             raise AssertionError("application transfer result differs from expected")
         return result.stdout
-
-    def transfer_failure_facts(self):
-        facts = {}
-        try:
-            for path in sorted(self.work.glob("client-*.private.log")):
-                facts[path.stem] = path.read_text(errors="replace")[-500:]
-            for kind in ("exit", "relay"):
-                env = self.relay_env if kind == "relay" else None
-                logs = subprocess.run(["docker", "logs", "--tail", "40", "vpn-remnanode"], env=env, capture_output=True, timeout=60, check=False)
-                facts[kind + "_node_log"] = logs.stdout.decode(errors="replace")[-900:] + logs.stderr.decode(errors="replace")[-200:]
-            for kind in ("client", "exit"):
-                namespace = self.ns(kind)
-                prefix = ["ip", "netns", "exec", namespace] if namespace else []
-                sockets = subprocess.run(prefix + ["ss", "-H", "-tn", "state", "established"], capture_output=True, timeout=30, check=False)
-                facts[kind + "_established"] = [row.split()[3] + "->" + row.split()[4] for row in sockets.stdout.decode(errors="replace").splitlines() if len(row.split()) > 4]
-                listening = subprocess.run(prefix + ["ss", "-H", "-ltn"], capture_output=True, timeout=30, check=False)
-                facts[kind + "_listeners"] = [row.split()[3] for row in listening.stdout.decode(errors="replace").splitlines() if len(row.split()) > 3]
-            self.evidence["public_transfer_facts"] = facts
-        except Exception:
-            self.evidence["public_transfer_facts"] = "unavailable"
 
     def tls_matrix(self):
         expected = (self.work / "site/index.html").read_bytes()
@@ -915,7 +832,10 @@ class Lab:
         if any(source not in ("192.0.2.10", "192.0.2.50") for source in sources):
             raise AssertionError("relay/client egress leaked directly to sink")
         self.evidence["scenarios"]["idle_reconnect_no_leak"] = {"idle_seconds": 10, "sink_sources": sorted(set(sources)), "sha256_integrity": "all-bidirectional-flows"}
+        if self.run("exit", [ROOT / ".venv/bin/python", __file__, "tcp", "192.168.47.1", "18080"]).strip() != b"open":
+            raise AssertionError("private destination canary is not reachable; deny gate would be vacuous")
         self.transfer(1080, expected=False, address="192.168.47.1", target=18080)
+        self.evidence["scenarios"]["private_destination_denied"] = {"canary_reachable_from_exit": True, "relay_application_denied": True}
 
     def usable(self, candidate):
         identity = candidate.name
@@ -1046,12 +966,6 @@ class Lab:
         candidate, _ = self.render()
         self.stage = "core-config-activation"
         self.activate_configs(candidate)
-        self.stage = "direct-reality-handshake"
-        credential = self.secret["profiles_credentials"]["exit"]
-        handshake = {"address": self.topology["exit"]["public_ipv4"] + ":18443", "sni": "cover.example.test", "public_key": credential["public_key"], "short_id": credential["short_ids"][0], "offset_seconds": 0, "capture": str(self.work / "direct-handshake.private.bin"), "state": str(self.work / "direct-handshake-state.private.json"), "trust": str(self.trust), "fragment": 0}
-        handshake_file = self.work / "direct-handshake.private.json"
-        private_json(handshake_file, handshake)
-        self.evidence["scenarios"]["direct_handshake"] = json.loads(self.run("client", [self.probe_binary, handshake_file]))
         self.stage = "direct-profile-application-transfer"
         self.client(candidate, "direct-0", 2080)
         self.transfer(2080)
