@@ -18,6 +18,12 @@
   способы проверки.
 - [Ansible: контракт inventory](docs/ANSIBLE.md) — синтетическая топология и её
   проверка (`make -C ansible validate`); развёртывание не реализовано.
+- [Source ACL в роли base](docs/BASE_ROLE.md) — публичные и source-restricted
+  порты, SSH/IPv6 и транзакционная собственная таблица nftables.
+- [Приватный TLS cover-site](docs/COVER_SITE.md) — nginx на host-loopback,
+  операторский контент и Certbot; не публичный альтернативный backend.
+- [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
+  management-путь с mTLS/JWT и source ACL роли base.
 - [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
   серверных и клиентских конфигураций; не публикация через панель.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
@@ -60,7 +66,7 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
 
-Runtime-сценарий [profiles](.github/workflows/profiles.yml) запускается только на
+Runtime-сценарии [base](.github/workflows/base.yml), [cover-site](.github/workflows/cover-site.yml), [RemnaNode](.github/workflows/remnawave-node.yml) и [profiles](.github/workflows/profiles.yml) запускаются только на
 одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
 компонента, фактические результаты — в его PR. Production-rollout и российский
 пилот этим не выполняются.

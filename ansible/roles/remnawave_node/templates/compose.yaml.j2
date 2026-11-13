@@ -1,0 +1,27 @@
+# Managed by remnawave_node. No published ports or Docker bridge.
+services:
+  remnanode:
+    image: {{ remnawave_node_image }}
+    container_name: vpn-remnanode
+    restart: unless-stopped
+    network_mode: host
+    labels:
+      io.github.juvenileslave.vpn.managed-by: remnawave_node
+    env_file:
+      - node.env
+    environment:
+      SNI_VERIFICATION: "false"
+    volumes:
+      - ./probe.json:/run/vpn-node/probe.json:ro
+      - ./health.cjs:/run/vpn-node/health.cjs:ro
+    healthcheck:
+      test: [CMD, node, /run/vpn-node/health.cjs, /run/vpn-node/probe.json]
+      interval: 5s
+      timeout: 8s
+      start_period: 10s
+      retries: 12
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"

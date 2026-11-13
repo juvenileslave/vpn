@@ -1,0 +1,35 @@
+name: Pinned RemnaNode
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  remnawave-node:
+    name: Pinned RemnaNode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Установить закреплённый ansible-core
+        run: make -C ansible bootstrap
+      - name: Проверить контракты роли
+        run: .venv/bin/python -m unittest discover -s ansible/roles/remnawave_node/tests -p 'test_*.py' -v
+      # GitHub-hosted guest is disposable; never operator credentials/live hosts.
+      - name: Проверить реальный runtime на одноразовой VM
+        run: sudo env PATH="$PATH" HOME="$HOME" GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" VPN_REMNAWAVE_NODE_DISPOSABLE_GUEST=yes bash ansible/roles/remnawave_node/tests/runtime_vm.sh

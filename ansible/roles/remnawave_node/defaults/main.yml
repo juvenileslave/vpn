@@ -1,0 +1,21 @@
+---
+# Verified official image and stock Xray. See docs/REMNAWAVE_NODE.md.
+remnawave_node_image: ghcr.io/remnawave/node:3.4.5@sha256:8f5a41708dfa86acc2561a520c9b40e2ff30812a16c28cf6bba6c365ca0f7d65
+remnawave_node_api_port: "{{ node_api_port | default(2222) }}"
+remnawave_node_dir: /opt/remnanode
+remnawave_node_state: present
+remnawave_node_timeout: 120
+# Exactly one secret source, matching the accepted panel convention.
+remnawave_node_secret_key: ""
+remnawave_node_secret_key_file: ""
+# Controller-side JSON, outside the checkout, containing clientCertPem,
+# clientKeyPem and jwtPrivateKeyPem. Never put real credentials in inventory.
+remnawave_node_management_credentials_file: ""
+# Explicit actual CP connection path, from this Ansible inventory host.
+# For dedicated CP this is the node private address and delegate is CP host.
+remnawave_node_management_address: ""
+remnawave_node_management_delegate: ""
+remnawave_node_management_source: ""
+# Optional operator-owned bootstrap Xray configuration, not panel publication.
+remnawave_node_xray_config: {}
+remnawave_node_xray_config_file: ""

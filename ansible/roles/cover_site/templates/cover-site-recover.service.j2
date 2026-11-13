@@ -1,0 +1,14 @@
+# Managed by cover_site
+[Unit]
+Description=Recover an interrupted cover-site activation before nginx starts
+Before=nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/cover-site/lifecycle.py recover
+UMask=0077
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=nginx.service
