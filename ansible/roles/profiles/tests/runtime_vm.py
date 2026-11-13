@@ -289,7 +289,10 @@ class Lab:
             raise AssertionError("fresh guest required; refusing an existing Node container")
         self.stage = "verified-embedded-core-extraction"
         command(["docker", "pull", "--quiet", bundle.NODE_IMAGE])
-        command(["docker", "save", "-o", self.work / "node-image.tar", bundle.NODE_IMAGE])
+        # Saving by digest writes no repo tag; compose would then attempt an
+        # offline pull inside the isolated relay namespace. Pin the tag first.
+        command(["docker", "tag", bundle.NODE_IMAGE, "ghcr.io/remnawave/node:3.4.5"])
+        command(["docker", "save", "-o", self.work / "node-image.tar", "ghcr.io/remnawave/node:3.4.5"])
         extract = self.prefix + "-extract"
         command(["docker", "create", "--name", extract, "--network=none", "--entrypoint=sleep", bundle.NODE_IMAGE, "3600"])
         self.extract = extract
@@ -365,6 +368,9 @@ class Lab:
         self.evidence["relay_runtime_isolation"] = {"private_containerd": True, "daemon_and_containerd_same_relay_netns": True, "distinct_from_exit": True}
         self.stage = "isolated-relay-image-load"
         command(["docker", "load", "-i", self.work / "node-image.tar"], env=self.relay_env)
+        loaded = subprocess.run(["docker", "image", "inspect", bundle.NODE_IMAGE], env=self.relay_env, capture_output=True, check=False)
+        if loaded.returncode != 0:
+            raise AssertionError("relay daemon cannot resolve the pinned Node image offline")
 
     def cover(self):
         site = self.work / "site"
@@ -423,7 +429,10 @@ class Lab:
         try:
             self.play(["remnawave_node"], kind=kind, variables=variables)
         except AssertionError:
-            self.node_diagnostics(kind)
+            try:
+                self.node_diagnostics(kind)
+            except Exception:
+                self.evidence["public_node_diagnostics"] = "collection failed"
             raise
         env = self.relay_env if kind == "relay" else None
         command(["docker", "cp", self.assets / "geoip.dat", "vpn-remnanode:/usr/local/share/xray/geoip.dat"], env=env)
