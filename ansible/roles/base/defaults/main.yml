@@ -21,6 +21,9 @@ base_ssh_trusted_cidrs: []
 base_firewall_enabled: false
 #   - {proto: tcp, port: 443}
 base_firewall_vpn_ports: []
+# Restricted transit/management listeners: operator-declared safe source CIDRs.
+#   - {proto: tcp, port: 8443, source_cidrs: ['192.0.2.2/32', '2001:db8::2/128']}
+base_firewall_source_ports: []
 base_firewall_allow_icmp_echo: true
 base_firewall_allow_dhcpv6_client: true
 # Non-loopback listeners the operator accepts to be closed, e.g. "tcp/8080".
