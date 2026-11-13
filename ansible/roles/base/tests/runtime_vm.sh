@@ -492,7 +492,11 @@ udp546_linklocal() {
   in_ns untrusted python3 "$SERVICE" udp fe80::1%eth0 546 --source-address "${1:-fe80::3%eth0}" --source-port 547 >/dev/null 2>&1
 }
 for _ in {1..20}; do udp546_linklocal && break; sleep 0.2; done
-udp546_linklocal || fail "исходный DHCPv6 allowance не пропускает настоящий link-local UDP/547→546"
+if ! udp546_linklocal; then
+  cat "$WORK/udp546-server.log"
+  in_ns untrusted python3 "$SERVICE" udp fe80::1%eth0 546 --source-address fe80::3%eth0 --source-port 547
+  fail "исходный DHCPv6 allowance не пропускает настоящий link-local UDP/547→546"
+fi
 for family in "$TRUST4/32" "$TRUST6/128"; do
   if local_play -e @"$WORK/vars.json" -e @"$WORK/ack.json" \
       -e "{\"base_firewall_allow_dhcpv6_client\":true,\"base_firewall_source_ports\":[{\"proto\":\"udp\",\"port\":546,\"source_cidrs\":[\"$family\"]}]}" \

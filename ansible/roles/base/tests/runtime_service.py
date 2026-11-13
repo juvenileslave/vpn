@@ -98,12 +98,15 @@ def request(address, port, path, expected_peer, source_address=None, control=Non
 
 def udp_request(address, port, source_address=None, source_port=0):
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    destination = socket.getaddrinfo(address, port, family, socket.SOCK_DGRAM)[0][4]
     with socket.socket(family, socket.SOCK_DGRAM) as client:
         client.settimeout(2)
         if source_address is not None or source_port:
-            client.bind((source_address or ("::" if family == socket.AF_INET6 else "0.0.0.0"), source_port))
+            source = source_address or ("::" if family == socket.AF_INET6 else "0.0.0.0")
+            binding = socket.getaddrinfo(source, source_port, family, socket.SOCK_DGRAM)[0][4]
+            client.bind(binding)
         payload = b"vpn-base-disposable-udp"
-        client.sendto(payload, (address, port))
+        client.sendto(payload, destination)
         received, _peer = client.recvfrom(4096)
         assert received == payload, "unexpected UDP response"
 
