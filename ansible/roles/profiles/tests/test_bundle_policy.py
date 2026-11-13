@@ -1,4 +1,5 @@
 """Policy/transaction tests; not a substitute for the real disposable runtime."""
+import base64
 import copy
 import json
 from pathlib import Path
@@ -66,7 +67,117 @@ class BundlePolicyTest(unittest.TestCase):
                     if protocol == "vless":
                         record["users"] = [{"id": self.secret["relay_client_ids"][0]}]
                     self.rejected(lambda t, s: s.update(profiles_upstreams={"1": {"protocol": protocol, "settings": {field: [record]}}}))
-        self.rejected(lambda t, s: s.update(profiles_upstreams={"1": {"protocol": "wireguard", "settings": {"secretKey": "fixture", "peers": [{"endpoint": "[::ffff:127.0.0.1]:1080"}]}}}))
+        self.rejected(lambda t, s: s.update(profiles_upstreams={"1": {"protocol": "wireguard", "settings": {"secretKey": "01" * 32, "peers": [{"publicKey": "02" * 32, "endpoint": "[::ffff:127.0.0.1]:1080"}]}}}))
+
+    def test_upstream_rotation_versions_candidate_and_invalid_rotation_preserves_it(self):
+        wireguard = {"protocol": "wireguard", "settings": {"secretKey": base64.b64encode(bytes(range(32))).decode(), "peers": [{"publicKey": base64.urlsafe_b64encode(bytes(range(255, 223, -1))).rstrip(b"=").decode(), "preSharedKey": "", "endpoint": "192.0.2.99:51820"}]}}
+        hysteria = {"protocol": "hysteria", "settings": {"version": 2, "address": "proxy.example.net", "port": 443}, "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "synthetic-auth"}}}
+        for upstream in (wireguard, hysteria):
+            with self.subTest(protocol=upstream["protocol"]), tempfile.TemporaryDirectory() as temporary:
+                secret = copy.deepcopy(self.secret)
+                secret["profiles_upstreams"] = {"1": copy.deepcopy(upstream)}
+                identity, files = bundle.render(copy.deepcopy(self.topology), secret)
+                root = Path(temporary).resolve() / "bundle"
+                bundle.write_bundle(root, identity, files)
+                previous = (root / "candidate").resolve()
+                previous_bytes = (previous / "exit.json").read_bytes()
+                rotated = secret["profiles_upstreams"]["1"]
+                credentials = rotated["settings"] if rotated["protocol"] == "wireguard" else rotated["streamSettings"]["hysteriaSettings"]
+                key = "secretKey" if rotated["protocol"] == "wireguard" else "auth"
+                credentials[key] = "03" * 32 if key == "secretKey" else "rotated-synthetic-auth"
+                rotated_identity, rotated_files = bundle.render(copy.deepcopy(self.topology), secret)
+                self.assertNotEqual(rotated_identity, identity)
+                bundle.write_bundle(root, rotated_identity, rotated_files)
+                current = (root / "candidate").resolve()
+                self.assertEqual(current.name, rotated_identity)
+                self.assertEqual((previous / "exit.json").read_bytes(), previous_bytes)
+                current_bytes = (current / "exit.json").read_bytes()
+                credentials[key] = ""
+                with self.assertRaises(bundle.Invalid):
+                    bad_identity, bad_files = bundle.render(copy.deepcopy(self.topology), secret)
+                    bundle.write_bundle(root, bad_identity, bad_files)
+                self.assertEqual((root / "candidate").resolve(), current)
+                self.assertEqual((current / "exit.json").read_bytes(), current_bytes)
+
+    def test_malformed_wireguard_and_hysteria_never_write(self):
+        wireguard = {"protocol": "wireguard", "settings": {"secretKey": "01" * 32, "address": ["10.0.0.2/32"], "peers": [{"publicKey": "02" * 32, "endpoint": "proxy.example.net:51820"}]}}
+        hysteria = {"protocol": "hysteria", "settings": {"version": 2, "address": "proxy.example.net", "port": 443}, "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "synthetic-auth"}}}
+        invalid = []
+        for key in (None, True, "", "fixture", "0" * 63, "g" * 64, base64.b64encode(b"x" * 31).decode()):
+            for field in ("secretKey", "publicKey", "preSharedKey"):
+                if field == "preSharedKey" and key == "":
+                    continue  # Explicitly omitting an optional PSK is valid.
+                upstream = copy.deepcopy(wireguard)
+                (upstream["settings"] if field == "secretKey" else upstream["settings"]["peers"][0])[field] = key
+                invalid.append(upstream)
+        for peers in (None, [], [{}], [None], [{"publicKey": "02" * 32}], [{"endpoint": "proxy.example.net:51820"}]):
+            upstream = copy.deepcopy(wireguard)
+            upstream["settings"]["peers"] = peers
+            invalid.append(upstream)
+        for endpoint in (None, "", "proxy.example.net", "proxy.example.net:", "proxy.example.net:wrong", "proxy.example.net:0", "proxy.example.net:65536", "proxy.example.net:-1", "2001:db8::99:51820", "[2001:db8::99]", "user@proxy.example.net:51820", "@proxy.example.net:51820", ":@proxy.example.net:51820", "proxy.example.net:51820/path", "bad host:51820"):
+            upstream = copy.deepcopy(wireguard)
+            upstream["settings"]["peers"][0]["endpoint"] = endpoint
+            invalid.append(upstream)
+        for addresses in (None, [], "10.0.0.2", [True], ["bad-address"], ["10.0.0.2/33"], ["fe80::2%eth0"]):
+            upstream = copy.deepcopy(wireguard)
+            upstream["settings"]["address"] = addresses
+            invalid.append(upstream)
+        for field, values in (("version", (None, True, "2", 1, 3)), ("address", (None, True, "", "bad host", "https://proxy.example.net", "[bad]")), ("port", (None, True, "443", 0, 65536))):
+            for value in values:
+                upstream = copy.deepcopy(hysteria)
+                upstream["settings"][field] = value
+                invalid.append(upstream)
+        for field, value in (("network", None), ("network", "quic"), ("network", "tcp"), ("security", "none"), ("security", True), ("hysteriaSettings", None), ("tlsSettings", "invalid")):
+            upstream = copy.deepcopy(hysteria)
+            upstream["streamSettings"][field] = value
+            invalid.append(upstream)
+        for field, values in (("version", (None, True, "2", 1)), ("auth", (None, True, ""))):
+            for value in values:
+                upstream = copy.deepcopy(hysteria)
+                upstream["streamSettings"]["hysteriaSettings"][field] = value
+                invalid.append(upstream)
+        invalid.extend(({"protocol": "wireguard", "settings": {"foo": "bar"}}, {"protocol": "hysteria", "settings": {"servers": [{"address": "proxy.example.net", "port": 443, "auth": "obsolete-shape"}]}}))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "bundle"
+            for index, upstream in enumerate(invalid):
+                with self.subTest(case=index, protocol=upstream["protocol"]):
+                    secret = copy.deepcopy(self.secret)
+                    secret["profiles_upstreams"] = {"1": upstream}
+                    with self.assertRaises(bundle.Invalid):
+                        identity, files = bundle.render(copy.deepcopy(self.topology), secret)
+                        bundle.write_bundle(root, identity, files)
+                    self.assertFalse(root.exists())
+
+    def test_effective_defaults_have_one_identity_and_preserve_overrides(self):
+        omitted, explicit = copy.deepcopy(self.topology), copy.deepcopy(self.topology)
+        for kind in ("exit", "relay"):
+            for key, default in (("cover_tls_port", 9443), ("reality_max_time_diff_ms", 300000)):
+                omitted[kind].pop(key, None)
+                explicit[kind][key] = default
+        omitted_id, omitted_files = bundle.render(omitted, self.secret)
+        explicit_id, explicit_files = bundle.render(explicit, self.secret)
+        self.assertEqual(omitted_id, explicit_id)
+        self.assertEqual(omitted_files, explicit_files)
+        effective = json.loads(omitted_files["inputs.private.json"])["topology"]
+        for kind in ("exit", "relay"):
+            self.assertEqual(effective[kind]["cover_tls_port"], 9443)
+            self.assertEqual(effective[kind]["reality_max_time_diff_ms"], 300000)
+        for kind in ("exit", "relay"):
+            for key, value, output_key in (("cover_tls_port", 20000, "dest"), ("reality_max_time_diff_ms", 150000, "maxTimeDiff")):
+                with self.subTest(kind=kind, key=key):
+                    override = copy.deepcopy(explicit)
+                    override[kind][key] = value
+                    override_id, files = bundle.render(override, self.secret)
+                    self.assertNotEqual(override_id, explicit_id)
+                    self.assertEqual(override[kind][key], value)
+                    expected = "127.0.0.1:" + str(value) if key == "cover_tls_port" else value
+                    config = json.loads(files[kind + ".json"])
+                    self.assertTrue(all(item["streamSettings"]["realitySettings"][output_key] == expected for item in config["inbounds"]))
+        for kind in ("exit", "relay"):
+            for key in ("cover_tls_port", "reality_max_time_diff_ms"):
+                for value in (None, True, "9443", 0, -1):
+                    with self.subTest(kind=kind, key=key, value=value):
+                        self.rejected(lambda t, s: t[kind].update({key: value}))
 
     def test_observatory_port_validation(self):
         for authority in ("probe.example.com:wrong", "probe.example.com:0", "probe.example.com:70000", "probe.example.com:-1", "probe.example.com:", "[2001:db8::1]:70000"):

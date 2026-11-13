@@ -358,14 +358,11 @@ class Inventory:
             try:
                 contract.validate_host(values, group)
                 contract.validate_probe_url(values.get("profiles_probe_url", ""))
+                contract.validate_profile_options(values)
             except contract.Invalid as error:
                 self.error(f"host {host}: {error}")
             except (TypeError, ValueError):
                 self.error(f"host {host}: invalid self-steal input type")
-            if values.get("slot_fanout") != "ports":
-                self.error(f"host {host}: slot_fanout sni is unavailable; ports must be selected explicitly")
-            if values.get("s2s_family") != "v6_prefer" or values.get("xhttp_mode") != "stream-one":
-                self.error(f"host {host}: self-steal requires v6_prefer and stream-one")
         if set(nodes) != {"exit", "relay"}:
             return
         exit_host, relay = nodes["exit"], nodes["relay"]

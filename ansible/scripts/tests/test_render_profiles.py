@@ -96,6 +96,77 @@ class BundleConsumerTest(unittest.TestCase):
             self.assertEqual(len(list((self.output / "versions").iterdir())), 1)
             self.assertEqual(previous, {str(path.relative_to(checked)): path.read_bytes() for path in checked.rglob("*") if path.is_file()})
 
+    def test_actual_wireguard_and_hysteria_schemas_reach_candidate(self):
+        upstreams = [
+            {"protocol": "wireguard", "settings": {"secretKey": "01" * 32, "address": ["10.0.0.2/32", "fd00::2/128"], "peers": [{"publicKey": "02" * 32, "endpoint": "[2001:db8::99]:51820"}]}},
+            {"protocol": "hysteria", "settings": {"version": 2, "address": "proxy.example.net", "port": 443}, "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "synthetic-auth"}}},
+        ]
+        for upstream in upstreams:
+            with self.subTest(protocol=upstream["protocol"]):
+                secret = copy.deepcopy(self.secret)
+                secret["profiles_upstreams"] = {"1": upstream}
+                self.assertEqual(self.play(secret=secret).returncode, 0)
+                candidate = (self.output / "candidate").resolve()
+                config = json.loads((candidate / "exit.json").read_text())
+                self.assertEqual(next(item for item in config["outbounds"] if item["tag"] == "egress-1"), {**upstream, "tag": "egress-1"})
+
+    def test_malformed_protocol_inputs_preserve_candidate_and_prevent_first_write(self):
+        invalid = [
+            {"protocol": "wireguard", "settings": {"foo": "bar"}},
+            {"protocol": "wireguard", "settings": {"secretKey": "bad-key", "peers": [{"publicKey": "02" * 32, "endpoint": "proxy.example.net:51820"}]}},
+            {"protocol": "wireguard", "settings": {"secretKey": "01" * 32, "peers": [{"publicKey": "02" * 32, "endpoint": "proxy.example.net"}]}},
+            {"protocol": "hysteria", "settings": {"version": 2, "address": "proxy.example.net", "port": True}, "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "synthetic-auth"}}},
+            {"protocol": "hysteria", "settings": {"version": 2, "address": "proxy.example.net", "port": 443}, "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2}}},
+            {"protocol": "hysteria", "settings": {"servers": [{"address": "proxy.example.net", "port": 443, "auth": "obsolete-shape"}]}},
+        ]
+        for upstream in invalid:
+            secret = copy.deepcopy(self.secret)
+            secret["profiles_upstreams"] = {"1": upstream}
+            self.assertNotEqual(self.play(secret=secret).returncode, 0)
+            self.assertFalse(self.output.exists())
+        self.assertEqual(self.play().returncode, 0)
+        candidate = (self.output / "candidate").resolve()
+        (self.output / "current").symlink_to(candidate)
+        previous = {str(path.relative_to(candidate)): path.read_bytes() for path in candidate.rglob("*") if path.is_file()}
+        for upstream in invalid:
+            secret = copy.deepcopy(self.secret)
+            secret["profiles_upstreams"] = {"1": upstream}
+            self.assertNotEqual(self.play(secret=secret).returncode, 0)
+            self.assertEqual((self.output / "candidate").resolve(), candidate)
+            self.assertEqual((self.output / "current").resolve(), candidate)
+            self.assertEqual(len(list((self.output / "versions").iterdir())), 1)
+            self.assertEqual(previous, {str(path.relative_to(candidate)): path.read_bytes() for path in candidate.rglob("*") if path.is_file()})
+
+    def test_omitted_and_explicit_defaults_share_candidate_and_keep_overrides(self):
+        omitted = copy.deepcopy(self.topology)
+        for kind in ("exit", "relay"):
+            omitted[kind].pop("cover_tls_port", None)
+            omitted[kind].pop("reality_max_time_diff_ms", None)
+        self.assertEqual(self.play(omitted).returncode, 0)
+        candidate = (self.output / "candidate").resolve()
+        previous = {str(path.relative_to(candidate)): path.read_bytes() for path in candidate.rglob("*") if path.is_file()}
+        explicit = copy.deepcopy(omitted)
+        for kind in ("exit", "relay"):
+            explicit[kind].update(cover_tls_port=9443, reality_max_time_diff_ms=300000)
+        result = self.play(explicit)
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r"exit-test\s*:\s*ok=\d+\s+changed=0\b")
+        self.assertEqual((self.output / "candidate").resolve(), candidate)
+        self.assertEqual(previous, {str(path.relative_to(candidate)): path.read_bytes() for path in candidate.rglob("*") if path.is_file()})
+        override = copy.deepcopy(explicit)
+        override["exit"].update(cover_tls_port=10443, reality_max_time_diff_ms=150000)
+        override["relay"].update(cover_tls_port=11443, reality_max_time_diff_ms=600000)
+        self.assertEqual(self.play(override).returncode, 0)
+        changed = (self.output / "candidate").resolve()
+        self.assertNotEqual(changed, candidate)
+        private = json.loads((changed / "inputs.private.json").read_text())["topology"]
+        for kind, listener, time_diff in (("exit", 10443, 150000), ("relay", 11443, 600000)):
+            self.assertEqual(private[kind]["cover_tls_port"], listener)
+            self.assertEqual(private[kind]["reality_max_time_diff_ms"], time_diff)
+            reality = json.loads((changed / (kind + ".json")).read_text())["inbounds"][0]["streamSettings"]["realitySettings"]
+            self.assertEqual(reality["dest"], "127.0.0.1:" + str(listener))
+            self.assertEqual(reality["maxTimeDiff"], time_diff)
+
     def test_permission_repair_is_consumer_visible_and_idempotent(self):
         self.assertEqual(self.play().returncode, 0)
         checked = (self.output / "candidate").resolve()

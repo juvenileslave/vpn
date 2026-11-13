@@ -120,10 +120,14 @@ def private_json(path, value):
     path.chmod(0o600)
 
 
-def guard():
+def guard_identity():
     wanted = {"VPN_PROFILES_DISPOSABLE_GUEST": "yes", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
     if os.geteuid() != 0 or any(os.environ.get(k) != v for k, v in wanted.items()) or sys.platform != "linux":
-        raise SystemExit("refusing non-disposable profile runtime")
+        print("refusing non-disposable profile runtime", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def guard_fresh_state():
     for path in ("/etc/cover-site", "/var/lib/cover-site", "/etc/nginx/sites-enabled/cover-site.conf"):
         if Path(path).exists() or Path(path).is_symlink():
             raise SystemExit("fresh role-owned cover state required")
@@ -191,6 +195,29 @@ def established_pair(samples, source, destination):
             if left in columns and right in columns:
                 return True
     return False
+
+
+def http_observation(response, method, tls):
+    """Keep stable representation facts, never raw response/diagnostic text."""
+    header, separator, body = response.partition(b"\r\n\r\n")
+    if not separator:
+        raise AssertionError("visitor received no complete HTTP response headers")
+    lines = header.split(b"\r\n")
+    version, status, *_reason = lines[0].decode("latin1").split(" ", 2)
+    if version not in ("HTTP/1.1", "HTTP/2") or not status.isdigit():
+        raise AssertionError("visitor received an unsupported HTTP status line")
+    representation = {"content-type", "content-length", "content-encoding", "location", "etag", "last-modified", "cache-control", "accept-ranges"}
+    headers = {}
+    for line in lines[1:]:
+        name, colon, value = line.partition(b":")
+        if not colon:
+            raise AssertionError("visitor received a malformed HTTP header")
+        name = name.decode("latin1").lower()
+        if name in representation:
+            headers.setdefault(name, []).append(value.decode("latin1").strip())
+    if method == "HEAD" and body:
+        raise AssertionError("HEAD visitor received an HTTP response body")
+    return {"method": method, "status": int(status), "HTTP": version.removeprefix("HTTP/"), "TLS": tls, "headers": headers, "body_bytes": len(body), "body_sha256": hashlib.sha256(body).hexdigest()}
 
 
 class Lab:
@@ -389,42 +416,45 @@ class Lab:
         containerd_config.chmod(0o600)
         runtime = self.spawn("relay", ["containerd", "--config", containerd_config, "--address", containerd_socket, "--root", data / "containerd-data", "--state", data / "containerd-state"], "relay-containerd", network_only=True)
         self.stage = "isolated-relay-containerd"
+        readiness_exit = None
         for _ in range(30):
             if runtime.poll() is not None:
-                self.evidence["public_containerd_startup_error"] = (self.work / "relay-containerd.private.log").read_text(errors="replace")
+                self.evidence["public_runtime_failure"] = {"component": "containerd", "phase": "isolated-relay-containerd", "category": "exited-before-readiness", "exit_code": runtime.returncode, "readiness_exit_code": readiness_exit}
                 raise AssertionError("private relay containerd exited before readiness")
             ready = subprocess.run(["ctr", "--address", str(containerd_socket), "version"], capture_output=True, check=False)
+            readiness_exit = ready.returncode
             if ready.returncode == 0:
                 break
             time.sleep(1)
         else:
-            self.evidence["public_containerd_startup_error"] = (self.work / "relay-containerd.private.log").read_text(errors="replace")
+            self.evidence["public_runtime_failure"] = {"component": "containerd", "phase": "isolated-relay-containerd", "category": "readiness-timeout", "exit_code": runtime.poll(), "readiness_exit_code": readiness_exit}
             raise AssertionError("private relay containerd did not become ready")
         private_json(data / "daemon.json", {})
         self.stage = "isolated-relay-image-proxy"
         self.proxy = self.spawn("exit", [ROOT / ".venv/bin/python", __file__, "connect-proxy", "192.0.2.10", "3128"], "relay-image-proxy")
         for _ in range(60):
             if self.proxy.poll() is not None:
-                raise AssertionError("loopback image proxy exited before readiness")
+                raise AssertionError("local image proxy exited before readiness")
             if self.run("relay", [ROOT / ".venv/bin/python", __file__, "tcp", "192.0.2.10", "3128"]).strip() == b"open":
                 break
             time.sleep(.1)
         else:
-            raise AssertionError("loopback image proxy not ready")
+            raise AssertionError("local image proxy not ready")
         proxy_env = {**os.environ, "HTTPS_PROXY": "http://192.0.2.10:3128", "HTTP_PROXY": "http://192.0.2.10:3128", "NO_PROXY": "localhost,127.0.0.1,::1"}
         self.stage = "isolated-relay-docker-daemon"
         daemon = self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--containerd", containerd_socket, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker", env=proxy_env, network_only=True)
+        readiness_exit = None
         for _ in range(90):
             if daemon.poll() is not None:
-                # No Node/container PKI has been loaded into this daemon yet.
-                self.evidence["public_daemon_startup_error"] = (self.work / "relay-docker.private.log").read_text(errors="replace")
+                self.evidence["public_runtime_failure"] = {"component": "docker", "phase": "isolated-relay-docker-daemon", "category": "exited-before-readiness", "exit_code": daemon.returncode, "readiness_exit_code": readiness_exit}
                 raise AssertionError("isolated relay Docker daemon exited before API readiness")
             result = subprocess.run(["docker", "info"], env=self.relay_env, capture_output=True, check=False)
+            readiness_exit = result.returncode
             if result.returncode == 0:
                 break
             time.sleep(1)
         else:
-            self.evidence["public_daemon_startup_error"] = (self.work / "relay-docker.private.log").read_text(errors="replace")
+            self.evidence["public_runtime_failure"] = {"component": "docker", "phase": "isolated-relay-docker-daemon", "category": "readiness-timeout", "exit_code": daemon.poll(), "readiness_exit_code": readiness_exit}
             raise AssertionError("isolated relay Docker daemon not ready")
         namespace = Path("/run/netns/" + self.ns("relay")).stat().st_ino
         assert Path("/proc/" + str(runtime.pid) + "/ns/net").stat().st_ino == namespace, "containerd is outside relay host-network namespace"
@@ -435,14 +465,14 @@ class Lab:
         command(["docker", "pull", "--quiet", bundle.NODE_IMAGE], env=self.relay_env, timeout=900)
         loaded = subprocess.run(["docker", "image", "inspect", bundle.NODE_IMAGE], env=self.relay_env, capture_output=True, check=False)
         if loaded.returncode != 0:
-            self.evidence["public_relay_image_inspect_error"] = loaded.stderr.decode(errors="replace")[-300:]
+            self.evidence["public_runtime_failure"] = {"component": "docker", "phase": "isolated-relay-image-pull", "category": "pinned-image-unresolved", "exit_code": loaded.returncode}
             raise AssertionError("relay daemon cannot resolve the pinned Node image")
         self.proxy.terminate()
         self.proxy.wait(timeout=10)
         routes = self.run("relay", ["ip", "route", "show", "default"]).strip() + self.run("relay", ["ip", "-6", "route", "show", "default"]).strip()
         if routes:
             raise AssertionError("relay retains a default route after image staging")
-        self.evidence["relay_image_staging"] = {"transport": "loopback CONNECT proxy during setup", "proxy_stopped": True, "pinned_reference_resolves": True, "relay_default_routes": False}
+        self.evidence["relay_image_staging"] = {"transport": "synthetic bridge CONNECT proxy during setup", "proxy_stopped": True, "pinned_reference_resolves": True, "relay_default_routes": False}
 
     def cover(self):
         site = self.work / "site"
@@ -530,8 +560,9 @@ class Lab:
             instrumented = copy.deepcopy(original)
             # Disposable-only observations, never added by the renderer or
             # written into immutable bundle bytes. Receipts bind both hashes.
-            instrumented["log"]["access"] = "/dev/stdout"
-            changes = {"log.access": "/dev/stdout"}
+            # s6 redirects worker stdout; use the container's init log stream.
+            instrumented["log"]["access"] = "/proc/1/fd/1"
+            changes = {"log.access": "/proc/1/fd/1"}
             if kind == "exit":
                 # The stock core independently blocks RFC5737 after VLESS;
                 # fixture geodata cannot override that built-in final rule.
@@ -587,31 +618,58 @@ class Lab:
             raise AssertionError("application transfer result differs from expected")
         return result.stdout
 
+    def curl_visitor(self, kind, address, port, method, tls, http):
+        headers_file = self.work / "visitor-headers.private.bin"
+        output_file = self.work / "visitor-output.private.bin"
+        # curl --head writes response HEADERS to --output, not an empty body.
+        # Verbose TLS diagnostics remain private; only the negotiated version
+        # is allowlisted into the report. HTTP status is not forced to 200.
+        diagnostics = self.run(kind, ["curl", "-sS", "--verbose", "--max-time", "15", "--noproxy", "*", "--cacert", self.trust, "--resolve", f"cover.example.test:{port}:{address}", "--header", "Host: cover.example.test", "--tlsv" + tls, "--tls-max", tls, "--http" + http, *(["--head"] if method == "HEAD" else []), "--dump-header", headers_file, "--output", output_file, "--write-out", "%{http_version} %{response_code}\n", f"https://cover.example.test:{port}/"], combined=True)
+        match = re.search(rb"SSL connection using TLSv?(1\.[23])(?:\s|/)", diagnostics)
+        if match is None:
+            raise AssertionError("curl visitor lacks an actual negotiated TLS observation")
+        negotiated_tls = "TLSv" + match.group(1).decode()
+        headers, output = headers_file.read_bytes(), output_file.read_bytes()
+        if method == "HEAD" and output != headers:
+            raise AssertionError("curl HEAD output differs from its header-only response")
+        observation = http_observation(headers + (b"" if method == "HEAD" else output), method, negotiated_tls)
+        metadata = diagnostics.splitlines()[0].split()
+        if metadata != [http.encode(), str(observation["status"]).encode()] or observation["HTTP"] != http or negotiated_tls != "TLSv" + tls:
+            raise AssertionError("actual visitor HTTP/TLS/status negotiation differs from requested matrix")
+        return observation
+
     def tls_matrix(self):
-        expected = (self.work / "site/index.html").read_bytes()
-        origin_results = {}
+        visitor_results = []
+        origin_results = []
         for kind in ("exit", "relay"):
             host = self.topology[kind]
             public_port = host.get("exit_direct_port", host.get("relay_slot_ports", [None])[0])
             for tls in ("1.2", "1.3"):
                 for http in ("1.1", "2"):
-                    flags = ["--tlsv" + tls, "--tls-max", tls, "--http" + http]
-                    visitor_body = self.work / "visitor-body.private.bin"
-                    protocol = self.run("client", ["curl", "-fsS", "--max-time", "15", "--noproxy", "*", "--cacert", self.trust, "--resolve", f"cover.example.test:{public_port}:{host['public_ipv4']}", *flags, "--output", visitor_body, "--write-out", "%{http_version}", f"https://cover.example.test:{public_port}/"])
-                    if visitor_body.read_bytes() != expected or protocol.strip() != http.encode():
-                        raise AssertionError("actual public REALITY content or negotiated H1/H2 differs from owned origin")
-            for sni in (None, "unknown.example.test", "cover.example.test"):
-                for hostname in ("cover.example.test", "unknown.example.test"):
-                    for path in ("/", "/absent", "/panel", "/metrics"):
-                        request = {"sni": sni, "host": hostname, "path": path}
-                        testfile = self.work / "visitor.private.json"
-                        private_json(testfile, request)
-                        origin = self.run(kind, [ROOT / ".venv/bin/python", __file__, "visitor", "127.0.0.1", str(host["cover_tls_port"]), testfile])
-                        public = self.run("client", [ROOT / ".venv/bin/python", __file__, "visitor", host["public_ipv4"], str(public_port), testfile])
-                        if json.loads(origin) != json.loads(public):
-                            raise AssertionError("unknown/missing SNI/Host/path differs from actual origin")
-                        origin_results[str(request)] = json.loads(origin)
-        self.evidence["scenarios"]["visitor_matrix"] = {"TLS": ["1.2", "1.3"], "HTTP": ["1.1", "2"], "baseline_cases": len(origin_results), "baseline": origin_results}
+                    get_origin = None
+                    for method in ("GET", "HEAD"):
+                        origin = self.curl_visitor(kind, "127.0.0.1", host["cover_tls_port"], method, tls, http)
+                        public = self.curl_visitor("client", host["public_ipv4"], public_port, method, tls, http)
+                        if public != origin:
+                            raise AssertionError("actual public REALITY status/representation differs from owned nginx origin")
+                        if method == "GET":
+                            get_origin = origin
+                        elif any(origin[key] != get_origin[key] for key in ("status", "headers")):
+                            raise AssertionError("owned origin HEAD status/representation differs from its actual GET")
+                        visitor_results.append({"node": kind, "origin": origin, "public": public})
+            for method in ("GET", "HEAD"):
+                for sni in (None, "unknown.example.test", "cover.example.test"):
+                    for hostname in (None, "cover.example.test", "unknown.example.test"):
+                        for path in ("/", "/absent", "/panel", "/metrics"):
+                            request = {"method": method, "sni": sni, "host": hostname, "path": path}
+                            testfile = self.work / "visitor.private.json"
+                            private_json(testfile, request)
+                            origin = json.loads(self.run(kind, [ROOT / ".venv/bin/python", __file__, "visitor", "127.0.0.1", str(host["cover_tls_port"]), testfile]))
+                            public = json.loads(self.run("client", [ROOT / ".venv/bin/python", __file__, "visitor", host["public_ipv4"], str(public_port), testfile]))
+                            if origin != public:
+                                raise AssertionError("GET/HEAD unknown/missing SNI/Host/path differs from actual origin")
+                            origin_results.append({"node": kind, "request": request, "origin": origin, "public": public})
+        self.evidence["scenarios"]["visitor_matrix"] = {"methods": ["GET", "HEAD"], "TLS": ["1.2", "1.3"], "HTTP": ["1.1", "2"], "visitor_cases": len(visitor_results), "visitors": visitor_results, "baseline_cases": len(origin_results), "baseline": origin_results}
 
     def denied_ports(self):
         checks = []
@@ -991,6 +1049,7 @@ class Lab:
 
 
 def child():
+    guard_identity()
     mode = sys.argv[1]
     if mode in ("node-start", "node-health"):
         runtime_contracts()
@@ -1031,27 +1090,31 @@ def child():
     elif mode == "visitor":
         address, port = sys.argv[2], int(sys.argv[3])
         options = json.loads(Path(sys.argv[4]).read_text())
+        method = options["method"]
+        if method not in ("GET", "HEAD"):
+            raise ValueError("unsupported disposable visitor method")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        start = time.monotonic()
+        ctx.set_alpn_protocols(["http/1.1"])
         try:
             with socket.create_connection((address, port), timeout=5) as raw:
                 with ctx.wrap_socket(raw, server_hostname=options["sni"]) as conn:
                     conn.settimeout(5)
-                    conn.sendall(("GET " + options["path"] + " HTTP/1.1\r\nHost: " + options["host"] + "\r\nConnection: close\r\n\r\n").encode())
+                    hostname = "" if options["host"] is None else "Host: " + options["host"] + "\r\n"
+                    conn.sendall((method + " " + options["path"] + " HTTP/1.1\r\n" + hostname + "Connection: close\r\n\r\n").encode())
                     response = bytearray()
                     while True:
                         part = conn.recv(65536)
                         if not part:
                             break
                         response.extend(part)
-                    parts = bytes(response).split(b"\r\n\r\n", 1)
-                    status = parts[0].split(b"\r\n", 1)[0].decode()
-                    body = parts[1] if len(parts) > 1 else b""
-                    print(json.dumps({"status": status, "body_sha256": hashlib.sha256(body).hexdigest(), "TLS": conn.version()}))
+                    observation = http_observation(bytes(response), method, conn.version())
+                    if conn.selected_alpn_protocol() != "http/1.1" or observation["HTTP"] != "1.1":
+                        raise AssertionError("raw visitor did not negotiate actual HTTP/1.1")
+                    print(json.dumps(observation))
         except (OSError, ssl.SSLError):
-            print(json.dumps({"TLS": "handshake-or-stream-rejected"}))
+            print(json.dumps({"method": method, "TLS": "handshake-or-stream-rejected"}))
     elif mode == "malformed":
         address, port = sys.argv[2], int(sys.argv[3])
         data = Path(sys.argv[4]).read_bytes()[:int(sys.argv[5])]
@@ -1071,7 +1134,8 @@ def child():
 
 
 def main():
-    guard()
+    guard_identity()
+    guard_fresh_state()
     with tempfile.TemporaryDirectory(prefix="vpn-profiles-", dir="/var/tmp") as temporary:
         lab = Lab(Path(temporary))
         try:
@@ -1080,6 +1144,9 @@ def main():
             lab.evidence["result"] = "FAIL"
             lab.evidence["failed_stage"] = getattr(lab, "stage", "initialization")
             lab.evidence["public_error_type"] = type(error).__name__
+            if type(error) is AssertionError:
+                # These are the driver's authored constraints, not raw logs.
+                lab.evidence["failure_constraint"] = str(error)
             if isinstance(error, PrerequisiteError):
                 lab.evidence["required_prerequisite"] = str(error)
             raise

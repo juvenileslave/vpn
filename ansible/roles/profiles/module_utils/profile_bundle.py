@@ -108,25 +108,54 @@ def upstream_address(value):
             # dialers also accept legacy numeric forms such as 127.1/0x7f000001.
             address = ipaddress.IPv4Address(socket.inet_aton(name))
         except OSError:
+            require(re.fullmatch(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*", name) is not None, "upstream endpoint must be an IP address or DNS name")
             return
     mapped = address.ipv4_mapped if address.version == 6 else None
     require(not address.is_loopback and not (mapped is not None and mapped.is_loopback), "upstream loopback endpoints are forbidden")
 
 
+def wireguard_key(value, name):
+    """Pinned Xray accepts hex or standard/URL-safe base64 WireGuard keys."""
+    require(isinstance(value, str) and bool(value), name + " must be a WireGuard key")
+    if re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return
+    require(re.fullmatch(r"(?:[A-Za-z0-9+/]{43}|[A-Za-z0-9_-]{43})=?", value) is not None, name + " must encode 32 bytes")
+    try:
+        raw = base64.b64decode(value.rstrip("=") + "=", altchars=b"-_", validate=True)
+    except ValueError:
+        raise Invalid(name + " must encode 32 bytes") from None
+    require(len(raw) == 32, name + " must encode 32 bytes")
+
+
+def upstream_endpoint(value):
+    """Validate WireGuard's explicit host:port authority without DNS or dialing."""
+    require(isinstance(value, str) and bool(value), "upstream peer endpoint required")
+    try:
+        endpoint = urlsplit("//" + value)
+        hostname, listener = endpoint.hostname, endpoint.port
+    except ValueError:
+        raise Invalid("upstream peer endpoint authority or port invalid") from None
+    require(endpoint.netloc == value and endpoint.username is None and endpoint.password is None and re.search(r":[0-9]+$", value) is not None, "upstream peer endpoint must be host:port")
+    upstream_address(hostname)
+    port(listener, "upstream peer endpoint port")
+
+
 def validate_upstream(outbound):
     """Syntax/credential gates before writes; actual upstream auth is runtime-only."""
+    protocol, settings = outbound["protocol"], outbound["settings"]
+    stream_settings = outbound.get("streamSettings", {})
+    require(isinstance(stream_settings, dict), "upstream streamSettings must be a mapping")
+    require(isinstance(stream_settings.get("sockopt", {}), dict), "upstream sockopt must be a mapping")
     def walk(value):
         if isinstance(value, dict):
             for key, item in value.items():
                 if key == "port":
                     port(item, "upstream port")
                 if key in ("address", "endpoint"):
-                    require(isinstance(item, str), "upstream endpoint must be a string")
-                    # WireGuard uses host:port endpoint strings; other explicit
-                    # address fields are plain IP/DNS names, never resolved here.
+                    if protocol == "wireguard" and key == "address":
+                        continue  # Local tunnel IPs are checked as a list below.
                     if key == "endpoint":
-                        endpoint = urlsplit("//" + item)
-                        upstream_address(endpoint.hostname or "")
+                        upstream_endpoint(item)
                     else:
                         upstream_address(item)
                 if key in ("password", "pass", "privateKey", "publicKey", "secretKey"):
@@ -136,7 +165,6 @@ def validate_upstream(outbound):
             for item in value:
                 walk(item)
     walk(outbound)
-    protocol, settings = outbound["protocol"], outbound["settings"]
     records = settings.get("vnext" if protocol in ("vless", "vmess") else "servers")
     if protocol in ("vless", "vmess", "socks", "http", "trojan", "shadowsocks"):
         require(isinstance(records, list) and bool(records), "upstream requires explicit endpoints")
@@ -150,10 +178,61 @@ def validate_upstream(outbound):
                 ids([user.get("id") for user in users], "upstream client UUIDs")
             if protocol in ("trojan", "shadowsocks"):
                 require(isinstance(record.get("password"), str) and bool(record["password"]), "upstream password required")
+    elif protocol == "wireguard":
+        wireguard_key(settings.get("secretKey"), "upstream WireGuard secretKey")
+        if "address" in settings:
+            addresses = settings["address"]
+            require(isinstance(addresses, list) and bool(addresses), "upstream WireGuard address must be a nonempty IP/prefix list")
+            for value in addresses:
+                require(isinstance(value, str) and "%" not in value and ("/" not in value or re.search(r"/[0-9]+$", value) is not None), "upstream WireGuard address must be an IP or prefix")
+                try:
+                    ipaddress.ip_interface(value)
+                except ValueError:
+                    raise Invalid("upstream WireGuard address must be an IP or prefix") from None
+        peers = settings.get("peers")
+        require(isinstance(peers, list) and bool(peers), "upstream WireGuard peers required")
+        for peer in peers:
+            require(isinstance(peer, dict), "upstream WireGuard peer must be a mapping")
+            wireguard_key(peer.get("publicKey"), "upstream WireGuard publicKey")
+            if "preSharedKey" in peer and peer["preSharedKey"] != "":
+                wireguard_key(peer["preSharedKey"], "upstream WireGuard preSharedKey")
+            upstream_endpoint(peer.get("endpoint"))
+            if "allowedIPs" in peer:
+                allowed = peer["allowedIPs"]
+                require(isinstance(allowed, list), "upstream WireGuard allowedIPs must be a CIDR list")
+                for value in allowed:
+                    require(isinstance(value, str) and re.search(r"/[0-9]+$", value) is not None and "%" not in value, "upstream WireGuard allowedIPs must contain CIDRs")
+                    try:
+                        ipaddress.ip_network(value, strict=False)
+                    except ValueError:
+                        raise Invalid("upstream WireGuard allowedIPs must contain CIDRs") from None
+    elif protocol == "hysteria":
+        require(type(settings.get("version")) is int and settings["version"] == 2, "upstream Hysteria settings version must be 2")
+        upstream_address(settings.get("address"))
+        port(settings.get("port"), "upstream Hysteria endpoint port")
+        network = stream_settings.get("method", stream_settings.get("network"))
+        require(isinstance(network, str) and network.lower() == "hysteria", "upstream Hysteria requires hysteria transport")
+        security = stream_settings.get("security")
+        require(isinstance(security, str) and security.lower() == "tls", "upstream Hysteria requires TLS")
+        require(isinstance(stream_settings.get("tlsSettings", {}), dict), "upstream Hysteria tlsSettings must be a mapping")
+        transport = stream_settings.get("hysteriaSettings")
+        require(isinstance(transport, dict), "upstream Hysteria hysteriaSettings required")
+        require(type(transport.get("version")) is int and transport["version"] == 2, "upstream Hysteria transport version must be 2")
+        require(isinstance(transport.get("auth"), str) and bool(transport["auth"]), "upstream Hysteria transport auth required")
+
+
+def validate_profile_options(options):
+    """Credential-free fixed self-steal gates shared by inventory and renderer."""
+    require(options.get("slot_fanout") == "ports", "slot_fanout sni is unavailable; ports must be selected explicitly")
+    require(options.get("s2s_family") == "v6_prefer", "self-steal relay requires s2s_family v6_prefer")
+    require(options.get("xhttp_mode") == "stream-one", "xhttp_mode must be stream-one")
+
 
 
 def validate_host(host, kind):
     require(isinstance(host, dict), kind + " host must be a mapping")
+    host.setdefault("cover_tls_port", 9443)
+    host.setdefault("reality_max_time_diff_ms", 300000)
     require(DNS.fullmatch(host.get("reality_sni", "")) is not None, "reality_sni must be one exact lowercase DNS name")
     cover = port(host.get("cover_tls_port"), "cover_tls_port")
     require(cover != 80, "cover_tls_port cannot collide with HTTP-01 TCP80")
@@ -235,13 +314,11 @@ def validate(topology, secret):
     exit_host, relay = topology.get("exit"), topology.get("relay")
     validate_host(exit_host, "exit")
     validate_host(relay, "relay")
-    require(topology.get("slot_fanout") == "ports", "slot_fanout sni cannot distinguish slots with the single REALITY SNI; choose ports explicitly after feasibility test")
+    validate_profile_options(topology)
     n = topology.get("egress_slots")
     require(type(n) is int and 1 <= n <= 6, "egress_slots must be integer 1..6")
     require(len(relay["relay_slot_ports"]) == n, "relay_slot_ports must contain one port per fixed slot")
     require(topology.get("egress_family") in FAMILIES, "invalid egress_family")
-    require(topology.get("s2s_family") == "v6_prefer", "self-steal relay requires s2s_family v6_prefer")
-    require(topology.get("xhttp_mode") == "stream-one", "xhttp_mode must be stream-one")
     require(isinstance(topology.get("xhttp_path"), str) and re.fullmatch(r"/[^\s?#]*", topology["xhttp_path"]), "invalid xhttp_path")
     validate_probe_url(topology.get("profiles_probe_url", ""))
     validate_addresses(exit_host, relay)
@@ -271,8 +348,8 @@ def validate(topology, secret):
     for slot, outbound in upstreams.items():
         require(str(slot) in [str(x) for x in range(1, n)], "upstream slot outside fixed third-party range")
         require(isinstance(outbound, dict) and outbound.get("protocol") in ("vless", "vmess", "trojan", "shadowsocks", "socks", "http", "wireguard", "hysteria") and isinstance(outbound.get("settings"), dict) and bool(outbound["settings"]), "configured slots require a real explicit proxy outbound")
-        require("proxySettings" not in outbound and "dialerProxy" not in outbound.get("streamSettings", {}).get("sockopt", {}), "upstream cannot escape through an undeclared chained outbound")
         validate_upstream(outbound)
+        require("proxySettings" not in outbound and "dialerProxy" not in outbound.get("streamSettings", {}).get("sockopt", {}), "upstream cannot escape through an undeclared chained outbound")
     return creds, set(revoked)
 
 

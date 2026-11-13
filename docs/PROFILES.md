@@ -20,9 +20,9 @@ XHTTP + REALITY. Она заменяет два самостоятельных e
 | --- | --- |
 | `exit_direct_port`, `transit_port` | разные целые порты; без bool/строк; не SSH/API/origin |
 | `relay_slot_ports` | ровно `egress_slots` разных целых портов; индекс — постоянный слот |
-| `cover_tls_port` | отдельный порт приватного host-loopback origin |
+| `cover_tls_port` | отдельный порт приватного host-loopback origin; при отсутствии **9443**, явное значение проверяется |
 | `reality_target` | необязательная проверка совместимости входа: только производное `127.0.0.1:<cover_tls_port>`; внешний/другой target отвергается |
-| `reality_max_time_diff_ms` | положительное целое; исходная политика — **300000** |
+| `reality_max_time_diff_ms` | положительное целое; при отсутствии **300000**, явное значение проверяется |
 | `relay_egress_ipv4`, `relay_egress_ipv6` | явно объявленный фактический адрес выхода relay; валидный IP нужной семьи, нормализуемый для сравнения, без loopback/link-local/multicast/unspecified/IPv4-mapped; NAT-адрес не выводится из public IP |
 | `base_firewall_vpn_ports` | публичные TCP-listeners direct/relay; не transit/API/origin |
 | `base_firewall_source_ports` | transit TCP только от **точно** relay `/32` и `/128`; API TCP в точности `node_port_allow` |
@@ -30,6 +30,10 @@ XHTTP + REALITY. Она заменяет два самостоятельных e
 | `slot_fanout` | **явно `ports`**; `sni` отвергается, не переключается автоматически |
 | `s2s_family` | `v6_prefer` для этого фиксированного профиля |
 | `egress_family` | `v4_prefer`, `v6_prefer`, `v4_only` — внешний выход exit |
+
+Defaults разрешаются один раз в общем `validate_host`, который используют
+inventory и renderer. Эффективные значения входят в bundle identity; явные
+per-host overrides сохраняются.
 
 Секретный extra-vars/Vault файл, **вне checkout**, содержит:
 
@@ -47,6 +51,12 @@ XHTTP + REALITY. Она заменяет два самостоятельных e
   формы системного dialer и `localhost`/`.localhost`/локальные имена loopback.
   DNS-имя настоящего upstream не резолвится offline: его фактический адрес и
   proxy authentication остаются отдельным runtime gate, без freedom fallback.
+  WireGuard требует 32-байтовые `secretKey`/`peers[].publicKey` (hex либо
+  standard/URL-safe base64), непустой список peers и точный `endpoint` с портом,
+  без userinfo. Необязательный `preSharedKey` может отсутствовать или быть пустым.
+  Hysteria использует pinned v2 shape: `settings.version/address/port`, TLS и
+  transport `hysteria`, `hysteriaSettings.version=2` с непустым `auth`.
+  Недостающие/некорректные credentials и устаревшие формы отвергаются до записи.
 - `profiles_revoked_client_ids`: текущий независимый список отозванных UUID;
   его накладывают и при восстановлении старого bundle. Renderer не вращает keys.
 
@@ -147,6 +157,12 @@ CAP_NET_ADMIN/netns, IPv6, публичной загрузкой pinned packages
 language-only `go1.27`. Build выполняется с `-mod=readonly`, без изменения
 checkout/dependency checksums и без owner credentials.
 
+Driver и каждый child CLI сначала проверяют root/Linux/hosted-guest identity;
+refusal возвращает exit 2 до чтения private input или сетевых действий. Проверка
+отсутствия owned state применяется только к начальному запуску lab.
+Startup-логи остаются private; публичный report содержит категории и exit codes,
+не сырые diagnostics.
+
 ```sh
 make -C ansible bootstrap
 sudo env PATH="$PATH" HOME="$HOME" \
@@ -169,18 +185,23 @@ namespace через `nsenter --net`, не `ip netns exec`, чтобы сохр�
 с relay и требует отличия от exit до запуска Node.
 
 Pinned Node image попадает в приватный daemon одним `docker pull` через
-loopback CONNECT-прокси в exit namespace **до** сценария: классический Docker
+локальный CONNECT-прокси на synthetic bridge в exit namespace **до** сценария: классический Docker
 image store не сохраняет repo digest после `docker save`/`load`, а compose с
 digest-pinned reference иначе пытался бы скачать образ без маршрута. После
 pull прокси останавливается, relay по-прежнему без default route; драйвер
 проверяет и публикует отсутствие default routes и точное разрешение pinned
 reference.
 
+Cover проверяет полный общий nginx config с compiled prefix: относительные
+`load_module` сохраняют штатное разрешение путей. Другие nginx sites не меняются.
+
 Cover выдаётся настоящим Certbot HTTP-01 через pinned local Pebble, без
 challenge bypass; relay запускает тот же role-generated origin snapshot в
 своём host network. Проверяются chain/SAN/expiry, H2, actual namespaces,
-visitor TLS1.2/1.3 + H1/H2, actual origin baseline для unknown/missing SNI,
-Host/path, разрешённый direct/relay tunnel, source ACL v4/v6 и закрытые API/origin.
+visitor TLS1.2/1.3 + H1/H2 + GET/HEAD, actual origin baseline для unknown/missing
+SNI/Host/path, разрешённый direct/relay tunnel, source ACL v4/v6 и закрытые API/origin.
+Report содержит 16 method/protocol cases и 144 node-attributed origin/public
+baseline cases; HEAD сравнивает status/representation headers и отсутствие body.
 
 Сеть — synthetic bridge/netns без default routes. В fixture подставляется
 **конкретный geoip.dat**: документационные test endpoints исключены из PRIVATE.
@@ -192,7 +213,8 @@ RFC1918/ULA/link-local/loopback остаются blocked. Production routing/fin
 доказательство всех stock reserved-IP правил production. Core не заменяется.
 
 Для наблюдений driver добавляет **только в одноразовую effective-конфигурацию**
-`log.access: /dev/stdout` и указанное точечное разрешение sink. Immutable
+`log.access: /proc/1/fd/1` и указанное точечное разрешение sink. Worker stdout
+перехватывается s6; init stream даёт actual access observations в `docker logs`. Immutable
 `exit.json`/`relay.json` и production-конфигурация не меняются. Receipt содержит
 исходный file SHA256, canonical effective-config SHA256 и точное описание обеих
 дельт для каждого bundle/node; effective config отдельно проходит настоящий

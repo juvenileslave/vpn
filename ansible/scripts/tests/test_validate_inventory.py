@@ -234,6 +234,32 @@ class ValidateInventoryTest(unittest.TestCase):
         self.all_vars["reality_target"] = "127.0.0.1:9443"
         self.assertEqual(self.errors(), [])
 
+    def test_shared_defaults_and_per_host_overrides(self) -> None:
+        for key in ("cover_tls_port", "reality_max_time_diff_ms"):
+            self.all_vars.pop(key, None)
+            for values in self.group_vars.values():
+                values.pop(key, None)
+        self.assertEqual(self.errors(), [])
+        self.all_vars.update(cover_tls_port=9443, reality_max_time_diff_ms=300000)
+        self.assertEqual(self.errors(), [])
+        self.host_vars = {
+            "exit-a": {"cover_tls_port": 10443, "reality_max_time_diff_ms": 150000, "reality_target": "127.0.0.1:10443"},
+            "relay-a": {"cover_tls_port": 11443, "reality_max_time_diff_ms": 600000, "reality_target": "127.0.0.1:11443"},
+        }
+        self.assertEqual(self.errors(), [])
+        self.host_vars["exit-a"]["reality_target"] = "127.0.0.1:9443"
+        self.assertInvalid("reality_target")
+
+    def test_explicit_bad_defaults_are_not_treated_as_omitted(self) -> None:
+        original = copy.deepcopy(self.group_vars)
+        for group in ("exit", "relay"):
+            for key in ("cover_tls_port", "reality_max_time_diff_ms"):
+                for value in (None, True, "9443", 0, -1):
+                    with self.subTest(group=group, key=key, value=value):
+                        self.group_vars = copy.deepcopy(original)
+                        self.group_vars[group][key] = value
+                        self.assertInvalid(key)
+
     def test_source_acl_matches_explicit_egress_not_public_address(self) -> None:
         self.group_vars["relay"]["relay_egress_ipv4"] = "198.51.100.99"
         self.assertInvalid("transit source ACL")
@@ -254,9 +280,18 @@ class ValidateInventoryTest(unittest.TestCase):
                 self.group_vars["exit"]["cover_tls_port"] = value
                 self.assertTrue(self.errors())
 
-    def test_unavailable_sni_mode_is_explicit(self) -> None:
-        self.all_vars["slot_fanout"] = "sni"
-        self.assertInvalid("ports must be selected explicitly")
+    def test_fixed_self_steal_options_rejected_by_inventory(self) -> None:
+        original = copy.deepcopy(self.all_vars)
+        original_groups = copy.deepcopy(self.group_vars)
+        for key, values in (("slot_fanout", ("sni",)), ("s2s_family", ("v4_only", "v6_only")), ("xhttp_mode", ("auto", "packet-up", "stream-up"))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.all_vars = copy.deepcopy(original)
+                    self.group_vars = copy.deepcopy(original_groups)
+                    self.all_vars[key] = value
+                    if key == "s2s_family":
+                        self.group_vars["relay"][key] = value
+                    self.assertInvalid(key)
 
     def test_exact_loopback_management_is_allowed(self) -> None:
         self.assertEqual(self.errors(), [])
