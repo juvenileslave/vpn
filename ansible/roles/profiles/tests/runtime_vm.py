@@ -570,6 +570,7 @@ class Lab:
             return
         for kind in ("exit", "relay"):
             config = candidate / (kind + ".json")
+            self.stage = kind + "-core-config-test"
             command([self.xray, "run", "-test", "-config", config], env=self.core_env)
             original = json.loads(config.read_text())
             instrumented = copy.deepcopy(original)
@@ -582,12 +583,14 @@ class Lab:
             observed_config = self.work / (kind + "-observed-config.private.json")
             private_json(observed_config, instrumented)
             command([self.xray, "run", "-test", "-config", observed_config], env=self.core_env)
+            self.stage = kind + "-core-api-start"
             self.api_start(kind, instrumented)
         for config in (candidate / "clients").glob("*.json"):
             command([self.xray, "run", "-test", "-config", config], env=self.core_env)
         self.installed_identity = candidate.name
 
     def client(self, candidate, name, port, *, version=4, change=None):
+        self.stage = "client-" + name + "-listener"
         if name in self.client_processes:
             old = self.client_processes.pop(name)
             old.terminate()
@@ -986,9 +989,12 @@ class Lab:
         self.spawn("upstream", [self.xray, "run", "-config", path], "upstream", env=self.core_env)
         self.stage = "coherent-playbook-and-authorized-baseline"
         candidate, _ = self.render()
+        self.stage = "core-config-activation"
         self.activate_configs(candidate)
+        self.stage = "direct-profile-application-transfer"
         self.client(candidate, "direct-0", 2080)
         self.transfer(2080)
+        self.stage = "relay-profile-application-transfer"
         self.client(candidate, "relay-0", 1080)
         time.sleep(5)
         self.transfer()
