@@ -196,7 +196,32 @@ class Lab:
         path.write_text(yaml.safe_dump(play))
         varfile = self.work / "deployment-vars.private.json"
         private_json(varfile, variables or {})
-        return command([ROOT / ".venv/bin/ansible-playbook", "-i", inventory, path, "-e", "@" + str(varfile), *(["--check"] if check else [])], expected=expected)
+        result = subprocess.run([str(ROOT / ".venv/bin/ansible-playbook"), "-i", str(inventory), str(path), "-e", "@" + str(varfile), *(["--check"] if check else [])], capture_output=True, timeout=600, check=False)
+        if (result.returncode == 0) != expected:
+            approved = set()
+            def task_names(tasks):
+                for task in tasks:
+                    if not isinstance(task, dict):
+                        continue
+                    name = task.get("name")
+                    if isinstance(name, str) and "{{" not in name:
+                        approved.add(name)
+                    for section in ("block", "rescue", "always"):
+                        task_names(task.get(section, []))
+            for role in roles:
+                directory = Path(role["name"]) if isinstance(role, dict) else ROOT / "ansible/roles" / role
+                for definition in (directory / "tasks").glob("*.yml"):
+                    task_names(yaml.safe_load(definition.read_text()) or [])
+            failed_task = None
+            for line in result.stdout.decode(errors="replace").splitlines():
+                match = re.match(r"^TASK \[(.*)\]", line)
+                if match:
+                    name = match.group(1).split(" : ", 1)[-1]
+                    failed_task = name if name in approved else None
+            if failed_task is not None:
+                self.evidence["public_failed_role_task"] = failed_task
+            raise AssertionError("role execution failed; private values withheld")
+        return result.stdout
 
     def render(self, topology=None, secret=None, *, expected=True):
         topology, secret = topology or self.topology, secret or self.secret
@@ -324,6 +349,7 @@ class Lab:
         (site / "index.html").write_text('<!doctype html><html lang="en"><head><title>Atlas field journal</title><link rel="stylesheet" href="journal.css"></head><body><h1>Atlas field journal</h1><p>A synthetic archive of coastal observations, local maps and weather notes from imaginary islands.</p><a href="notes.html">Field notes</a></body></html>\n')
         (site / "journal.css").write_text("body { max-width: 48rem; margin: 3rem auto; color: #243; }\n")
         (site / "notes.html").write_text("<!doctype html><title>Notes</title><p>Synthetic coastal weather observations.</p>\n")
+        self.stage = "local-ACME-API-certificate-fixture"
         ca = self.work / "acme-ca"
         ca.mkdir(mode=0o700)
         command(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", ca / "key.pem", "-out", ca / "cert.pem", "-days", "2", "-subj", "/CN=Disposable ACME API CA"])
@@ -331,10 +357,11 @@ class Lab:
         (ca / "api.ext").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
         command(["openssl", "x509", "-req", "-in", ca / "api.csr", "-CA", ca / "cert.pem", "-CAkey", ca / "key.pem", "-CAcreateserial", "-out", ca / "api.pem", "-days", "2", "-extfile", ca / "api.ext"])
         private_json(self.work / "pebble.json", {"pebble": {"listenAddress": "127.0.0.1:14000", "managementListenAddress": "127.0.0.1:15000", "certificate": str(ca / "api.pem"), "privateKey": str(ca / "api.key"), "httpPort": 80, "tlsPort": 5001, "externalAccountBindingRequired": False}})
+        self.stage = "local-ACME-DNS-and-management-readiness"
         self.spawn("exit", ["dnsmasq", "--keep-in-foreground", "--no-resolv", "--no-hosts", "--bind-interfaces", "--listen-address=127.0.0.1", "--port=53535", "--address=/.example.test/127.0.0.1"], "dns")
         self.spawn("exit", [self.work / "bin/pebble", "-config", self.work / "pebble.json", "-dnsserver", "127.0.0.1:53535"], "pebble", env={**os.environ, "PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0", "PEBBLE_VA_ALWAYS_VALID": "0"})
         for _ in range(90):
-            result = subprocess.run(["curl", "-fsSk", "--noproxy", "*", "https://127.0.0.1:15000/roots/0"], capture_output=True, check=False)
+            result = subprocess.run(["curl", "-fsS", "--cacert", str(ca / "cert.pem"), "--noproxy", "*", "https://localhost:15000/roots/0"], capture_output=True, check=False)
             if result.returncode == 0 and b"BEGIN CERTIFICATE" in result.stdout:
                 self.trust = self.work / "root.pem"
                 self.trust.write_bytes(result.stdout)
@@ -343,10 +370,12 @@ class Lab:
         else:
             raise AssertionError("real local ACME root unavailable")
         self.cover_vars = {**self.topology["exit"], "cover_acme_agree_tos": True, "cover_acme_http_reachable": True, "cover_disposable_test": True, "cover_acme_directory": "https://localhost:14000/dir", "cover_acme_test_ca": str(ca / "cert.pem"), "cover_certificate_trust": str(self.trust)}
+        self.stage = "actual-owned-cover-role"
         self.play(["cover_site"], variables=self.cover_vars)
         self.first_site = Path("/var/lib/cover-site/active").resolve()
         command(["/usr/local/libexec/cover-site/lifecycle.py", "health"])
         command(["openssl", "x509", "-in", self.first_site / "certificate/cert.pem", "-checkend", "3600", "-noout"])
+        self.stage = "role-generated-relay-origin-replica"
         conf = self.work / "relay-nginx.conf"
         conf.write_text('pid ' + str(self.work / 'relay-nginx.pid') + ';\nerror_log ' + str(self.work / 'relay-nginx.private.log') + ';\nevents {}\nhttp { include /etc/nginx/mime.types; include ' + str(self.first_site / 'site.conf') + '; }\n')
         self.relay_nginx_conf = conf
