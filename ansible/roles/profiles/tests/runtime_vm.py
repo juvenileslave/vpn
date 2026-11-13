@@ -591,11 +591,13 @@ class Lab:
 
     def client(self, candidate, name, port, *, version=4, change=None):
         self.stage = "client-" + name + "-listener"
+        self.evidence["public_client_phase"] = "load"
         if name in self.client_processes:
             old = self.client_processes.pop(name)
             old.terminate()
             old.wait(timeout=10)
         config = json.loads((candidate / ("clients/" + name + ".json")).read_text())
+        self.evidence["public_client_phase"] = "override"
         config["inbounds"][0]["port"] = port
         if version == 6:
             host = self.topology["exit" if name.startswith("direct") else "relay"]
@@ -603,9 +605,12 @@ class Lab:
         if change:
             change(config)
         path = self.work / ("client-" + name + ".private.json")
+        self.evidence["public_client_phase"] = "write"
         private_json(path, config)
+        self.evidence["public_client_phase"] = "spawn"
         process = self.spawn("client", [self.xray, "run", "-config", path], "client-" + name, env=self.core_env)
         self.client_processes[name] = process
+        self.evidence["public_client_phase"] = "ready"
 
         def client_facts():
             try:
@@ -1125,6 +1130,7 @@ def main():
         except Exception as error:
             lab.evidence["result"] = "FAIL"
             lab.evidence["failed_stage"] = getattr(lab, "stage", "initialization")
+            lab.evidence["public_error_type"] = type(error).__name__
             if isinstance(error, PrerequisiteError):
                 lab.evidence["required_prerequisite"] = str(error)
             raise
