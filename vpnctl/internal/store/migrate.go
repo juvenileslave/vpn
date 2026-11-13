@@ -35,6 +35,16 @@ var migrations = []migration{
 			updated_at INTEGER NOT NULL
 		) STRICT`,
 	),
+	// Version 2: Telegram bot offset and processed update IDs.
+	execAll(
+		`CREATE TABLE telegram_offsets (
+			id            INTEGER PRIMARY KEY CHECK (id = 1),
+			update_offset INTEGER NOT NULL CHECK (update_offset >= 0)
+		) STRICT`,
+		`CREATE TABLE telegram_updates (
+			update_id INTEGER PRIMARY KEY CHECK (update_id > 0)
+		) STRICT`,
+	),
 }
 
 func execAll(statements ...string) migration {

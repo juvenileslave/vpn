@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -404,7 +405,9 @@ func TestOpenPreservesPreexistingSidecarWithoutDatabase(t *testing.T) {
 func TestFailedOpenOfExistingDatabaseKeepsWALData(t *testing.T) {
 	ctx := context.Background()
 	path := tempPath(t)
-	s, err := Open(ctx, path)
+	// Start from the newest schema below this build's latest, so the test
+	// keeps exercising a real forward migration after the WAL recovery.
+	s, err := open(ctx, path, migrations[:len(migrations)-1])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +436,7 @@ func TestFailedOpenOfExistingDatabaseKeepsWALData(t *testing.T) {
 			t.Fatalf("%s removed: %v", filepath.Base(name), err)
 		}
 	}
-	mustExec(t, writer, "PRAGMA user_version = 1")
+	mustExec(t, writer, fmt.Sprintf("PRAGMA user_version = %d", len(migrations)-1))
 	writer.Close()
 
 	s, err = Open(ctx, path)
