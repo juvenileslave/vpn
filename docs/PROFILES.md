@@ -142,6 +142,11 @@ runtime report; только явный `ports` mode имеет положите
 CAP_NET_ADMIN/netns, IPv6, публичной загрузкой pinned packages/image/toolchain.
 Не existing VM, сервер, real panel, owner secrets, публичные DNS/ACME.
 
+Для protocol helper закреплён полный minimum Go `1.27.1` в его `go.mod`;
+`GOTOOLCHAIN=auto` получает реальную patch-version, а не недоступное имя
+language-only `go1.27`. Build выполняется с `-mod=readonly`, без изменения
+checkout/dependency checksums и без owner credentials.
+
 ```sh
 make -C ansible bootstrap
 sudo env PATH="$PATH" HOME="$HOME" \
