@@ -162,6 +162,12 @@ namespace daemon, не CLI. API использует настоящие generate
 и RS256 JWT, без выдуманной health endpoint. Stock core извлекается из
 проверенного image и служит также real client/upstream runtime.
 
+Relay использует также собственный containerd: отдельные address/root/state,
+без общего host `/run/containerd/containerd.sock`. Оба процесса входят в net
+namespace через `nsenter --net`, не `ip netns exec`, чтобы сохранить видимость
+реального cgroup mount. Driver сравнивает inode net namespace dockerd/containerd
+с relay и требует отличия от exit до запуска Node.
+
 Cover выдаётся настоящим Certbot HTTP-01 через pinned local Pebble, без
 challenge bypass; relay запускает тот же role-generated origin snapshot в
 своём host network. Проверяются chain/SAN/expiry, H2, actual namespaces,

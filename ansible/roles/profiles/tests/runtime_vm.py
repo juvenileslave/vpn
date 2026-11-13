@@ -176,10 +176,11 @@ class Lab:
         ns = self.ns(kind)
         return command((["ip", "netns", "exec", ns] if ns else []) + [str(x) for x in args], **kwargs)
 
-    def spawn(self, kind, args, name, env=None):
+    def spawn(self, kind, args, name, env=None, *, network_only=False):
         ns = self.ns(kind)
+        prefix = ["nsenter", "--net=/run/netns/" + ns] if ns and network_only else ["ip", "netns", "exec", ns] if ns else []
         output = (self.work / (name + ".private.log")).open("wb")
-        process = subprocess.Popen((["ip", "netns", "exec", ns] if ns else []) + [str(x) for x in args], stdout=output, stderr=subprocess.STDOUT, env=env)
+        process = subprocess.Popen(prefix + [str(x) for x in args], stdout=output, stderr=subprocess.STDOUT, env=env)
         output.close()
         self.processes.append(process)
         return process
@@ -277,8 +278,26 @@ class Lab:
         data.mkdir(mode=0o700)
         endpoint = "unix://" + str(data / "docker.sock")
         self.relay_env = {**os.environ, "DOCKER_HOST": endpoint}
+        containerd_socket = data / "containerd.sock"
+        containerd_config = data / "containerd.toml"
+        containerd_config.write_text('version = 3\ndisabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]\n')
+        containerd_config.chmod(0o600)
+        runtime = self.spawn("relay", ["containerd", "--config", containerd_config, "--address", containerd_socket, "--root", data / "containerd-data", "--state", data / "containerd-state"], "relay-containerd", network_only=True)
+        self.stage = "isolated-relay-containerd"
+        for _ in range(30):
+            if runtime.poll() is not None:
+                self.evidence["public_containerd_startup_error"] = (self.work / "relay-containerd.private.log").read_text(errors="replace")
+                raise AssertionError("private relay containerd exited before readiness")
+            ready = subprocess.run(["ctr", "--address", str(containerd_socket), "version"], capture_output=True, check=False)
+            if ready.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            self.evidence["public_containerd_startup_error"] = (self.work / "relay-containerd.private.log").read_text(errors="replace")
+            raise AssertionError("private relay containerd did not become ready")
         private_json(data / "daemon.json", {})
-        daemon = self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker")
+        self.stage = "isolated-relay-docker-daemon"
+        daemon = self.spawn("relay", ["dockerd", "--config-file", data / "daemon.json", "--host", endpoint, "--containerd", containerd_socket, "--data-root", data / "data", "--exec-root", data / "exec", "--pidfile", data / "pid", "--bridge=none", "--iptables=false", "--ip6tables=false", "--ip-forward=false", "--storage-driver=vfs"], "relay-docker", network_only=True)
         for _ in range(90):
             if daemon.poll() is not None:
                 # No Node/container PKI has been loaded into this daemon yet.
@@ -291,6 +310,11 @@ class Lab:
         else:
             self.evidence["public_daemon_startup_error"] = (self.work / "relay-docker.private.log").read_text(errors="replace")
             raise AssertionError("isolated relay Docker daemon not ready")
+        namespace = Path("/run/netns/" + self.ns("relay")).stat().st_ino
+        assert Path("/proc/" + str(runtime.pid) + "/ns/net").stat().st_ino == namespace, "containerd is outside relay host-network namespace"
+        assert Path("/proc/" + str(daemon.pid) + "/ns/net").stat().st_ino == namespace, "dockerd is outside relay host-network namespace"
+        assert Path("/proc/self/ns/net").stat().st_ino != namespace, "relay runtime shares exit network namespace"
+        self.evidence["relay_runtime_isolation"] = {"private_containerd": True, "daemon_and_containerd_same_relay_netns": True, "distinct_from_exit": True}
         self.stage = "isolated-relay-image-load"
         command(["docker", "load", "-i", self.work / "node-image.tar"], env=self.relay_env)
 
