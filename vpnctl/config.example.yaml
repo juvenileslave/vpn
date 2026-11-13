@@ -21,3 +21,20 @@ probe:
   timeout: 5s
   interval: 60s
 log_level: info
+
+bot:
+  # Имя переменной окружения с токеном Telegram-бота, а не сам токен.
+  token_env: VPNCTL_BOT_TOKEN
+  # SQLite-база с offset и обработанными update_id (создаётся при запуске).
+  state_db: state.db
+  # Необязательный адрес Bot API: https-хост или loopback http для
+  # self-hosted сервера и тестового fake API. По умолчанию api.telegram.org.
+  # api_base: http://127.0.0.1:8081
+  # Allowlist: положительные числовые Telegram user ID; роли admin и viewer.
+  operators:
+    - id: 100000001
+      role: admin
+    - id: 100000002
+      role: viewer
+  # Необязательные явно разрешённые не-private чаты (например, группа).
+  chat_ids: [-1000000000001]

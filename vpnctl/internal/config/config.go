@@ -24,6 +24,7 @@ type Config struct {
 	Panel    Panel
 	Nodes    []Node
 	Probe    Probe
+	Bot      Bot
 	LogLevel string
 }
 
@@ -46,6 +47,38 @@ type Node struct {
 type Probe struct {
 	Timeout  time.Duration
 	Interval time.Duration
+}
+
+// Role is an allowlisted Telegram operator role.
+type Role string
+
+// Operator roles. Both roles are read-only in this build; the distinction is
+// kept for later tasks and for notification recipients.
+const (
+	RoleAdmin  Role = "admin"
+	RoleViewer Role = "viewer"
+)
+
+// Operator is one allowlisted Telegram user.
+type Operator struct {
+	// ID is the numeric Telegram user ID.
+	ID   int64
+	Role Role
+}
+
+// Bot describes the Telegram bot.
+type Bot struct {
+	// TokenEnv is the name of the environment variable holding the bot token.
+	TokenEnv string
+	// APIBase is the Bot API base URL; nil means the official endpoint.
+	APIBase *url.URL
+	// StateDB is the SQLite database used for the update offset.
+	StateDB string
+	// Operators is the non-empty allowlist.
+	Operators []Operator
+	// ChatIDs are non-private chats that may be answered. Private chats are
+	// always eligible when the sender is allowlisted.
+	ChatIDs []int64
 }
 
 // Problem is a single validation failure at a configuration path such as
@@ -95,6 +128,7 @@ type rawConfig struct {
 	Panel    *rawPanel `yaml:"panel"`
 	Nodes    []rawNode `yaml:"nodes"`
 	Probe    *rawProbe `yaml:"probe"`
+	Bot      *rawBot   `yaml:"bot"`
 	LogLevel string    `yaml:"log_level"`
 }
 
@@ -113,6 +147,19 @@ type rawNode struct {
 type rawProbe struct {
 	Timeout  string `yaml:"timeout"`
 	Interval string `yaml:"interval"`
+}
+
+type rawBot struct {
+	TokenEnv  string        `yaml:"token_env"`
+	APIBase   string        `yaml:"api_base"`
+	StateDB   string        `yaml:"state_db"`
+	Operators []rawOperator `yaml:"operators"`
+	ChatIDs   []int64       `yaml:"chat_ids"`
+}
+
+type rawOperator struct {
+	ID   *int64 `yaml:"id"`
+	Role string `yaml:"role"`
 }
 
 // Load reads, strictly decodes and validates the configuration at path.
@@ -221,6 +268,8 @@ func validate(raw rawConfig) (Config, error) {
 		cfg.Probe.Interval = positiveDuration("probe.interval", raw.Probe.Interval, add)
 	}
 
+	cfg.Bot = validateBot(raw.Bot, add)
+
 	switch {
 	case raw.LogLevel == "":
 		add("log_level", "is required")
@@ -265,6 +314,131 @@ func validatePanelURL(raw string, add func(path, format string, args ...any)) *u
 		return nil
 	}
 	return u
+}
+
+func validateBot(raw *rawBot, add func(path, format string, args ...any)) Bot {
+	var bot Bot
+	if raw == nil {
+		add("bot", "is required")
+		return bot
+	}
+	switch {
+	case raw.TokenEnv == "":
+		add("bot.token_env", "is required")
+	case !tokenEnvPattern.MatchString(raw.TokenEnv):
+		add("bot.token_env", "must be an environment variable name matching %s", tokenEnvPattern)
+	default:
+		bot.TokenEnv = raw.TokenEnv
+	}
+	if raw.APIBase != "" {
+		bot.APIBase = validateBotAPIBase(raw.APIBase, add)
+	}
+	switch {
+	case raw.StateDB == "":
+		add("bot.state_db", "is required")
+	case strings.ContainsRune(raw.StateDB, 0):
+		add("bot.state_db", "must not contain NUL bytes")
+	default:
+		bot.StateDB = raw.StateDB
+	}
+
+	if len(raw.Operators) == 0 {
+		add("bot.operators", "must contain at least one operator")
+	}
+	seen := make(map[int64]int, len(raw.Operators))
+	for i, op := range raw.Operators {
+		p := fmt.Sprintf("bot.operators[%d]", i)
+		switch {
+		case op.ID == nil:
+			add(p+".id", "is required")
+		case *op.ID <= 0:
+			add(p+".id", "must be a positive Telegram user ID, got %d", *op.ID)
+		default:
+			if first, dup := seen[*op.ID]; dup {
+				add(p+".id", "duplicates bot.operators[%d].id %d", first, *op.ID)
+			} else {
+				seen[*op.ID] = i
+			}
+		}
+		role := Role(op.Role)
+		switch role {
+		case RoleAdmin, RoleViewer:
+		default:
+			add(p+".role", "must be one of admin, viewer, got %q", op.Role)
+		}
+		if op.ID != nil && *op.ID > 0 {
+			bot.Operators = append(bot.Operators, Operator{ID: *op.ID, Role: role})
+		}
+	}
+
+	chats := make(map[int64]int, len(raw.ChatIDs))
+	for i, id := range raw.ChatIDs {
+		p := fmt.Sprintf("bot.chat_ids[%d]", i)
+		if id == 0 {
+			add(p, "must be a non-zero Telegram chat ID")
+			continue
+		}
+		if first, dup := chats[id]; dup {
+			add(p, "duplicates bot.chat_ids[%d] %d", first, id)
+			continue
+		}
+		chats[id] = i
+		bot.ChatIDs = append(bot.ChatIDs, id)
+	}
+	return bot
+}
+
+// validateBotAPIBase accepts the official https endpoint or a loopback http
+// endpoint used by a self-hosted Bot API server or a test fake. The URL is
+// never repeated in an error: it may contain userinfo.
+func validateBotAPIBase(raw string, add func(path, format string, args ...any)) *url.URL {
+	const path = "bot.api_base"
+	u, err := url.Parse(raw)
+	if err != nil {
+		add(path, "is not a valid URL")
+		return nil
+	}
+	ok := true
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !isLoopbackHost(u.Hostname()) {
+			add(path, "must use https unless the host is loopback")
+			ok = false
+		}
+	default:
+		add(path, "must use https unless the host is loopback")
+		ok = false
+	}
+	if u.User != nil {
+		add(path, "must not contain userinfo")
+		ok = false
+	}
+	if u.Hostname() == "" {
+		add(path, "must have a host")
+		ok = false
+	}
+	if u.Path != "" && u.Path != "/" {
+		add(path, "must not contain a path")
+		ok = false
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		add(path, "must not contain a query or fragment")
+		ok = false
+	}
+	if !ok {
+		return nil
+	}
+	u.Path = ""
+	return u
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 func positiveDuration(path, raw string, add func(path, format string, args ...any)) time.Duration {
