@@ -1,14 +1,13 @@
 package vless
 
 import (
-	"bytes"
-	"encoding/base64"
-	"strings"
-	"unicode/utf8"
+	"errors"
+
+	"github.com/juvenileslave/vpn/vpnctl/internal/upstream/sharelink"
 )
 
 // MaxSubscriptionBytes bounds the raw subscription body.
-const MaxSubscriptionBytes = 1 << 20
+const MaxSubscriptionBytes = sharelink.MaxSubscriptionBytes
 
 // Encoding is the detected subscription encoding.
 type Encoding string
@@ -39,61 +38,24 @@ type Subscription struct {
 // non-nil only when the body as a whole is unusable; per-entry failures are
 // reported in Subscription.Errors.
 func ParseSubscription(data []byte) (*Subscription, error) {
-	if len(data) > MaxSubscriptionBytes {
+	doc, err := sharelink.Decode(data)
+	switch {
+	case errors.Is(err, sharelink.ErrTooLarge):
 		return nil, ErrTooLarge
-	}
-	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	if !utf8.Valid(data) {
+	case errors.Is(err, sharelink.ErrEmpty):
+		return nil, ErrEmpty
+	case err != nil:
 		return nil, ErrEncoding
 	}
-	text := string(data)
-	sub := &Subscription{Encoding: EncodingPlain}
-	if strings.TrimSpace(text) == "" {
-		return nil, ErrEmpty
-	}
-	if !strings.Contains(text, "://") {
-		decoded, ok := decodeBase64(text)
-		if !ok {
-			return nil, ErrEncoding
-		}
-		text, sub.Encoding = decoded, EncodingBase64
-	}
 
-	entry := 0
-	for i, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		entry++
-		link, err := ParseLink(line)
+	sub := &Subscription{Encoding: Encoding(doc.Encoding)}
+	for _, e := range doc.Entries {
+		link, err := ParseLink(e.Text)
 		if err != nil {
-			sub.Errors = append(sub.Errors, &EntryError{Entry: entry, Line: i + 1, Err: err})
+			sub.Errors = append(sub.Errors, &EntryError{Entry: e.Number, Line: e.Line, Err: err})
 			continue
 		}
-		sub.Candidates = append(sub.Candidates, Candidate{Entry: entry, Line: i + 1, Link: link})
-	}
-	if entry == 0 {
-		return nil, ErrEmpty
+		sub.Candidates = append(sub.Candidates, Candidate{Entry: e.Number, Line: e.Line, Link: link})
 	}
 	return sub, nil
-}
-
-func decodeBase64(text string) (string, bool) {
-	// Line-wrapped base64 is common; ASCII whitespace is not part of the data.
-	compact := strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
-			return -1
-		}
-		return r
-	}, text)
-	enc := base64.RawStdEncoding
-	if strings.HasSuffix(compact, "=") {
-		enc = base64.StdEncoding
-	}
-	b, err := enc.Strict().DecodeString(compact)
-	if err != nil || !utf8.Valid(b) {
-		return "", false
-	}
-	return string(b), true
 }
