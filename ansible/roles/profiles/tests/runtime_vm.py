@@ -1061,9 +1061,11 @@ class Lab:
     def cleanup(self):
         # Root-owned credentials/captures stay private and are erased; public
         # report carries only synthetic endpoints and measured aggregate data.
+        self.cleanup_stage = "remove-owned-nodes"
         for env in (self.relay_env, None):
             if env is not None or hasattr(self, "extract"):
                 subprocess.run(["docker", "rm", "-f", "vpn-remnanode"], env=env, capture_output=True, check=False)
+        self.cleanup_stage = "stop-owned-processes"
         for process in reversed(self.processes):
             if process.poll() is None:
                 process.terminate()
@@ -1072,16 +1074,21 @@ class Lab:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=10)
+        self.cleanup_stage = "remove-owned-extractor"
         if hasattr(self, "extract"):
             subprocess.run(["docker", "rm", "-f", self.extract], capture_output=True, check=False)
+        self.cleanup_stage = "delete-owned-network"
         for ns in self.namespaces.values():
             subprocess.run(["ip", "netns", "del", ns], capture_output=True, check=False)
         subprocess.run(["ip", "link", "del", self.prefix + "br"], capture_output=True, check=False)
+        self.cleanup_stage = "restore-host-mappings"
         Path("/etc/hosts").write_bytes(self.old_hosts)
         for kind in ("exit", "relay"):
             shutil.rmtree("/opt/" + self.prefix + "-" + kind, ignore_errors=True)
+        self.cleanup_stage = "stop-owned-services"
         subprocess.run(["systemctl", "stop", "cover-site-renew.timer", "nginx", "vpn-base-firewall.service"], capture_output=True, check=False)
         subprocess.run(["nft", "delete", "table", "inet", "vpn_base"], capture_output=True, check=False)
+        self.cleanup_stage = "remove-owned-role-state"
         for path in ("/etc/nginx/sites-enabled/cover-site.conf",):
             p = Path(path)
             if p.is_symlink() or p.exists():
@@ -1138,7 +1145,7 @@ class Lab:
         self.load(candidate)
         self.stage = "idempotence-and-revocation-safe-rollback"
         self.idempotence_rollback(candidate)
-        self.evidence["result"] = "PASS"
+        self.evidence["behavioral_result"] = "PASS"
         return self.evidence
 
 
@@ -1226,35 +1233,70 @@ def child():
             except (OSError, TimeoutError):
                 pass
         print(json.dumps({"response_bytes": len(response), "seconds": time.monotonic() - start, "operation": "truncated-hello-only"}))
+    elif mode == "cleanup-smoke":
+        main(cleanup_only=True)
     else:
         raise SystemExit("unknown disposable child operation")
 
 
-def main():
+def main(*, cleanup_only=False):
     guard_identity()
     guard_fresh_state()
-    with tempfile.TemporaryDirectory(prefix="vpn-profiles-", dir="/var/tmp") as temporary:
-        lab = Lab(Path(temporary))
-        try:
-            lab.execute()
-        except Exception as error:
-            lab.evidence["result"] = "FAIL"
-            lab.evidence["failed_stage"] = getattr(lab, "stage", "initialization")
-            lab.evidence["public_error_type"] = type(error).__name__
-            if type(error) is AssertionError:
-                # These are the driver's authored constraints, not raw logs.
-                lab.evidence["failure_constraint"] = str(error)
-            if isinstance(error, PrerequisiteError):
-                lab.evidence["required_prerequisite"] = str(error)
-            raise
-        finally:
+    lab = None
+    failed = False
+    lab_cleanup_completed = False
+    temporary_removed = False
+    cleanup_failures = []
+    phase = "initialize-private-lab"
+    try:
+        with tempfile.TemporaryDirectory(prefix="vpn-profiles-", dir="/var/tmp") as temporary:
+            lab = Lab(Path(temporary))
+            lab.evidence["operation"] = "cleanup-smoke" if cleanup_only else "full-runtime"
             try:
-                report_dir = ROOT / "artifacts/active-probing"
-                report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                private_json(report_dir / "profiles-runtime.json", lab.evidence)
-                print(json.dumps(lab.evidence, sort_keys=True, indent=2))
+                if cleanup_only:
+                    runtime_contracts()
+                    lab.stage = "partial-resource-setup"
+                    lab.network()
+                    lab.prerequisites()
+                    lab.relay_daemon()
+                    lab.evidence["behavioral_result"] = "NOT_RUN"
+                else:
+                    lab.execute()
+            except BaseException as error:
+                failed = True
+                lab.evidence["failed_stage"] = getattr(lab, "stage", "initialization")
+                lab.evidence["public_error_type"] = type(error).__name__
+                if type(error) is AssertionError:
+                    # These are authored constraints, not raw diagnostics.
+                    lab.evidence["failure_constraint"] = str(error)
+                if isinstance(error, PrerequisiteError):
+                    lab.evidence["required_prerequisite"] = str(error)
             finally:
-                lab.cleanup()
+                phase = "lab-cleanup"
+                try:
+                    lab.cleanup()
+                    lab_cleanup_completed = True
+                except BaseException as error:
+                    failed = True
+                    cleanup_failures.append({"phase": phase, "stage": getattr(lab, "cleanup_stage", phase), "type": type(error).__name__, "errno": getattr(error, "errno", None)})
+                phase = "remove-private-temporary-directory"
+        temporary_removed = True
+    except BaseException as error:
+        if lab is None:
+            raise
+        failed = True
+        cleanup_failures.append({"phase": phase, "type": type(error).__name__, "errno": getattr(error, "errno", None)})
+    lab.evidence["cleanup"] = {"lab_completed": lab_cleanup_completed, "temporary_directory_removed": temporary_removed}
+    if cleanup_failures:
+        lab.evidence["cleanup_failures"] = cleanup_failures
+    lab.evidence["result"] = "FAIL" if failed else "PASS"
+    report_dir = ROOT / "artifacts/active-probing"
+    report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name = "profiles-cleanup-smoke.json" if cleanup_only else "profiles-runtime.json"
+    private_json(report_dir / name, lab.evidence)
+    print(json.dumps(lab.evidence, sort_keys=True), flush=True)
+    if failed:
+        raise RuntimeError("disposable scenario failed; private diagnostics withheld")
 
 
 if __name__ == "__main__":

@@ -165,6 +165,15 @@ Startup-логи остаются private; публичный report содер�
 Этот же guard применяется к `traffic.py serve|load|transfer`, включая прямой
 запуск child. Compiler/transfer stderr не входит в report: только exit code и
 авторское failure constraint, без усечения или публикации raw diagnostics.
+Итоговый `result: PASS` записывается и печатается **после** lab cleanup и
+удаления private temporary directory; `behavioral_result` отдельно описывает
+функциональные сценарии. Cleanup failure делает итоговый result `FAIL` и сохраняет
+только phase/stage/type/errno, без raw exception text. Stdout содержит один
+compact JSON на операцию с flush, чтобы stderr не разрывал многострочный report.
+Перед полной проверкой wrapper отдельно проверяет cleanup частично подготовленного
+стенда: реальные namespaces, pinned image, containerd и Docker daemon, без
+туннелей/cover/нагрузки. Это `operation: cleanup-smoke`, не полный VPN acceptance;
+report `profiles-cleanup-smoke.json` не заменяет `profiles-runtime.json`.
 
 ```sh
 make -C ansible bootstrap

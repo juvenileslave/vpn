@@ -120,6 +120,7 @@ class RuntimeChildRefusalTest(unittest.TestCase):
                 ["visitor", "127.0.0.1", port, str(private_input)],
                 ["malformed", "127.0.0.1", port, str(private_input), "1"],
                 ["replay-hello", "127.0.0.1", port, str(private_input)],
+                ["cleanup-smoke"],
             ]
             scripts = (
                 (Path(__file__).with_name("runtime_vm.py"), operations),
