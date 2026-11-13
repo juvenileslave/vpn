@@ -230,10 +230,12 @@ Route gate связывает один случайный flow ID с измер�
 probe-трафика. SYN, повторные пакеты, простое наличие адреса в pcap и один
 external IP этот gate не проходят. Ограничение 64 KiB относится к доказательству
 одноразового сценария, не добавляет production timeout или fallback cutoff.
-PCAP пишется с `--immediate-mode -U`: короткая передача не должна оставаться
-в capture buffer к моменту остановки. Даже при отказе route gate report хранит
-измеренные family bytes, признаки accepted socket и только fixture endpoints;
-это measurements неуспешной попытки, не доказательство принятого маршрута.
+PCAP собирает только second-hop TCP/18444 с `--immediate-mode -U` и буфером
+32 MiB, без лишних копий plain sink/upstream traffic. Kernel-drop statistics
+записываются числами; отсутствие подтверждения zero drops отвергает route proof.
+Даже при отказе gate report хранит measured family bytes, признаки accepted
+socket и только fixture endpoints. Это measurements неуспешной попытки,
+не доказательство принятого маршрута.
 
 Scenario включает wrong keys/shortIds/VLESS, malformed и TCP-fragmented
 handshake, timestamp ±301 s, fresh/expired replay (реальный wait 302 s),

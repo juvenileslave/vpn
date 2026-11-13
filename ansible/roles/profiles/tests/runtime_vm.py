@@ -701,7 +701,7 @@ class Lab:
     def capture_routes(self, label, action, *, slot=0, expected_family=6):
         capture = self.work / (label + ".private.pcap")
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        process = self.spawn("exit", ["tcpdump", "--immediate-mode", "-i", "any", "-nn", "-U", "-w", capture, "tcp port 18444 or tcp port 18082 or tcp port 18080"], "capture-" + label)
+        process = self.spawn("exit", ["tcpdump", "--immediate-mode", "-B", "32768", "-i", "any", "-nn", "-U", "-w", capture, "tcp port 18444"], "capture-" + label)
         samples = {"exit": [], "relay": []}
         stop = threading.Event()
         sampling_errors = []
@@ -734,6 +734,11 @@ class Lab:
         if matching[0]["source"] != expected_source:
             raise AssertionError("application source escaped the selected exit/upstream")
         decoded = command(["tcpdump", "-nn", "-tt", "-S", "-r", capture])
+        capture_stats = {}
+        for line in (self.work / ("capture-" + label + ".private.log")).read_text().splitlines():
+            match = re.fullmatch(r"(\d+) packets? (captured|received by filter|dropped by kernel)", line.strip())
+            if match is not None:
+                capture_stats[match.group(2)] = int(match.group(1))
         streams = captured_streams(decoded)
         family_bytes = {}
         established = {}
@@ -747,7 +752,9 @@ class Lab:
             established[str(version)] = any(established_pair(samples["relay"], source, dest) and established_pair(samples["exit"], source, dest) for source, dest, _up, _down in carrying)
         fixture_ips = [self.topology[kind]["public_ipv" + str(version)] for kind in ("exit", "relay") for version in (4, 6)]
         socket_endpoints = {kind: sorted({field.replace("[", "").replace("]", "") for sample in snapshots for field in sample.decode().split() if any(address in field for address in fixture_ips)}) for kind, snapshots in samples.items()}
-        self.evidence.setdefault("route_observation_attempts", {})[label] = {"expected_family": expected_family, "application": application, "unique_tcp_payload_bytes": family_bytes, "established_accepted_socket": established, "fixture_socket_endpoints": socket_endpoints, "pcap_sha256": hashlib.sha256(capture.read_bytes()).hexdigest()}
+        self.evidence.setdefault("route_observation_attempts", {})[label] = {"expected_family": expected_family, "application": application, "unique_tcp_payload_bytes": family_bytes, "established_accepted_socket": established, "fixture_socket_endpoints": socket_endpoints, "capture_statistics": capture_stats, "pcap_sha256": hashlib.sha256(capture.read_bytes()).hexdigest()}
+        if capture_stats.get("dropped by kernel") != 0:
+            raise AssertionError("packet capture did not prove zero kernel drops")
         other = str(4 if expected_family == 6 else 6)
         # Probes use HTTP204/18081, never the application's hash protocol.
         # Bound alternate-family payload below 64 KiB, versus >=1 MiB/flow.
