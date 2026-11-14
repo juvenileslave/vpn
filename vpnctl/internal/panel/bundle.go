@@ -80,9 +80,6 @@ func LoadBundle(path string) (Bundle, error) {
 		Hosts:   make(map[string]BundleHost, len(manifest.Hosts)),
 		Configs: make(map[string]json.RawMessage, 2),
 	}
-	for role, host := range manifest.Hosts {
-		bundle.Hosts[role] = BundleHost{SNI: host.SNI, IPv4: host.IPv4, IPv6: host.IPv6, Origin: host.Origin}
-	}
 	total := len(manifestData)
 	for index, filename := range names {
 		data, err := readRootJSON(root, filename)
@@ -95,6 +92,11 @@ func LoadBundle(path string) (Bundle, error) {
 		}
 		if _, err := jsonValue(data); err != nil {
 			return Bundle{}, err
+		}
+		if filename == "inputs.private.json" {
+			if err := readBundleHostAuthority(data, bundle.Hosts); err != nil {
+				return Bundle{}, err
+			}
 		}
 		if index != 0 {
 			if _, err := writer.WriteString(", "); err != nil {
@@ -123,10 +125,44 @@ func LoadBundle(path string) (Bundle, error) {
 	if hex.EncodeToString(hash.Sum(nil)) != manifest.ID {
 		return Bundle{}, ErrInvalidInput
 	}
+	for role, host := range manifest.Hosts {
+		authenticated := bundle.Hosts[role]
+		if host.SNI != authenticated.SNI || host.IPv4 != authenticated.IPv4 ||
+			host.IPv6 != authenticated.IPv6 || host.Origin != authenticated.Origin {
+			return Bundle{}, ErrInvalidInput
+		}
+	}
 	if err := validateBundlePolicy(bundle); err != nil {
 		return Bundle{}, err
 	}
 	return bundle, nil
+}
+
+// Host metadata is excluded from the renderer's outer manifest hash. Derive
+// it from the hash-covered topology instead, then require the manifest to agree.
+func readBundleHostAuthority(data []byte, hosts map[string]BundleHost) error {
+	var inputs struct {
+		Topology map[string]json.RawMessage `json:"topology"`
+	}
+	if json.Unmarshal(data, &inputs) != nil {
+		return ErrInvalidInput
+	}
+	for _, role := range []string{"exit", "relay"} {
+		var source struct {
+			SNI       string `json:"reality_sni"`
+			IPv4      string `json:"public_ipv4"`
+			IPv6      string `json:"public_ipv6"`
+			CoverPort int64  `json:"cover_tls_port"`
+		}
+		if json.Unmarshal(inputs.Topology[role], &source) != nil || source.CoverPort < 1 || source.CoverPort > 65535 {
+			return ErrInvalidInput
+		}
+		hosts[role] = BundleHost{
+			SNI: source.SNI, IPv4: source.IPv4, IPv6: source.IPv6,
+			Origin: "127.0.0.1:" + strconv.FormatInt(source.CoverPort, 10),
+		}
+	}
+	return nil
 }
 
 func validateManifest(manifest bundleManifest) error {

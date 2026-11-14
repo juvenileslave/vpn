@@ -92,8 +92,10 @@ Config — существующая строгая схема [vpnctl](../vpnctl
 `--bundle` указывает существующий `manifest.json` роли [profiles](PROFILES.md).
 Loader не рендерит ничего: проверяет strict schema, pins, фиксированную
 host/SNI/XHTTP/REALITY-политику, каждое объявленное immutable JSON file и точный
-renderer `bundle_id`. Hash включает `inputs.private.json`; его содержимое не
-возвращается и не сохраняется. File symlinks и escaping paths отвергаются.
+renderer `bundle_id`. Hash включает `inputs.private.json`; host metadata
+сверяется с его хешируемой `topology`, а не принимается из незахешированного
+manifest на доверии. Private payload не возвращается и не сохраняется.
+File symlinks и escaping paths отвергаются.
 Лимиты: 16 МиБ на JSON file/HTTP response, 64 МиБ на bundle, глубина JSON 128.
 Проверка identity **не runtime gate**: manifest остаётся
 `candidate-not-runtime-validated`, без fabricated receipt/current.
@@ -144,7 +146,9 @@ Planner читает collections и отдельные managed objects, пров
 обнаруживаемый drift между reads. Это **наблюдение, не atomic snapshot**.
 Unknown panel-side поля сохраняются в памяти; их значения не печатаются.
 Проспективный full profile replacement, теряющий поля либо static clients,
-показывает безопасный diff и возвращает `ErrLossyUpdate` до записи.
+и replacement snippet, удаляющий panel-side nested settings, показывают безопасный
+diff и возвращают `ErrLossyUpdate` до записи. `show` не отказывает из-за
+потенциального изменения: он показывает только текущее состояние.
 Даже `unchanged` не разрешает writes и не доказывает работу узла.
 
 | Exit code | Значение |
@@ -183,6 +187,12 @@ playbook `profiles.yml`: stable unchanged default/explicit plan, show, implicit
 apply, настоящий computed snippet drift, lossy refusal и explicit pre-I/O
 refusal — PASS. CLI отправил **54 GET и 0 mutating requests**. Все три сервиса
 стенда были healthy; удаление owned compose resources и private inputs — PASS.
+
+После независимого ревью исправлены две ошибки: доверие незахешированной host
+metadata и потенциальная потеря nested snippet settings. Focused smoke на новом
+одноразовом стенде с настоящим playbook подтвердил manifest-only отказ до HTTP,
+lossy snippet exit 3 и успешный `show`: **10 GET, 0 mutating requests**, cleanup PASS.
+Go checks повторно прошли; оба независимых reviewer приняли исправления.
 
 Откат этого read-only среза — отдельный revert-PR squash-коммита. Он не изменяет
 состояние панели. Будущий panel write потребует собственного retained-payload

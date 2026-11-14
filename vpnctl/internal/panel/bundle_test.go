@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -95,10 +96,22 @@ func policyBundle(t *testing.T) Bundle {
 // outer hash envelope. Production's Python string-escaping helper is not used.
 func fixtureManifest(t *testing.T, root string, bundle Bundle) string {
 	t.Helper()
+	topology := make(map[string]any, len(bundle.Hosts))
+	for role, host := range bundle.Hosts {
+		port, err := strconv.Atoi(strings.TrimPrefix(host.Origin, "127.0.0.1:"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		topology[role] = map[string]any{
+			"reality_sni": host.SNI, "public_ipv4": host.IPv4,
+			"public_ipv6": host.IPv6, "cover_tls_port": port,
+		}
+	}
 	files := map[string]string{
-		"exit.json":     string(bundle.Configs["exit"]) + "\n",
-		"relay.json":    string(bundle.Configs["relay"]) + "\n",
-		"firewall.json": "{}\n", "inputs.private.json": "{\"synthetic\":true}\n",
+		"exit.json":           string(bundle.Configs["exit"]) + "\n",
+		"relay.json":          string(bundle.Configs["relay"]) + "\n",
+		"firewall.json":       "{}\n",
+		"inputs.private.json": string(fixtureJSON(t, map[string]any{"topology": topology, "secrets": map[string]bool{"synthetic": true}})) + "\n",
 	}
 	names := make([]string, 0, len(files))
 	for name := range files {
@@ -257,5 +270,33 @@ func TestLoadBundleRejectsConflictingPublicationPolicy(t *testing.T) {
 				t.Fatal("conflicting fixed policy was not safely rejected")
 			}
 		})
+	}
+}
+
+func TestLoadBundleRejectsUnhashedManifestHostTampering(t *testing.T) {
+	for _, role := range []string{"exit", "relay"} {
+		for field, replacement := range map[string]string{
+			"public_ipv4": "198.51.100.99", "public_ipv6": "2001:db8:ffff::99",
+		} {
+			t.Run(role+" "+field, func(t *testing.T) {
+				path := fixtureManifest(t, t.TempDir(), policyBundle(t))
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var manifest map[string]any
+				if err := json.Unmarshal(data, &manifest); err != nil {
+					t.Fatal(err)
+				}
+				manifest["hosts"].(map[string]any)[role].(map[string]any)[field] = replacement
+				// The original identity and every hashed file remain untouched.
+				if err := os.WriteFile(path, fixtureJSON(t, manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := LoadBundle(path); !errors.Is(err, ErrInvalidInput) {
+					t.Fatal("manifest host tampering retained the authenticated bundle identity")
+				}
+			})
+		}
 	}
 }

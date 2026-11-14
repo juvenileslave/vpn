@@ -133,6 +133,7 @@ func inspect(ctx context.Context, reader Reader, bundle Bundle, objects Objects,
 		report.Objects = append(report.Objects, item)
 	}
 	changedSnippets := make(map[string]bool, len(objects.Snippets))
+	var hasLossySnippets bool
 	for _, spec := range objects.Snippets {
 		desired, err := configField(bundle.Configs[spec.Role], spec.Field)
 		if err != nil {
@@ -148,6 +149,9 @@ func inspect(ctx context.Context, reader Reader, bundle Bundle, objects Objects,
 			}
 			changed = !equal
 			item.Action = action(changed)
+			if changed && !isShow && losesSnippetSettings(existing.Snippet, desired) {
+				hasLossySnippets = true
+			}
 		}
 		changedSnippets[spec.Name] = changed
 		item.Fields = []Field{{Path: spec.Field, State: comparisonState(exists, changed)}}
@@ -194,6 +198,9 @@ func inspect(ctx context.Context, reader Reader, bundle Bundle, objects Objects,
 	}
 	if err := checkSharedSnippets(current, profiles, changedSnippets); err != nil {
 		return report, err
+	}
+	if hasLossySnippets {
+		return report, ErrLossyUpdate
 	}
 	for _, candidate := range profiles {
 		if candidate.spec.UUID == "" {
@@ -873,4 +880,20 @@ func (r Report) SortedObjects() []Object {
 		return result[i].Name < result[j].Name
 	})
 	return result
+}
+
+func losesSnippetSettings(current, desired []byte) bool {
+	var before, after []map[string]json.RawMessage
+	if json.Unmarshal(current, &before) != nil || json.Unmarshal(desired, &after) != nil {
+		return true
+	}
+	if len(before) > len(after) {
+		return true
+	}
+	for index, previous := range before {
+		if losesFields(previous, after[index]) {
+			return true
+		}
+	}
+	return false
 }

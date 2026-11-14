@@ -316,3 +316,36 @@ func TestPlanInvalidDeclarationsAndCanceledContextPerformNoReads(t *testing.T) {
 		t.Fatal("pre-cancelled plan caused I/O")
 	}
 }
+
+func TestPlanRefusesSnippetReplacementThatDropsPanelSideSettings(t *testing.T) {
+	bundle, objects, reader := planFixture(t, true)
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(reader.snippets[0].Snippet, &content); err != nil {
+		t.Fatal(err)
+	}
+	content[0]["panelExtension"] = json.RawMessage(`{"nested":{"value":"server-private-marker"}}`)
+	before := fixtureJSON(t, content)
+	reader.snippets[0].Snippet = before
+	computed := reader.computed[objects.Profiles[0].UUID]
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(computed.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	config["outbounds"] = before
+	computed.Config = fixtureJSON(t, config)
+	reader.computed[computed.UUID] = computed
+	report, err := Plan(context.Background(), reader, bundle, objects)
+	if !errors.Is(err, ErrLossyUpdate) || reportObject(t, report, "snippet").Action != "update" {
+		t.Fatal("prospective snippet replacement lost unknown nested panel settings without refusal")
+	}
+	if strings.Contains(string(fixtureJSON(t, report)), "server-private-marker") ||
+		strings.Contains(string(fixtureJSON(t, report)), "panelExtension") {
+		t.Fatal("lossy refusal exposed unknown panel settings")
+	}
+	if _, err := Show(context.Background(), reader, bundle, objects); err != nil {
+		t.Fatal("show refused current state because of a prospective lossy snippet change")
+	}
+	if string(reader.snippets[0].Snippet) != string(before) {
+		t.Fatal("planning altered the retained unknown snippet settings")
+	}
+}
