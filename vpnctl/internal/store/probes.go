@@ -47,6 +47,19 @@ type ProbeRecord struct {
 	// ErrorCode is a short code such as "connection_refused". It is required
 	// for failure and timeout outcomes and must be empty for success.
 	ErrorCode string
+	// Context is empty for legacy primitive records. Ladder records carry
+	// opaque identities and declared network labels, never addresses or SNI.
+	RunID            string
+	Vantage          string
+	Network          string
+	VantageKind      string
+	Scope            string
+	EndpointIdentity string
+	ConfigIdentity   string
+	SNIIdentity      string
+	ExpectedBytes    int64
+	BodyDuration     time.Duration
+	ThroughputFloor  int64
 }
 
 var (
@@ -79,6 +92,9 @@ func validateProbe(r ProbeRecord) error {
 	case r.Bytes < 0:
 		return invalid("probe byte count must not be negative")
 	}
+	if err := validateProbeContext(r); err != nil {
+		return err
+	}
 	switch r.Outcome {
 	case OutcomeSuccess:
 		if r.ErrorCode != "" {
@@ -101,10 +117,15 @@ func (s *Store) AppendProbe(ctx context.Context, r ProbeRecord) (ProbeRecord, er
 		return ProbeRecord{}, err
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO probes (target, stage, family, outcome, observed_at, duration_ns, bytes, error_code)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO probes (target, stage, family, outcome, observed_at, duration_ns, bytes, error_code,
+		 run_id, vantage, network, vantage_kind, scope, endpoint_identity, config_identity, sni_identity,
+		 expected_bytes, body_duration_ns, throughput_floor)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Target, r.Stage, string(r.Family), string(r.Outcome),
-		r.ObservedAt.UnixNano(), int64(r.Duration), r.Bytes, r.ErrorCode)
+		r.ObservedAt.UnixNano(), int64(r.Duration), r.Bytes, r.ErrorCode,
+		r.RunID, r.Vantage, r.Network, r.VantageKind, r.Scope,
+		r.EndpointIdentity, r.ConfigIdentity, r.SNIIdentity,
+		r.ExpectedBytes, int64(r.BodyDuration), r.ThroughputFloor)
 	if err != nil {
 		return ProbeRecord{}, dbError("append probe", err)
 	}
@@ -128,7 +149,9 @@ func (s *Store) LatestProbes(ctx context.Context, target string, limit int) ([]P
 		return nil, invalid("limit must be from 1 through %d", MaxLimit)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, target, stage, family, outcome, observed_at, duration_ns, bytes, error_code
+		`SELECT id, target, stage, family, outcome, observed_at, duration_ns, bytes, error_code,
+		 run_id, vantage, network, vantage_kind, scope, endpoint_identity, config_identity, sni_identity,
+		 expected_bytes, body_duration_ns, throughput_floor
 		 FROM probes WHERE target = ?
 		 ORDER BY observed_at DESC, id DESC
 		 LIMIT ?`, target, limit)
@@ -140,17 +163,21 @@ func (s *Store) LatestProbes(ctx context.Context, target string, limit int) ([]P
 	var out []ProbeRecord
 	for rows.Next() {
 		var (
-			r                      ProbeRecord
-			family, outcome        string
-			observedAt, durationNS int64
+			r                              ProbeRecord
+			family, outcome                string
+			observedAt, durationNS, bodyNS int64
 		)
 		if err := rows.Scan(&r.ID, &r.Target, &r.Stage, &family, &outcome,
-			&observedAt, &durationNS, &r.Bytes, &r.ErrorCode); err != nil {
+			&observedAt, &durationNS, &r.Bytes, &r.ErrorCode,
+			&r.RunID, &r.Vantage, &r.Network, &r.VantageKind, &r.Scope,
+			&r.EndpointIdentity, &r.ConfigIdentity, &r.SNIIdentity,
+			&r.ExpectedBytes, &bodyNS, &r.ThroughputFloor); err != nil {
 			return nil, fmt.Errorf("%w: probe row: %v", ErrCorrupt, err)
 		}
 		r.Family, r.Outcome = Family(family), Outcome(outcome)
 		r.ObservedAt = time.Unix(0, observedAt).UTC()
 		r.Duration = time.Duration(durationNS)
+		r.BodyDuration = time.Duration(bodyNS)
 		if err := validateProbe(r); err != nil {
 			return nil, fmt.Errorf("%w: probe %d", ErrCorrupt, r.ID)
 		}

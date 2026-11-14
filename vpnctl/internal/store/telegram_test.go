@@ -212,7 +212,7 @@ func TestVersionOneDatabaseUpgradesAndKeepsData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := v1.AppendProbe(ctx, ProbeRecord{
+	probe := appendLegacyProbe(t, v1, ProbeRecord{
 		Target:     "exit-01",
 		Stage:      "tcp",
 		Family:     FamilyIPv4,
@@ -221,9 +221,6 @@ func TestVersionOneDatabaseUpgradesAndKeepsData(t *testing.T) {
 		Duration:   time.Millisecond,
 		Bytes:      1,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	op, err := v1.CreateOperation(ctx, "rotate_ip", "")
 	if err != nil {
 		t.Fatal(err)

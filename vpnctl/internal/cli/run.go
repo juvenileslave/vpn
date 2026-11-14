@@ -26,6 +26,8 @@ const usage = `usage:
   vpnctl version
   vpnctl config validate --config PATH
   vpnctl bot --config PATH
+  vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH [--format text|json]
+  vpnctl diagnose --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH [--format text|json]
 `
 
 // Exit codes returned by Run.
@@ -52,6 +54,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runConfig(args[1:], stdout, stderr)
 	case "bot":
 		return runBot(args[1:], stdout, stderr)
+	case "probe":
+		return runProbe(args[1:], stdout, stderr)
+	case "diagnose":
+		return runDiagnosisCommand(args[1:], stdout, stderr, false)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitOK

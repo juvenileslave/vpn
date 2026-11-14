@@ -4,7 +4,7 @@
 [архитектурного плана](ARCHITECTURE_PLAN.md): история проб, метаданные
 возобновляемых операций и состояние Telegram-бота (offset и обработанные
 `update_id`). Это библиотека без собственной команды CLI. Пакет используют
-`vpnctl bot` и тесты; воркер, планировщик, очередь и облачная оркестрация (в том
+`vpnctl bot`, `probe ladder`, `diagnose` и тесты; воркер, планировщик, очередь и облачная оркестрация (в том
 числе смена IP) здесь не реализованы. Версии конфигов апстримов из пункта 5.2 в
 эту поставку не входят.
 
@@ -55,8 +55,8 @@ claimed, err := s.ClaimBotUpdate(ctx, 12345)             // false для дуб�
 ### Пробы
 
 `ProbeRecord`: `ID`, `Target`, `Stage`, `Family`, `Outcome`, `ObservedAt`,
-`Duration`, `Bytes`, `ErrorCode`. Тип принадлежит пакету store и не зависит от
-будущего пакета проб.
+`Duration`, `Bytes`, `ErrorCode` и контекст ladder, описанный ниже. Тип принадлежит
+пакету store; primitive-записи до ladder сохраняют пустой контекст.
 
 | Поле | Правило |
 | --- | --- |
@@ -76,6 +76,32 @@ claimed, err := s.ClaimBotUpdate(ctx, 12345)             // false для дуб�
 `LatestProbes` возвращает записи цели от новых к старым: `ObservedAt` по
 убыванию, при равенстве — `ID` по убыванию. Лимит вне 1..1000 —
 `ErrInvalidArgument`.
+
+Ladder использует тот же `AppendProbe`, без второго хранилища. Контекст версии 3:
+
+| Поле | Наблюдаемый смысл |
+| --- | --- |
+| `RunID` | случайный идентификатор попытки, 32 lowercase hex |
+| `Vantage`, `Network`, `VantageKind` | ограниченные метки точки и независимой сети; `in_country`, `outside`, `local_dc` или `external_http` |
+| `Scope` | `node_path`, `same_address_control` или `external_http`; HTTP Globalping не является REALITY/VLESS-путём |
+| `EndpointIdentity`, `ConfigIdentity`, `SNIIdentity` | SHA-256 identities адреса/порта, контракта передачи и точного SNI; исходные IP, URL, DNS-имена и client configs не сохраняются |
+| `ExpectedBytes` | ожидаемый размер представления, 0…20 MiB |
+| `BodyDuration` | реально измеренная длительность чтения тела, не больше `Duration` |
+| `ThroughputFloor` | объявленный порог байт/с, 0 для primitive/Globalping |
+
+Этапы ladder — `tcp`, `tls`, `auth`, `transfer_small`, `throughput`; необязательный
+контроль — `control_tls`. После отказа downstream-этапы сохраняются как
+`failure` / `stage_not_run`, а отмена — `failure` / `canceled`. Успешный
+авторизованный transfer означает точный размер **и** проверенную SHA-256 integrity;
+тело и его hash, HTTP headers, raw certificates и credentials в SQLite не пишутся.
+Issuer fingerprint/SAN/validity/ALPN остаются bounded facts в непосредственном
+CLI-report, не содержимым сертификата в базе.
+
+Попытка реконструируется только из всех пяти согласованных stage-записей.
+Неполная запись, разные identities в одном `RunID`, stale/future evidence,
+противоречия и результат query на границе 1000 строк дают `unknown`, а не
+выбор удобного старого успеха. Семейства не объединяются. Подробности CLI и
+классификатора — [PROBES.md](PROBES.md).
 
 ### Операции
 
@@ -147,11 +173,14 @@ pending ──► running ──► succeeded
 ## Схема и миграции
 
 Версия схемы хранится в `PRAGMA user_version`, принадлежность файла — в
-`PRAGMA application_id = 0x76706e63` (`vpnc`). Текущая версия — 2.
+`PRAGMA application_id = 0x76706e63` (`vpnc`). Текущая версия — 3.
 
 ```text
 probes(id INTEGER PK AUTOINCREMENT, target, stage, family, outcome,
-       observed_at INTEGER ns UTC, duration_ns, bytes, error_code)  STRICT
+       observed_at INTEGER ns UTC, duration_ns, bytes, error_code,
+       run_id, vantage, network, vantage_kind, scope, endpoint_identity,
+       config_identity, sni_identity, expected_bytes, body_duration_ns,
+       throughput_floor)                                         STRICT
   index probes_target_latest(target, observed_at DESC, id DESC)
 operations(id TEXT PK, kind, state, step, revision >= 1,
            created_at INTEGER ns UTC, updated_at INTEGER ns UTC)    STRICT
@@ -163,6 +192,11 @@ telegram_updates(update_id INTEGER PK > 0)                          STRICT
 версии 1 мигрируют без потери данных, потому что миграция только создаёт новые
 таблицы.
 
+Версия 3 только добавляет контекст проб с пустыми/нулевыми defaults. Строки
+версий 1/2, IDs, operations и Telegram state сохраняются, старые пробы не
+переклассифицируются в авторизованные. Для probe-истории используйте отдельный
+локальный файл: она не обязана обновлять рабочую базу бота.
+
 Столбцы дополнительно ограничены `CHECK` (допустимые значения и длины).
 
 - Каждая миграция и запись новой `user_version` выполняются в одной транзакции:
@@ -172,6 +206,11 @@ telegram_updates(update_id INTEGER PK > 0)                          STRICT
 - Миграции только добавляются в конец списка; выпущенные не редактируются.
 - База с версией новее поддерживаемой отклоняется (`ErrUnsupportedSchema`) без
   изменений: откат бинарника не может открыть базу, обновлённую новой версией.
+
+Откат к бинарнику до версии 3 не понижает базу: старый бинарник отклонит её как
+`ErrUnsupportedSchema`. Сохраняйте probe-записи и совместимый reader либо
+закрытую pre-upgrade backup отдельно; автоматического удаления новых столбцов
+или данных нет. Revert PR кода не является downgrade внешнего SQLite-файла.
 
 ### Существующие файлы и владение при ошибке
 
@@ -222,7 +261,7 @@ telegram_updates(update_id INTEGER PK > 0)                          STRICT
 Тесты используют настоящие временные базы SQLite в `t.TempDir()` — без моков и
 без проверок текста SQL — и покрывают: сохранение после закрытия и повторного
 открытия, изоляцию баз, порядок и лимиты проб, отсутствующие ID, откат
-неудачной миграции, миграцию версии 1 → 2 с сохранением строк, отклонение
+неудачной миграции, миграции 1 → 2 → 3 с сохранением строк, scoped identities и отклонение
 устаревшей ревизии, конкурирующих писателей (одна успешная запись),
 неизменность терминальных состояний, монотонность bot offset, одновременный
 claim одного `update_id` (ровно один победитель), retention обработанных ID,
