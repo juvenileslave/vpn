@@ -97,6 +97,8 @@ class LadderAcceptance:
         self.table = lab.prefix + "_probe"
         self.table_exists = False
         self.reports = {}
+        self.lab.evidence["scenarios"]["probe_ladder"] = self.reports
+        self.lab.evidence["probe_store_reader"] = {"sqlite_version": sqlite3.sqlite_version}
         self.env = {**lab.core_env, "TMPDIR": str(self.temporary), "GOTOOLCHAIN": "auto", "GOWORK": "off"}
         self.vantages = [{"name": "synthetic-inside", "network": "synthetic-client-netns", "kind": "in_country"},
                          {"name": "synthetic-outside", "network": "synthetic-outsider-netns", "kind": "outside"}]
@@ -237,8 +239,17 @@ class LadderAcceptance:
             raise AssertionError("actual probe report is unpersisted, incomplete or changed family")
         if output["diagnosis"]["scope"]["global"]:
             raise AssertionError("probe CLI made a global claim")
-        with sqlite3.connect(self.database) as database:
-            rows = database.execute("SELECT stage, family, outcome, error_code, bytes, duration_ns, vantage, network, scope, expected_bytes, body_duration_ns FROM probes WHERE run_id=? ORDER BY id", (report["run_id"],)).fetchall()
+        self.reports[node["name"]+"-"+str(vantage)+"-"+family] = output
+        try:
+            with sqlite3.connect(self.database) as database:
+                rows = database.execute("SELECT stage, family, outcome, error_code, bytes, duration_ns, vantage, network, scope, expected_bytes, body_duration_ns FROM probes WHERE run_id=? ORDER BY id", (report["run_id"],)).fetchall()
+        except sqlite3.Error as error:
+            self.lab.evidence["probe_store_reader_error"] = {
+                "sqlite_version": sqlite3.sqlite_version,
+                "code": getattr(error, "sqlite_errorcode", None),
+                "name": getattr(error, "sqlite_errorname", None),
+            }
+            raise AssertionError("native SQLite could not read generated probe observations") from None
         if len(rows) != 5:
             raise AssertionError("probe SQLite does not contain each executed/skipped stage")
         for event, row in zip(report["events"], rows):
@@ -270,7 +281,6 @@ class LadderAcceptance:
                 raise AssertionError("application escaped the accepted exit path")
             if [row["body_sha256"] for row in receipts] != [payload_digest(size) for size in (AUTH_BYTES, SMALL_BYTES, LARGE_BYTES)]:
                 raise AssertionError("actual HTTP representation integrity receipt differs")
-        self.reports[node["name"]+"-"+str(vantage)+"-"+family] = output
         return report
 
     def diagnose(self, node, expected):
