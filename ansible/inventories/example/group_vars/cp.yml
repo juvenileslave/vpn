@@ -1,2 +1,7 @@
 node_role: control_plane
 panel_bind: 127.0.0.1
+# VictoriaMetrics query API stays on loopback in the example topology
+# (cp_placement: dedicated; with cp_placement: exit the same variables live on
+# the exit host). See docs/METRICS_ROLE.md.
+victoriametrics_listen_address: 127.0.0.1
+victoriametrics_listen_port: 8428

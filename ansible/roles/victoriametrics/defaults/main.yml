@@ -1,0 +1,54 @@
+---
+# Operator-facing variables of the victoriametrics role; see docs/METRICS_ROLE.md.
+# Pinned release and checksums live in vars/ and cannot be overridden from inventory.
+
+# Literal IPv4 or IPv6 address of this host; wildcards and hostnames are rejected.
+# Loopback by default: the query API exposes infrastructure metadata. A
+# non-loopback address must be a private RFC 1918/ULA address assigned to this
+# host and requires the base-role source ACL (see victoriametrics_allowed_sources).
+victoriametrics_listen_address: 127.0.0.1
+victoriametrics_listen_port: 8428
+
+# Persistent data directory, owned by the service user, mode 0750.
+victoriametrics_data_dir: /var/lib/victoriametrics
+
+# Retention passed as -retentionPeriod. Explicit unit suffixes: s, h, d, w, M, y.
+# Bare numbers mean months in VictoriaMetrics and are rejected here.
+# Values shorter than 24 hours or non-finite durations are rejected.
+# 30d is the accepted default of architecture decision D-010.
+victoriametrics_retention: 30d
+
+# Scrape interval for the generated scrape configuration (s/m/h/d).
+victoriametrics_scrape_interval: 30s
+
+# Bounded memory/CPU footprint for a small exit (CX23 class, 2 vCPU / 4 GiB),
+# applied as systemd MemoryMax / CPUQuota. Empty string disables the limit.
+victoriametrics_memory_max: 512M
+victoriametrics_cpu_quota: "50%"
+
+# Source ACL of the query API. Empty for the loopback listen address. A
+# non-loopback address requires an exact non-empty list of private /32 and /128
+# CIDRs of the listen address family plus, in the accepted base-role contract,
+# base_firewall_enabled: true and exactly one base_firewall_source_ports tcp
+# rule for this port with the same source_cidrs.
+victoriametrics_allowed_sources: []
+
+# Panel metrics scraping (remnawave_panel METRICS endpoint). Credentials never
+# enter templates, argv, logs or the repository: only controller-side files
+# outside the checkout are accepted, and the scrape config references 0640
+# copies on the target host.
+#   url           — optional; default http://127.0.0.1:3001/metrics
+#   username_file / password_file — absolute controller paths, one value per file
+# The panel endpoint is reachable only where the compose stack publishes it;
+# on a host without the panel the role works without this variable.
+victoriametrics_panel_metrics: {}
+
+# Hosts whose node_exporter instances are scraped, by inventory host name
+# (DNS resolvable from the VictoriaMetrics host). Default: every declared
+# exit and relay; override, e.g. to add the dedicated CP host. Missing groups
+# are skipped, so an inventory without exit/relay still works.
+victoriametrics_scrape_nodes: >-
+  {{ (groups.get('exit', []) + groups.get('relay', [])) | unique }}
+
+# Health check path polled after (re)start.
+victoriametrics_health_path: /health

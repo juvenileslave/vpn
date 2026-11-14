@@ -1,0 +1,18 @@
+---
+# Health check on the query endpoint after (re)start. /health is served
+# without authentication by VictoriaMetrics, so a loopback or declared
+# listen address answers with 200 once storage is up.
+
+- name: Wait for the query API to answer on the health path
+  ansible.builtin.uri:
+    url: >-
+      http://{{ victoriametrics_listen }}{{ victoriametrics_health_path }}
+    status_code: 200
+    timeout: 10
+    use_proxy: false
+  register: _victoriametrics_health
+  until: _victoriametrics_health.status == 200
+  retries: 12
+  delay: 5
+  when: not ansible_check_mode
+  changed_when: false

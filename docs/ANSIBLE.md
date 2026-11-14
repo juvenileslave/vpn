@@ -21,6 +21,10 @@ ansible/
   scripts/tests/{test_validate_inventory,test_render_profiles}.py
 ```
 
+> Примечание: помимо перечисленного, каталог содержит playbook'и и роли
+> (`playbooks/`, `roles/`) принятых компонентов; их контракты описаны в
+> документации соответствующих ролей (см. README).
+
 `hosts.yml` содержит только `all.children.{exit,relay,cp}`. В exit/relay ровно
 по одному хосту. `cp_placement: dedicated` требует один отдельный cp;
 `cp_placement: exit` — пустую cp группу и явный реальный путь от bridge-networked
@@ -51,6 +55,13 @@ SSH host key verification включена; неизвестный inventory ф�
 | `image_tags` | публичный mapping строк; не заменяет immutable digest authority роли Node |
 
 ## Per-node cover, ports, source ACL
+
+Роли вроде `node_exporter` и `victoriametrics` используют собственные
+переменные (`node_exporter_listen_address`, `victoriametrics_listen_address`
+и другие); они не являются частью контракта inventory и описаны в документации
+ролей ([NODE_EXPORTER.md](NODE_EXPORTER.md), [METRICS_ROLE.md](METRICS_ROLE.md)).
+Пример inventory задаёт для `victoriametrics` loopback-адрес и порт `8428`
+в `group_vars/cp`.
 
 Для exit и relay нужны `cover_tls_port`, абсолютный `cover_site_source`,
 `cover_acme_email`, положительный integer `reality_max_time_diff_ms` (300000),

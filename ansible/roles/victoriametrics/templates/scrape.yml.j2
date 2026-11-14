@@ -1,0 +1,41 @@
+# Managed by the Ansible role victoriametrics; manual edits are overwritten.
+# No secret values are rendered here: panel credentials are read by
+# VictoriaMetrics from the 0640 files referenced below.
+global:
+  scrape_interval: {{ victoriametrics_scrape_interval }}
+  scrape_timeout: {{ victoriametrics_scrape_interval }}
+
+scrape_configs:
+  # Local self-scrape: VictoriaMetrics exposes its own metrics on the same
+  # HTTP endpoint, so no extra exporter is needed.
+  - job_name: victoriametrics
+    static_configs:
+      - targets:
+          - {{ victoriametrics_listen | to_json }}
+
+  # node_exporter on the declared nodes; port 9100 is the accepted contract of
+  # the node_exporter role (docs/NODE_EXPORTER.md). Scraping remote targets
+  # requires reachable routes, which the source ACL of that role controls.
+  - job_name: node_exporter
+    static_configs:
+      - targets:
+{% for target in victoriametrics_scrape_nodes | victoriametrics_targets(9100) %}
+          - {{ target | to_json }}
+{% endfor %}
+{% if victoriametrics_panel_metrics %}
+{% set panel = victoriametrics_panel_metrics.url | default('http://127.0.0.1:3001/metrics') | victoriametrics_panel_target %}
+  # Panel metrics endpoint of the remnawave_panel role (METRICS_PORT 3001,
+  # published only inside the compose stack; on the CP host it is reachable
+  # via the loopback mapping only when explicitly allowed).
+  - job_name: panel
+    scheme: {{ panel.scheme | to_json }}
+    metrics_path: {{ panel.path | to_json }}
+    static_configs:
+      - targets:
+          - {{ panel.hostport | to_json }}
+{% if victoriametrics_panel_metrics.username_file is defined %}
+    basic_auth:
+      username_file: {{ victoriametrics_config_dir }}/panel-metrics-username
+      password_file: {{ victoriametrics_config_dir }}/panel-metrics-password
+{% endif %}
+{% endif %}
