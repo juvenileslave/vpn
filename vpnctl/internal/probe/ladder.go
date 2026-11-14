@@ -155,7 +155,7 @@ func RunLadder(ctx context.Context, request LadderRequest) (report RunReport, er
 	if lifecycleError != nil {
 		report.Outcome, report.Complete = "error", false
 		report.ErrorCode = "xray_start_failed"
-		if lifecycleError.Error() == "probe: private_cleanup_failed" || lifecycleError.Error() == "probe: xray_cleanup_failed" {
+		if errors.Is(lifecycleError, errPrivateCleanupFailed) || errors.Is(lifecycleError, errXrayCleanupFailed) {
 			report.ErrorCode = "cleanup_failed"
 		}
 		report.Events = append(report.Events, Event{
@@ -243,15 +243,12 @@ func setupCode(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	// checkCore only returns authored codes.
-	switch err.Error() {
-	case "probe: explicit_xray_path_required":
-		return "explicit_xray_path_required"
-	case "probe: xray_unavailable":
-		return "xray_unavailable"
-	case "probe: xray_version_mismatch":
-		return "xray_version_mismatch"
-	default:
-		return "xray_version_failed"
+	// checkCore only returns authored codes; an unknown error is a version failure.
+	if code, ok := Code(err); ok {
+		switch code {
+		case "explicit_xray_path_required", "xray_unavailable", "xray_version_mismatch":
+			return code
+		}
 	}
+	return "xray_version_failed"
 }

@@ -267,10 +267,13 @@ stage/outcome/error code, timestamp, bytes, expected size, duration/body duratio
 Issuer identity, validity, SAN match и ALPN — bounded certificate facts. В store
 пишутся только метки, short codes, opaque comparison identities и числа.
 
-`diagnose` — pure `Classify(plan, complete reports)` над окном до 30 min. Нельзя
-смешивать старый config/endpoint/SNI, разные семьи или разные logical network
-labels одной сети. Partial/newer contradictory evidence, future/stale controls,
-отмена, одна точка/одна network и truncated store query дают `unknown`.
+`diagnose` — pure `Classify(plan, complete reports)` над окном до 30 min. Он
+разрешает только comparison contract из inputs и не читает private client JSON
+или CA file: классификация использует уже записанные observations, поэтому
+недоступный или ротированный bundle не блокирует повторный разбор evidence.
+Нельзя смешивать старый config/endpoint/SNI, разные семьи или разные logical
+network labels одной сети. Partial/newer contradictory evidence, future/stale
+controls, отмена, одна точка/одна network и truncated store query дают `unknown`.
 Confidence supported verdict — не выше `moderate`; `scope.global` всегда false.
 
 | Verdict | Минимальное наблюдаемое основание |

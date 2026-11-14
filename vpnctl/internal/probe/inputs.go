@@ -86,33 +86,11 @@ func LoadInputs(path string) (Inputs, error) {
 	return inputs, nil
 }
 
-// Ladder resolves exactly one declared family and actual vantage. An absent
-// IPv6 address is an input error, never permission to try IPv4 instead.
+// Ladder resolves exactly one declared family and actual vantage, plus the
+// private client JSON and CA file the pinned core needs. An absent IPv6 address
+// is an input error, never permission to try IPv4 instead.
 func (i Inputs) Ladder(nodeName string, family Family, vantageName string) (LadderRequest, error) {
-	if vantageName == "" {
-		vantageName = i.LocalVantage
-	}
-	var vantage Vantage
-	for _, candidate := range i.Vantages {
-		if candidate.Name == vantageName {
-			vantage = candidate
-		}
-	}
-	var node NodeInput
-	for _, candidate := range i.Nodes {
-		if candidate.Name == nodeName {
-			node = candidate
-		}
-	}
-	address := node.IPv4
-	if family == IPv6 {
-		address = node.IPv6
-	}
-	ip, err := netip.ParseAddr(address)
-	if err != nil {
-		return LadderRequest{}, shortError("family_unconfigured")
-	}
-	budgets, err := i.Budgets.parse()
+	request, node, err := i.resolve(nodeName, family, vantageName)
 	if err != nil {
 		return LadderRequest{}, err
 	}
@@ -137,6 +115,56 @@ func (i Inputs) Ladder(nodeName string, family Family, vantageName string) (Ladd
 			return LadderRequest{}, shortError("roots_invalid")
 		}
 	}
+	request.ProfileFile, request.RootCAs = profile, roots
+	return request, nil
+}
+
+// Diagnose resolves the same comparison contract without reading the private
+// client JSON or CA file. Classification consumes stored observations, so a
+// rotated or unavailable bundle must not block re-diagnosis of existing evidence.
+func (i Inputs) Diagnose(nodeName string, family Family, vantageName string) (LadderRequest, error) {
+	request, _, err := i.resolve(nodeName, family, vantageName)
+	return request, err
+}
+
+func (i Inputs) resolve(nodeName string, family Family, vantageName string) (LadderRequest, NodeInput, error) {
+	if vantageName == "" {
+		vantageName = i.LocalVantage
+	}
+	var vantage Vantage
+	found := false
+	for _, candidate := range i.Vantages {
+		if candidate.Name == vantageName {
+			vantage, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return LadderRequest{}, NodeInput{}, shortError("unknown_vantage")
+	}
+	var node NodeInput
+	found = false
+	for _, candidate := range i.Nodes {
+		if candidate.Name == nodeName {
+			node, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return LadderRequest{}, NodeInput{}, shortError("unknown_node")
+	}
+	address := node.IPv4
+	if family == IPv6 {
+		address = node.IPv6
+	}
+	ip, err := netip.ParseAddr(address)
+	if err != nil {
+		return LadderRequest{}, NodeInput{}, shortError("family_unconfigured")
+	}
+	budgets, err := i.Budgets.parse()
+	if err != nil {
+		return LadderRequest{}, NodeInput{}, err
+	}
 	profileAddress, addressErr := netip.ParseAddr(node.IPv4)
 	if addressErr != nil {
 		profileAddress = ip
@@ -144,14 +172,14 @@ func (i Inputs) Ladder(nodeName string, family Family, vantageName string) (Ladd
 	request := LadderRequest{
 		Node: node.Name, Target: Target{Address: ip, Port: node.Port, Family: family, Timeout: budgets.Overall},
 		ServerName: node.ServerName, ControlServerName: node.ControlServerName,
-		CoverIssuerSHA256: node.CoverIssuerSHA256, RootCAs: roots, ProfileFile: profile,
-		ProfileAddress: profileAddress,
-		Vantage:        vantage, Budgets: budgets, Endpoints: node.Endpoints, ThroughputFloor: i.ThroughputFloor,
+		CoverIssuerSHA256: node.CoverIssuerSHA256,
+		ProfileAddress:    profileAddress,
+		Vantage:           vantage, Budgets: budgets, Endpoints: node.Endpoints, ThroughputFloor: i.ThroughputFloor,
 	}
 	if err := request.validate(); err != nil {
-		return LadderRequest{}, err
+		return LadderRequest{}, NodeInput{}, err
 	}
-	return request, nil
+	return request, node, nil
 }
 
 func (i Inputs) window() (time.Duration, error) {

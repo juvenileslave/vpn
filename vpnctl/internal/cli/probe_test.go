@@ -88,7 +88,7 @@ func TestProbeArgumentsAndDecodeErrorsNeverEchoSecrets(t *testing.T) {
 		t.Fatalf("decoder leaked: %d, %q, %q", code, stdout, stderr)
 	}
 	var output probeOutput
-	if err := json.Unmarshal([]byte(stdout), &output); err != nil || output.ErrorCode != "inputs_invalid" {
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil || output.ErrorCode != "input_invalid_json" {
 		t.Fatalf("error output = %+v, %v", output, err)
 	}
 }

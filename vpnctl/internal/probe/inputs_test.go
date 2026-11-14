@@ -73,6 +73,85 @@ func fixtureProfile(t *testing.T, request LadderRequest) (map[string]any, []stri
 	return data, []string{id, shortID, password}
 }
 
+func fixtureInputs(request LadderRequest, node NodeInput) Inputs {
+	return Inputs{Schema: 1, LocalVantage: "inside", Vantages: testPlan().Vantages, Nodes: []NodeInput{node},
+		Budgets:         BudgetInput{Overall: "30s", Setup: "1s", TCP: "1s", TLS: "1s", Auth: "3s", Small: "5s", Large: "10s", Control: "1s"},
+		ThroughputFloor: request.ThroughputFloor, EvidenceWindow: "10m"}
+}
+
+func hasCode(err error, want string) bool {
+	code, ok := Code(err)
+	return ok && code == want
+}
+
+// Classification reads stored observations, so diagnose must not depend on a
+// client bundle that may be rotated away after the ladder run was recorded.
+func TestDiagnoseNeedsOnlyTheComparisonContract(t *testing.T) {
+	t.Setenv("VPNCTL_TEST_ABSENT_PROFILE", "")
+	request := fixtureRequest(t)
+	profile, _ := fixtureProfile(t, request)
+	profilePath := privateFixture(t, "client.json", profile)
+	rootsPath := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.WriteFile(rootsPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	node := NodeInput{Name: request.Node, IPv4: request.Target.Address.String(), Port: request.Target.Port,
+		ServerName: request.ServerName, Endpoints: request.Endpoints}
+	missingProfile := node
+	missingProfile.ProfileFileEnv, missingProfile.RootsFile = "VPNCTL_TEST_ABSENT_PROFILE", rootsPath
+	invalidRoots := node
+	invalidRoots.ProfileFile, invalidRoots.RootsFile = profilePath, rootsPath
+	tests := []struct {
+		name string
+		node NodeInput
+		code string
+	}{
+		{name: "missing profile environment", node: missingProfile, code: "invalid_profile_reference"},
+		{name: "invalid roots file", node: invalidRoots, code: "roots_invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := privateFixture(t, "inputs.json", fixtureInputs(request, test.node))
+			loaded, err := LoadInputs(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			diagnosis, err := loaded.Diagnose(request.Node, IPv4, "")
+			if err != nil {
+				t.Fatalf("diagnose requires the private bundle: %v", err)
+			}
+			if diagnosis.Target.Address != request.Target.Address || diagnosis.Endpoints != request.Endpoints {
+				t.Fatalf("diagnose contract changed: %+v", diagnosis)
+			}
+			if _, err := loaded.Ladder(request.Node, IPv4, ""); !hasCode(err, test.code) {
+				t.Fatalf("ladder accepted the private bundle: %v", err)
+			}
+		})
+	}
+}
+
+func TestUnknownNodeAndVantageAreDistinctInputErrors(t *testing.T) {
+	request := fixtureRequest(t)
+	profile, _ := fixtureProfile(t, request)
+	node := NodeInput{Name: request.Node, IPv4: request.Target.Address.String(), Port: request.Target.Port,
+		ServerName: request.ServerName, ProfileFile: privateFixture(t, "client.json", profile), Endpoints: request.Endpoints}
+	path := privateFixture(t, "inputs.json", fixtureInputs(request, node))
+	loaded, err := LoadInputs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loaded.Ladder("absent-node", IPv4, ""); !hasCode(err, "unknown_node") {
+		t.Fatalf("unknown node code = %v", err)
+	}
+	if _, err := loaded.Diagnose(request.Node, IPv4, "absent-vantage"); !hasCode(err, "unknown_vantage") {
+		t.Fatalf("unknown vantage code = %v", err)
+	}
+	loaded.Nodes[0].IPv6 = ""
+	if _, err := loaded.Ladder(request.Node, IPv6, ""); !hasCode(err, "family_unconfigured") {
+		t.Fatalf("missing IPv6 code = %v", err)
+	}
+}
+
 func TestExternalInputsDoNotFallbackAddressFamily(t *testing.T) {
 	request := fixtureRequest(t)
 	profile, _ := fixtureProfile(t, request)

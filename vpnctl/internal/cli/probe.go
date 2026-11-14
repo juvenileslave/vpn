@@ -68,13 +68,25 @@ func runDiagnosisCommand(args []string, stdout, stderr io.Writer, ladder bool) i
 		}
 		return ExitError
 	}
+	failCode := func(err error, fallback string) int {
+		code, ok := probe.Code(err)
+		if !ok {
+			code = fallback
+		}
+		return fail(code)
+	}
 	inputs, err := probe.LoadInputs(*inputsPath)
 	if err != nil {
-		return fail("inputs_invalid")
+		return failCode(err, "inputs_invalid")
 	}
-	request, err := inputs.Ladder(*node, probe.Family(*family), *vantage)
+	var request probe.LadderRequest
+	if ladder {
+		request, err = inputs.Ladder(*node, probe.Family(*family), *vantage)
+	} else {
+		request, err = inputs.Diagnose(*node, probe.Family(*family), *vantage)
+	}
 	if err != nil {
-		return fail("target_inputs_invalid")
+		return failCode(err, "target_inputs_invalid")
 	}
 	request.XrayPath = *xrayPath
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

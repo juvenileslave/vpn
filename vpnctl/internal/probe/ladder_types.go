@@ -139,7 +139,38 @@ type RunReport struct {
 	Persisted        bool    `json:"persisted"`
 }
 
-func shortError(code string) error { return errors.New("probe: " + code) }
+// codedError is an authored, secret-safe probe failure. Callers classify it by
+// code through Code or errors.Is, never by matching the message text.
+type codedError struct{ code string }
+
+func (e codedError) Error() string { return "probe: " + e.code }
+
+// Is lets errors.Is match another authored error with the same code, including
+// the sentinels below, without exposing the code as a string comparison.
+func (e codedError) Is(target error) bool {
+	other, ok := target.(codedError)
+	return ok && other.code == e.code
+}
+
+func shortError(code string) error { return codedError{code: code} }
+
+// Authored cleanup failures are checked with errors.Is by callers that must not
+// mistake them for a core startup failure.
+var (
+	errPrivateCleanupFailed = shortError("private_cleanup_failed")
+	errXrayCleanupFailed    = shortError("xray_cleanup_failed")
+)
+
+// Code returns the authored code of a probe failure. It reports false for any
+// error that did not originate from shortError, so callers never print an
+// arbitrary error message.
+func Code(err error) (string, bool) {
+	var coded codedError
+	if errors.As(err, &coded) {
+		return coded.code, true
+	}
+	return "", false
+}
 
 func identity(value string) string {
 	digest := sha256.Sum256([]byte(value))
