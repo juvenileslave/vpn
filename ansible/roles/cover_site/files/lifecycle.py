@@ -312,7 +312,9 @@ def validate_candidate(path):
         target = mirror / 'sites-enabled/cover-site.conf'
         target.unlink(missing_ok=True)
         target.write_text((path / 'site.conf').read_text())
-        run(['nginx', '-t', '-c', str(mirror / 'nginx.conf'), '-p', '/etc/nginx/'])
+        # Keep the compiled prefix: Ubuntu resolves relative load_module paths
+        # (modules/ngx_stream_module.so) against it, so -p /etc/nginx/ breaks.
+        run(['nginx', '-t', '-c', str(mirror / 'nginx.conf')])
 
 
 def activate(path):
