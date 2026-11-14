@@ -3,12 +3,25 @@ client_family: v4
 s2s_family: v6_prefer
 egress_family: v4_prefer
 egress_slots: 3
-slot_fanout: sni
+slot_fanout: ports
 node_port_allow:
+  - 127.0.0.1/32
+  - ::1/128
   - 203.0.113.30/32
   - 2001:db8:30::30/128
+node_api_port: 2222
+base_ssh_port: 22
 reality_sni: www.example.com
-reality_target: 127.0.0.1:8445
+cover_tls_port: 9443
+cover_site_source: /srv/owned-cover-site
+cover_acme_email: admin@example.com
+cover_acme_agree_tos: true
+cover_acme_http_reachable: true
+reality_max_time_diff_ms: 300000
+remnawave_node_network_mode: host
 xhttp_path: /xhttp
 xhttp_mode: stream-one
-image_tags: {}
+profiles_probe_url: https://probe.example.com/generate_204
+image_tags:
+  remnawave_backend: "3.4.10"
+  remnawave_node: "3.4.5"

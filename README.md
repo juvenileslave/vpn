@@ -27,6 +27,8 @@
 - [VictoriaMetrics](docs/METRICS_ROLE.md) — закреплённый single-node store
   метрик со скрейпом node_exporter и панели, retention 30 дней и query API
   только на loopback или по source ACL; не алертинг и не production-стек.
+- [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
+  серверных и клиентских конфигураций; не публикация через панель.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
   (`version`, `config validate`) плюс read-only Telegram-бот
   ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)); панель только читает, узлы не
@@ -69,7 +71,7 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
 
-Runtime-сценарии [base](.github/workflows/base.yml), [cover-site](.github/workflows/cover-site.yml) и [RemnaNode](.github/workflows/remnawave-node.yml) запускаются только на
+Runtime-сценарии [base](.github/workflows/base.yml), [cover-site](.github/workflows/cover-site.yml), [RemnaNode](.github/workflows/remnawave-node.yml) и [profiles](.github/workflows/profiles.yml) запускаются только на
 одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
 компонента, фактические результаты — в его PR. Production-rollout и российский
 пилот этим не выполняются.
