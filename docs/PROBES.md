@@ -332,6 +332,15 @@ pilot и не real outside/provider measurements. Скрипт не обраща
 VM/panel/production, публичным DNS/ACME или owner secrets. Setup downloads public
 pins отдельно; probe не скачивает binary. Исходный architecture plan не меняется.
 
+В [PR #65](https://github.com/juvenileslave/vpn/pull/65) фактический
+[hosted run 43630121210](https://github.com/juvenileslave/vpn/actions/runs/43630121210)
+на commit `5a0d2a9` завершил **37 сценариев и cleanup с PASS**: real pinned
+REALITY/VLESS/XHTTP, exact 1/20 MiB integrity/count receipts и SQLite round-trip,
+wrong credentials без proxy access, 17 KiB close, measured slow stream,
+deadline/SIGTERM, IPv4/IPv6 isolation, outside control и stopped exit.
+Это bounded synthetic acceptance, не production rollout и не российский pilot.
+
+
 Откат — отдельный revert PR squash-коммита без переписывания master. External
 network state probes не меняют; локальные observations сохраняются. База версии
 3 не downgrade автоматически: границы старого reader/backup — в
