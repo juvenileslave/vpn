@@ -20,12 +20,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -q debootstrap systemd-container dbus > /dev/null
 WORK=$(mktemp -d /var/tmp/vpn-cover-boot.XXXXXX)
 GUEST=$WORK/rootfs
-MACHINE=cover-reboot-$RANDOM
+MACHINE=cover-reboot-${WORK##*.}
 SUPERVISOR=
+CLEANUP=$ROOT/ansible/roles/cover_site/tests/guest_cleanup.py
+python3 "$CLEANUP" prepare "$WORK"
 cleanup() {
-  machinectl terminate "$MACHINE" >/dev/null 2>&1 || true
-  if [[ -n $SUPERVISOR ]]; then kill "$SUPERVISOR" 2>/dev/null || true; wait "$SUPERVISOR" 2>/dev/null || true; fi
-  rm -rf "$WORK"
+  python3 "$CLEANUP" cleanup "$WORK" --machine "$MACHINE" --supervisor "${SUPERVISOR:-0}"
+  if [[ -n $SUPERVISOR ]]; then wait "$SUPERVISOR"; fi
 }
 trap cleanup EXIT
 fail() { echo "FAIL guest reboot: $*" >&2; exit 1; }
@@ -75,15 +76,7 @@ chroot "$GUEST" systemctl enable nginx cover-site-recover.service >"$WORK/enable
 : >"$GUEST/etc/machine-id"
 # Inner systemd owns its PID/mount/net namespaces; --private-network exposes no
 # alternate public origin. The supervisor restarts only on actual guest reboot.
-(
-  while true; do
-    set +e
-    systemd-nspawn --directory="$GUEST" --machine="$MACHINE" --boot --private-network --register=yes --link-journal=no
-    code=$?
-    set -e
-    [[ $code == 133 ]] || exit "$code"
-  done
-) >"$WORK/guest.log" 2>&1 & SUPERVISOR=$!
+python3 "$CLEANUP" supervise "$WORK" --machine "$MACHINE" >"$WORK/guest.log" 2>&1 & SUPERVISOR=$!
 inside() {
   systemd-run --quiet --machine="$MACHINE" --wait --pipe --collect \
     --setenv=VPN_COVER_SITE_DISPOSABLE_GUEST=yes --setenv=GITHUB_ACTIONS=true \
@@ -177,4 +170,7 @@ inside /usr/local/libexec/cover-site/lifecycle.py rollback
 inside /usr/bin/python3 -c 'import json,pathlib; e=json.load(open("/var/tmp/cover-expected.json")); assert str(pathlib.Path("/var/lib/cover-site/active").resolve())==e["active"]; assert json.load(open("/etc/cover-site/settings.json"))==e["settings"]'
 inside /usr/local/libexec/cover-site/lifecycle.py health
 inside /usr/bin/bash -c 'test "$(curl -s --noproxy "*" http://127.0.0.1:18081/)" = unrelated-site'
-printf 'PASS actual guest reboots: first HTTP interruption -> absent, first TLS interruption -> checked HTTP; later commit -> checked TLS/H2, distinct previous and old settings. Host kernel untouched.\n'
+# The real verdict follows machine/process/mount/directory teardown, not vice versa.
+trap - EXIT
+cleanup
+printf 'PASS actual guest reboots and verified cleanup: first HTTP interruption -> absent, first TLS interruption -> checked HTTP; later commit -> checked TLS/H2, distinct previous and old settings. Host kernel untouched.\n'
