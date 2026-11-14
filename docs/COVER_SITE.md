@@ -262,6 +262,17 @@ Guest создаёт ещё две настоящие checked content/settings �
 CA account, panel/node credentials не копируются. Это устойчивость сайта,
 не доказательство reboot всей Xray/Docker stack.
 
+Teardown booted guest запрещает новый restart через собственный stop marker,
+завершает только machine с соответствующим owned rootfs и ждёт **выхода supervisor**
+через Linux pidfd. Supervisor не убивается поверх ещё работающего `systemd-nspawn`.
+После этого проверяется отсутствие machine, обычным `umount` убираются только
+канонические mounts внутри собственного временного каталога (сначала вложенные),
+и лишь затем удаляется каталог. Force/lazy unmount и игнорирование cleanup ошибок
+не используются. Ownership marker привязан к path/device/inode. Итоговый PASS
+печатается **после** подтверждённого process/mount/directory cleanup; timeout либо
+остаточный ресурс возвращает FAIL, а не преждевременное обещание успеха.
+
+
 После интеграции владелец проверки запускает `make -C ansible validate test` и
 однократный финальный `make check`. Реально выполненные результаты публикуются
 в PR; наличие entry points/CI configuration само по себе не означает PASS.
