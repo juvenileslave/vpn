@@ -24,6 +24,14 @@ AUTH_BYTES = 256
 SMALL_BYTES = 1 << 20
 LARGE_BYTES = 20 << 20
 
+def child_pids(parent_pid):
+    # /proc/<pid>/task/<pid>/children covers only the main thread. Go may
+    # spawn Xray from another OS thread; select by process PPID instead.
+    rows = command(["ps", "-eo", "pid=,ppid="], timeout=5).decode().splitlines()
+    return [pid for row in rows if len(fields := row.split()) == 2
+            for pid, parent in [fields] if parent == str(parent_pid)]
+
+
 
 def read_probe_rows(path, run_id):
     # Connection.__exit__ commits/rolls back; it does NOT close SQLite/WAL.
@@ -190,7 +198,7 @@ class LadderAcceptance:
                             raise AssertionError("private Xray config is not 0600")
                 argv = Path(f"/proc/{process.pid}/cmdline").read_bytes()
                 self.safe(argv)
-                children = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+                children = child_pids(process.pid)
                 if not children:
                     time.sleep(.02)
                     continue

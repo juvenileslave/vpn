@@ -2,13 +2,15 @@
 import hashlib
 import os
 from pathlib import Path
+import queue
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
-from probe_ladder_runtime import AUTH_BYTES, SMALL_BYTES, LARGE_BYTES, PATTERN, payload_digest, read_probe_rows
+from probe_ladder_runtime import AUTH_BYTES, SMALL_BYTES, LARGE_BYTES, PATTERN, payload_digest, read_probe_rows, child_pids
 
 
 class PayloadExpectationTest(unittest.TestCase):
@@ -55,6 +57,28 @@ class StoreReaderTest(unittest.TestCase):
                 before = path.read_bytes()
                 self.assertEqual(read_probe_rows(path, "fixture"), [expected] * (index + 1))
                 self.assertEqual(path.read_bytes(), before)
+
+
+class ChildProcessTest(unittest.TestCase):
+    def test_child_created_by_nonmain_thread_is_observed(self):
+        processes = queue.Queue()
+        release = threading.Event()
+
+        def create_child():
+            process = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"], stdin=subprocess.PIPE)
+            processes.put(process)
+            release.wait(5)
+            process.stdin.close()
+            process.wait(timeout=5)
+
+        thread = threading.Thread(target=create_child)
+        thread.start()
+        try:
+            process = processes.get(timeout=5)
+            self.assertIn(str(process.pid), child_pids(os.getpid()))
+        finally:
+            release.set()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":
