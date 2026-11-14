@@ -1,11 +1,14 @@
 # vpnctl
 
 `vpnctl` — утилита управления VPN из [архитектурного плана](../docs/ARCHITECTURE_PLAN.md)
-(этап 5). Реализованы **строгий контракт конфигурации**, команда его проверки и
-**read-only Telegram-бот** `vpnctl bot` (задачи 5.3/5.4; см.
-[TELEGRAM_BOT.md](../docs/TELEGRAM_BOT.md)), авторизованная `probe ladder` и
-консервативный `diagnose` ([PROBES.md](../docs/PROBES.md)). Воркера, mTLS
-probe-агента и команд изменения здесь нет; остальные команды плана не существуют.
+(этап 5). Реализованы **строгий контракт конфигурации**, команда его проверки,
+**read-only Telegram-бот** `vpnctl bot` (см. [TELEGRAM_BOT.md](../docs/TELEGRAM_BOT.md)),
+авторизованная `probe ladder` и консервативный `diagnose`
+([PROBES.md](../docs/PROBES.md)), а также **read-only `panel plan/show`** для
+существующего renderer bundle ([PANEL_WRITE.md](../docs/PANEL_WRITE.md)).
+Запись в панель и rollback заблокированы: закреплённый API не поддерживает
+атомарные write-preconditions. Воркера, mTLS probe-агента и команд изменения
+инфраструктуры нет.
 
 ## Чего утилита не делает
 
@@ -13,8 +16,9 @@ probe-агента и команд изменения здесь нет; ост�
 - `config validate` не открывает сетевых соединений; `probe ladder` делает
   только явно запрошенные bounded пробы по внешнему файлу, а `diagnose` читает
   локальное evidence и ничего не запускает на узлах.
-- Токены бота/панели читает только из переменных окружения при `vpnctl bot`;
-  client credentials для ladder — из приватного файла принятого renderer вне Git.
+- Токены бота/панели читает только из переменных окружения при `vpnctl bot`
+  или read-only `vpnctl panel`; client credentials для ladder — из приватного
+  файла принятого renderer вне Git.
 - Не меняет production, DNS, firewall или сертификаты.
 
 `config validate` проверяет только сам файл: успешный результат не означает, что
@@ -32,6 +36,11 @@ probe-агента и команд изменения здесь нет; ост�
 | `vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH` | TCP → verified TLS/cover → REALITY/VLESS/XHTTP → exact 1 MiB → exact 20 MiB; text или `--format json`/`--json`. | 0 — все пять этапов успешны; 4 — выполненный этап отказал |
 | `vpnctl diagnose --node NAME --inputs PATH --store PATH [--family ipv4|ipv6]` | Pure scoped verdict с confidence/missing_evidence; никакой remediation. | 0 — supported hypothesis; 3 — insufficient evidence / `unknown` |
 | Ошибка external inputs, pinned core, store, private cleanup или output | Короткий secret-safe code; не успех сетевой пробы. | 1 |
+| `vpnctl panel [plan] --config PATH --bundle MANIFEST --objects PATH` | Проверка bundle и безопасный JSON-diff; только GET. `apply` без `--apply` выполняет тот же plan. | 0 |
+| `vpnctl panel show --config PATH --bundle MANIFEST --objects PATH` | Только текущие объявленные identities и наличие effective fields. | 0 |
+| `vpnctl panel apply --apply` | Отказ до чтения файлов/токена, сети и SQLite: атомарной защиты в API нет. | 3 |
+| `panel`: stale UUID, ownership-конфликт, потенциально lossy update | Безопасный отказ; панель не меняется. | 3 |
+| `panel`: неверные inputs, token/TLS/HTTP/response ошибки | Значения и сырые diagnostics не выводятся. | 1 |
 | Неизвестная команда, лишние аргументы, нет `--config` | Описание использования в stderr. | 2 |
 
 
@@ -120,8 +129,8 @@ bot:
 значения токенов. Шаблон имени отвергает типичные значения токенов (строчные
 буквы, `-`, `.`), а поля `token` в схеме нет, и оно отклоняется как неизвестное.
 Userinfo в `panel.url` и `bot.api_base` запрещено по той же причине и не
-повторяется в сообщении об ошибке. Значения токенов читает из окружения только
-`vpnctl bot`; они не печатаются и не попадают в логи или ошибки.
+повторяется в сообщении об ошибке. Значения токенов читает из окружения
+`vpnctl bot` и read-only `vpnctl panel`; они не печатаются и не сохраняются.
 
 ## Локальная проверка
 

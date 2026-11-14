@@ -29,10 +29,11 @@
   только на loopback или по source ACL; не алертинг и не production-стек.
 - [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
   серверных и клиентских конфигураций; не публикация через панель.
-- [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
-  (`version`, `config validate`), read-only Telegram-бот
-  ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)) и авторизованная
-  [probe ladder / diagnose](docs/PROBES.md); панель только читает, узлы не изменяет.
+- [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go,
+  read-only Telegram-бот ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)),
+  [probe ladder / diagnose](docs/PROBES.md) и [panel plan/show](docs/PANEL_WRITE.md).
+  Публикация и rollback заблокированы отсутствующим CAS в закреплённой панели;
+  узлы не изменяются.
 - [Probe ladder и классификатор](docs/PROBES.md) — bounded REALITY/VLESS/XHTTP,
   отдельные family/vantage controls, `unknown` при недостаточном evidence;
   не детектор конкретной системы цензуры и не автоматическая remediation.

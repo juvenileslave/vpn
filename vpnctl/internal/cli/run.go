@@ -28,13 +28,15 @@ const usage = `usage:
   vpnctl bot --config PATH
   vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH [--format text|json]
   vpnctl diagnose --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH [--format text|json]
+  vpnctl panel [plan|show|apply] --config PATH --bundle MANIFEST --objects PATH [--ca-file PATH] [--apply]
 `
 
 // Exit codes returned by Run.
 const (
-	ExitOK    = 0
-	ExitError = 1
-	ExitUsage = 2
+	ExitOK      = 0
+	ExitError   = 1
+	ExitUsage   = 2
+	ExitRefused = 3
 )
 
 // Run executes vpnctl with args (without the program name) and returns the
@@ -58,6 +60,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runProbe(args[1:], stdout, stderr)
 	case "diagnose":
 		return runDiagnosisCommand(args[1:], stdout, stderr, false)
+	case "panel":
+		return runPanel(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitOK

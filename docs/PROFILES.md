@@ -365,9 +365,11 @@ FAIL report. Успешный offline render или сборка helper не с�
 действительных inbound tags, отдельного Host direct и Host на каждый fixed
 relay port, одного serverName/path/fingerprint/public key/shortId/UUID набора из
 того же bundle, service users с slot binding, уже применённого base ACL и
-проверенного cover origin. `vpnctl` Remnawave client read-only; никаких
-предполагаемых write методов renderer не вызывает. Публикация/выдача links
-пользователям и production cutover здесь не выполнены.
+проверенного cover origin. `vpnctl panel plan/show` читает этот bundle и
+проверяет только явно объявленные profiles/snippets/hosts; renderer API не вызывает.
+Запись и rollback заблокированы отсутствующим CAS в закреплённой панели
+(см. [PANEL_WRITE.md](PANEL_WRITE.md)). Публикация/выдача links пользователям
+и production cutover здесь не выполнены.
 
 Откат: восстановить прежние inputs/site/ACL, **наложить текущие revocations**,
 сгенерировать новую consistent identity, повторить actual gates и только затем

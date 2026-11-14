@@ -1,9 +1,9 @@
 // Package remnawave is a read-only client for the Remnawave panel REST API.
 //
-// It covers only GET /api/users, GET /api/users/{userId} and GET /api/nodes as
-// described by the official Remnawave OpenAPI specification 3.4.10. The client
-// never writes, never retries and never logs. Exported models deliberately omit
-// protocol credentials, subscription URLs and raw response bodies.
+// It reads users, nodes, config profiles, computed profiles, snippets and hosts
+// from the pinned Remnawave API 3.4.10. The client never writes, retries or logs.
+// Legacy user/node models omit secrets. Planning models retain raw fields in
+// memory but redact themselves when formatted or JSON encoded.
 package remnawave
 
 import (
@@ -180,7 +180,7 @@ func (c *Client) get(ctx context.Context, op string, query url.Values, elem ...s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("remnawave: %s: build request: %w", op, err)
+		return nil, fmt.Errorf("remnawave: %s: build request: %w", op, safeCause{err})
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
@@ -191,6 +191,10 @@ func (c *Client) get(ctx context.Context, op string, query url.Values, elem ...s
 		var uerr *url.Error
 		if errors.As(err, &uerr) {
 			err = uerr.Err
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			err = safeCause{err}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = fmt.Errorf("%w (%w)", ctxErr, err)
@@ -213,7 +217,7 @@ func (c *Client) get(ctx context.Context, op string, query url.Values, elem ...s
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("remnawave: %s: read body: %w", op, ctxErr)
 		}
-		return nil, fmt.Errorf("remnawave: %s: read body: %w", op, err)
+		return nil, fmt.Errorf("remnawave: %s: read body: %w", op, safeCause{err})
 	}
 	if int64(len(body)) > c.maxBytes {
 		return nil, fmt.Errorf("remnawave: %s: %w (limit %d bytes)", op, ErrResponseTooLarge, c.maxBytes)
