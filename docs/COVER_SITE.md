@@ -262,9 +262,16 @@ Guest создаёт ещё две настоящие checked content/settings �
 CA account, panel/node credentials не копируются. Это устойчивость сайта,
 не доказательство reboot всей Xray/Docker stack.
 
-Teardown booted guest запрещает новый restart через собственный stop marker,
-завершает только machine с соответствующим owned rootfs и ждёт **выхода supervisor**
-через Linux pidfd. Supervisor не убивается поверх ещё работающего `systemd-nspawn`.
+Teardown booted guest запрещает новый restart через собственный stop marker.
+Python supervisor владеет дочерним `systemd-nspawn` и передаёт stop даже при
+in-flight launch до регистрации machine. Cleanup посылает сигнал только этому
+проверенному direct-child supervisor через pidfd и ждёт его завершения, не убивая
+ожидающий shell поверх работающего guest. Registered machine дополнительно
+обязана иметь соответствующий owned rootfs.
+Pidfd дочернего процесса удерживается от создания до reaping: пересылка stop
+не адресует числовой PID, который мог быть переиспользован. Гонка нормального
+выхода supervisor с проверкой identity/сигналом принимается только когда тот же
+pidfd подтверждает exit; live identity mismatch по-прежнему отклоняется.
 После этого проверяется отсутствие machine, обычным `umount` убираются только
 канонические mounts внутри собственного временного каталога (сначала вложенные),
 и лишь затем удаляется каталог. Force/lazy unmount и игнорирование cleanup ошибок

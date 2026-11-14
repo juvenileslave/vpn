@@ -76,16 +76,7 @@ chroot "$GUEST" systemctl enable nginx cover-site-recover.service >"$WORK/enable
 : >"$GUEST/etc/machine-id"
 # Inner systemd owns its PID/mount/net namespaces; --private-network exposes no
 # alternate public origin. The supervisor restarts only on actual guest reboot.
-(
-  while [[ ! -e $WORK/stopping ]]; do
-    set +e
-    systemd-nspawn --directory="$GUEST" --machine="$MACHINE" --boot --private-network --register=yes --link-journal=no
-    code=$?
-    set -e
-    [[ ! -e $WORK/stopping ]] || exit 0
-    [[ $code == 133 ]] || exit "$code"
-  done
-) >"$WORK/guest.log" 2>&1 & SUPERVISOR=$!
+python3 "$CLEANUP" supervise "$WORK" --machine "$MACHINE" >"$WORK/guest.log" 2>&1 & SUPERVISOR=$!
 inside() {
   systemd-run --quiet --machine="$MACHINE" --wait --pipe --collect \
     --setenv=VPN_COVER_SITE_DISPOSABLE_GUEST=yes --setenv=GITHUB_ACTIONS=true \
