@@ -1,13 +1,14 @@
 # Клиент API Remnawave (только чтение)
 
 Пакет `vpnctl/internal/remnawave` — библиотечный Go-клиент панели Remnawave для
-чтения состояния пользователей и узлов. Это первый ограниченный срез задачи 5.1
-[архитектурного плана](ARCHITECTURE_PLAN.md). В CLI `vpnctl` клиент **не
-подключён**: команды, читающие токен и обращающиеся к панели, — отдельная задача.
+чтения пользователей, узлов, config profiles, computed-config, именованных
+snippets и hosts. Команды `vpnctl panel plan/show` используют только чтение;
+условия STRICT и границы apply описаны в [PANEL_WRITE.md](PANEL_WRITE.md).
 
 ## Чего клиент не делает
 
-- Нет методов создания, изменения и удаления: только три GET-запроса ниже.
+- Нет методов создания, изменения и удаления: только девять GET-запросов ниже.
+- Нет экспортированного универсального метода HTTP-запроса.
 - Нет автоматических повторов. `429` и `5xx` возвращаются вызывающему коду.
 - Нет логирования. Токен не читается из окружения или файлов: его передаёт
   вызывающий код.
@@ -35,6 +36,12 @@
 | `ListUsers(ctx, start, size)` | `GET /api/users?start=&size=` | `{"response": {"users": [...], "total": N}}` |
 | `User(ctx, id)` | `GET /api/users/{userId}` | `{"response": {...}}` |
 | `ListNodes(ctx)` | `GET /api/nodes` | `{"response": [...]}` |
+| `ListConfigProfiles(ctx)` | `GET /api/config-profiles` | `{"response":{"total":N,"configProfiles":[...]}}` |
+| `ConfigProfile(ctx, uuid)` | `GET /api/config-profiles/{uuid}` | `{"response":ConfigProfile}` |
+| `ComputedConfigProfile(ctx, uuid)` | `GET /api/config-profiles/{uuid}/computed-config` | `{"response":ConfigProfile}` |
+| `ListSnippets(ctx)` | `GET /api/snippets` | `{"response":{"total":N,"snippets":[...]}}` |
+| `ListHosts(ctx)` | `GET /api/hosts` | `{"response":[Host,...]}` |
+| `Host(ctx, uuid)` | `GET /api/hosts/{uuid}` | `{"response":Host}` |
 
 - Пагинация по смещению: `start` — смещение с нуля, `size` — от 1 до 1000
   (ограничения спецификации). Неверные значения отклоняются до запроса
@@ -46,6 +53,16 @@
   поля `uuid`. Поэтому метод называется `User(ctx, id int64)`. Поиск по
   `shortUuid` и `username` не реализован: `shortUuid` входит в ссылку подписки.
 - Остальные эндпоинты не реализованы.
+- Шесть новых методов не используют query, тело запроса или пагинацию.
+  `total` у profiles/snippets обязан совпадать с длиной полной коллекции.
+  Пустые коллекции возвращаются непустым по типу, но пустым по длине срезом
+  (`[]`, не `nil`). Дубликаты UUID (включая различие только регистра), имён
+  profiles/snippets и UUID/tag inbounds отклоняются как malformed response.
+- UUID проверяется до HTTP-запроса; одиночный ответ обязан содержать
+  запрошенную идентичность. Inbound профиля обязан ссылаться на этот профиль.
+- `computed-config` возвращает **конверт профиля**, а не голый Xray config.
+  Snippets раскрывает сама панель; клиент не имитирует её алгоритм.
+  Это не отдельная конфигурация узла с пользовательской инъекцией панели.
 
 ## Использование
 
@@ -76,7 +93,7 @@ page, err := client.ListUsers(ctx, 0, 100)
 
 ## Модели
 
-Экспортируются только небольшие типизированные структуры:
+Существующие безопасные модели пользователей и узлов не изменены:
 
 - `User`: `ID`, `Username`, `Status` (`UserStatus`: `ACTIVE`, `DISABLED`,
   `LIMITED`, `EXPIRED`; неизвестные будущие значения сохраняются, `Known()`
@@ -89,10 +106,35 @@ page, err := client.ListUsers(ctx, 0, 100)
   `disconnected`), `UsersOnline`, `Usage` (`UsedBytes`, `LimitBytes` —
   указатели, `nil` при `null`), `LastStatusChange`.
 
-Намеренно **не** декодируются: `trojanPassword`, `ssPassword`, `vlessUuid`,
-`shortUuid`, `subscriptionUrl`, email, Telegram ID; у узлов — `address`,
-`proxyUrl`, `lastStatusMessage`. Сырые тела ответов не сохраняются.
-Неизвестные поля ответа игнорируются ради совместимости с будущими версиями.
+Для `User`/`Node` намеренно **не** декодируются: `trojanPassword`, `ssPassword`,
+`vlessUuid`, `shortUuid`, `subscriptionUrl`, email, Telegram ID; у узлов —
+`address`, `proxyUrl`, `lastStatusMessage`. Их сырые ответы не сохраняются,
+неизвестные поля игнорируются как прежде.
+
+Новые модели для планирования:
+
+- `ConfigProfile`: `UUID`, `Name`, `Config json.RawMessage`,
+  `Inbounds []ConfigProfileInbound`, `Fields map[string]json.RawMessage`.
+- `ConfigProfileInbound`: `UUID`, `ProfileUUID`, `Tag`, `Fields`.
+- `Snippet`: `Name`, `Snippet json.RawMessage`, `Fields`. В API 3.4.10 нет
+  UUID, revision, timestamp или маркера инкарнации snippet.
+- `Host`: `UUID`, `Remark`, `Inbound HostInbound`, `Fields`.
+- `HostInbound`: `ConfigProfileUUID`, `ConfigProfileInboundUUID`, `Fields`.
+  Nullable UUID панели представлены пустыми строками; исходные `null`
+  остаются в `Fields`, выдуманных ссылок нет.
+
+`Fields` сохраняет **все** исходные поля, включая неизвестные и вложенные.
+`Config` сохраняет исходный Xray объект, в том числе static clients; snippet —
+непустой массив непустых объектов. Это приватные данные **в памяти**, которые
+могут содержать credentials. Нельзя отдельно выводить `Config`, `Snippet` или
+`Fields`. `fmt` (`%v`, `%+v`, `%#v`) и `json.Marshal` самих новых моделей,
+указателей, срезов и контейнеров этих моделей всегда скрывают содержимое и
+идентичности; JSON модели — `{"redacted":true}`.
+
+Новые ответы проходят строгую проверку одного JSON-значения, обязательного
+конверта, точного регистра полей, обязательных полей и типов, UUID, времени,
+коллекций и повторяющихся ключей **на любой глубине**, включая opaque configs
+и неизвестные поля. Парсер не повторяет тело или произвольное имя ключа в ошибке.
 
 ## Ограничения и безопасность
 
@@ -113,8 +155,8 @@ page, err := client.ListUsers(ctx, 0, 100)
 | Ошибка | Когда |
 | --- | --- |
 | `ErrInvalidConfig` | Неверные аргументы `New` или опции. |
-| `ErrInvalidArgument` | Неверные `start`, `size`, `id` или `nil` context; запрос не отправляется. |
-| `ErrMalformedResponse` | Не JSON, обрезанный или лишний JSON, не тот конверт, нет обязательных полей, неверные типы или время, `Content-Type` не `application/json`. |
+| `ErrInvalidArgument` | Неверные `start`, `size`, `id`, UUID или `nil` context; запрос не отправляется. |
+| `ErrMalformedResponse` | Не JSON, обрезанный или лишний JSON, не тот конверт, нет обязательных полей, неверные типы, UUID или время, `Content-Type` не `application/json`; для новых моделей — duplicate keys/identities и несогласованный `total`. |
 | `ErrResponseTooLarge` | Тело больше лимита. |
 | `*APIError` | Ответ не `2xx`: `StatusCode`, `Code` (`errorCode` панели вида `A025`, если корректен), `RetryAfter` для `429`. |
 
@@ -124,10 +166,28 @@ page, err := client.ListUsers(ctx, 0, 100)
 `ErrUnexpectedStatus`. Сообщение (`message`) и тело ответа в ошибку не
 копируются, заголовок `Authorization` — тоже.
 
+Ошибки транспорта и чтения тела не печатают исходный текст, URL или тело;
+цепочка причин для `errors.Is`/`errors.As`, отмены, deadline и timeout сохранена.
+
+## STRICT: запись намеренно недоступна
+
+Владелец выбрал защиту от **независимых writers**, а не эксклюзивное владение.
+На disposable панели pinned 3.4.10 устаревший `If-Match` не предотвратил PATCH:
+панель приняла изменение с HTTP 200. Атомарного API precondition нет;
+повторное чтение перед записью не заменяет CAS. Поэтому клиент не содержит
+mutating методов, а явный apply отказывается **до** токена, сети и состояния.
+Нет обхода `--exclusive`, фиктивного CAS, журнала apply или rollback.
+
+Дополнительно full profile PATCH очищает managed inbound static clients,
+хотя POST сохраняет их. Сохранение raw config при чтении не разрешает такой
+lossy update. Доставка на реальные nodes и user injection не подтверждены.
+Read-only срез не завершает write adapter и **не закрывает issue #53**.
+
 ## Проверка
 
 Тесты используют локальные `httptest` TLS-серверы с доверенным тестовым
-сертификатом. Реальная панель и токен не нужны, внешней сети нет.
+сертификатом. Новые тесты генерируют временные токены и UUID. Реальная панель
+и credentials не нужны; внешней сети в тестах нет.
 
 ```sh
 cd vpnctl
@@ -142,4 +202,14 @@ deadline, отказ от редиректа (цель редиректа не �
 недоверенного сертификата и от `InsecureSkipVerify`, отсутствие токена и
 секретных полей в моделях и ошибках.
 
-Проверки против реальной панели Remnawave не выполнялись.
+Новые synthetic тесты проверяют все шесть method/path/query/header/body
+контрактов, raw/unknown поля в памяти и redaction моделей/контейнеров;
+mandatory fields, неверные envelopes, UUID, duplicate keys/identities,
+несогласованный `total`, malformed/trailing JSON, HTTP errors, oversized
+Content-Length/chunked ответы, отмену/deadline/client timeout до и после
+заголовков, безопасные transport/body errors с сохранённой цепочкой причин.
+
+Формы ответов и ограничения записи сверены с pinned исходниками и реальной
+disposable панелью 3.4.10 за доверенным TLS proxy. Probe-объекты удалены.
+К ней не был подключён Node: HTTP readback и принятие очереди не доказывают
+эффективную конфигурацию узлов, refresh или пользовательскую инъекцию.

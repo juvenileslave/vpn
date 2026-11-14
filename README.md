@@ -29,10 +29,10 @@
   только на loopback или по source ACL; не алертинг и не production-стек.
 - [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
   серверных и клиентских конфигураций; не публикация через панель.
-- [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go
-  (`version`, `config validate`) плюс read-only Telegram-бот
-  ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)); панель только читает, узлы не
-  изменяет.
+- [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go,
+  read-only Telegram-бот ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)) и
+  [panel plan/show](docs/PANEL_WRITE.md). Публикация и rollback заблокированы
+  отсутствующим CAS в закреплённой панели; узлы не изменяются.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
   условия слияния и откат.
 - [Безопасность](SECURITY.md) — приватное сообщение об уязвимости.

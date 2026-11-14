@@ -27,6 +27,15 @@ var (
 	ErrUnexpectedStatus = errors.New("unexpected HTTP status")
 )
 
+// safeCause preserves errors.Is/As without formatting a transport or body-read
+// error that may quote request URLs, credentials or server-controlled text.
+type safeCause struct{ cause error }
+
+func (e safeCause) Error() string    { return "transport or response read failure" }
+func (e safeCause) String() string   { return e.Error() }
+func (e safeCause) GoString() string { return e.Error() }
+func (e safeCause) Unwrap() error    { return e.cause }
+
 // APIError is a non-2xx response. It carries only the status, the panel error
 // code (such as "A025") and Retry-After; the response message, body and the
 // redirect location are never kept.
