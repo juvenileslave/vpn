@@ -2,18 +2,23 @@
 
 `vpnctl` — утилита управления VPN из [архитектурного плана](../docs/ARCHITECTURE_PLAN.md)
 (этап 5). Реализованы **строгий контракт конфигурации**, команда его проверки,
-**read-only Telegram-бот** `vpnctl bot` (см. [TELEGRAM_BOT.md](../docs/TELEGRAM_BOT.md))
-и **read-only `panel plan/show`** для существующего renderer bundle
-(см. [PANEL_WRITE.md](../docs/PANEL_WRITE.md)). Запись в панель и rollback
-заблокированы: закреплённый API не поддерживает атомарные write-preconditions.
-Воркера и команд изменения инфраструктуры нет.
+**read-only Telegram-бот** `vpnctl bot` (см. [TELEGRAM_BOT.md](../docs/TELEGRAM_BOT.md)),
+авторизованная `probe ladder` и консервативный `diagnose`
+([PROBES.md](../docs/PROBES.md)), а также **read-only `panel plan/show`** для
+существующего renderer bundle ([PANEL_WRITE.md](../docs/PANEL_WRITE.md)).
+Запись в панель и rollback заблокированы: закреплённый API не поддерживает
+атомарные write-preconditions. Воркера, mTLS probe-агента и команд изменения
+инфраструктуры нет.
 
 ## Чего утилита не делает
 
 - Не меняет панель: у клиента панели только GET-запросы.
-- Не проверяет доступность узлов (никаких probe) и не подключается к серверам.
-- Не читает токены из файлов: только из переменных окружения, названных в
-  конфигурации, и только при запуске `vpnctl bot` или read-only `vpnctl panel`.
+- `config validate` не открывает сетевых соединений; `probe ladder` делает
+  только явно запрошенные bounded пробы по внешнему файлу, а `diagnose` читает
+  локальное evidence и ничего не запускает на узлах.
+- Токены бота/панели читает только из переменных окружения при `vpnctl bot`
+  или read-only `vpnctl panel`; client credentials для ladder — из приватного
+  файла принятого renderer вне Git.
 - Не меняет production, DNS, firewall или сертификаты.
 
 `config validate` проверяет только сам файл: успешный результат не означает, что
@@ -28,6 +33,9 @@
 | | При ошибках — `config invalid: PATH` и **все** найденные ошибки в stderr. | 1 |
 | `vpnctl bot --config PATH` | Long-polling бот; до остановки пишет логи в stderr, при `SIGINT`/`SIGTERM` — `bot stopped` в stdout. | 0 |
 | | Ошибка конфигурации, окружения, `getMe`, панели или типизированная ошибка Telegram — `bot failed`/`bot stopped` в stderr. | 1 |
+| `vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH` | TCP → verified TLS/cover → REALITY/VLESS/XHTTP → exact 1 MiB → exact 20 MiB; text или `--format json`/`--json`. | 0 — все пять этапов успешны; 4 — выполненный этап отказал |
+| `vpnctl diagnose --node NAME --inputs PATH --store PATH [--family ipv4|ipv6]` | Pure scoped verdict с confidence/missing_evidence; никакой remediation. | 0 — supported hypothesis; 3 — insufficient evidence / `unknown` |
+| Ошибка external inputs, pinned core, store, private cleanup или output | Короткий secret-safe code; не успех сетевой пробы. | 1 |
 | `vpnctl panel [plan] --config PATH --bundle MANIFEST --objects PATH` | Проверка bundle и безопасный JSON-diff; только GET. `apply` без `--apply` выполняет тот же plan. | 0 |
 | `vpnctl panel show --config PATH --bundle MANIFEST --objects PATH` | Только текущие объявленные identities и наличие effective fields. | 0 |
 | `vpnctl panel apply --apply` | Отказ до чтения файлов/токена, сети и SQLite: атомарной защиты в API нет. | 3 |
@@ -35,6 +43,26 @@
 | `panel`: неверные inputs, token/TLS/HTTP/response ошибки | Значения и сырые diagnostics не выводятся. | 1 |
 | Неизвестная команда, лишние аргументы, нет `--config` | Описание использования в stderr. | 2 |
 
+
+Ladder не зависит от panel adapter, токена панели или YAML-конфигурации бота.
+Внешний JSON содержит targets, budgets и реальные vantage labels, а credentials
+остаются в `clients/{direct,relay}-N.json`, произведённом immutable profiles
+renderer. В файле inputs можно указать `profile_file_env` — **имя** переменной
+с абсолютным путём к этому client file, не UUID/key/shortId.
+
+`VPNCTL_PROBE_INPUTS`, `VPNCTL_STATE_DB`, `VPNCTL_XRAY_PATH` — необязательные
+значения по умолчанию для `--inputs`, `--store`, `--xray`. Credentials нет среди
+аргументов CLI. `--vantage` выбирает объявленную actual точку; без него используется
+`local_vantage`. `--globalping-file` явно импортирует typed HTTP-only observations
+принятого Globalping client в отдельный scope, без provider API request/poll/retry.
+Полный формат внешнего JSON, пороги, бюджеты и границы доказательств —
+[PROBES.md](../docs/PROBES.md).
+
+Успех ladder не означает supported verdict: одна сеть всегда даёт `unknown`.
+Код 4 сообщает наблюдаемый отказ этапа, а не «IP заблокирован»; код 3 относится
+к недостаточности evidence в `diagnose`. Ошибочные key/shortId/UUID не переводятся
+в TCP block. Ни одна из команд не пишет в панель, не вращает IP и не меняет
+DNS/firewall/services.
 ## Схема конфигурации
 
 Полный синтетический пример — [config.example.yaml](config.example.yaml).
@@ -107,9 +135,11 @@ Userinfo в `panel.url` и `bot.api_base` запрещено по той же п
 ## Локальная проверка
 
 Нужен Go версии из [go.mod](go.mod) (директива `go`). Тесты используют stdlib
-`testing`, временные каталоги и fake Bot API/панель на loopback; реальный
-Telegram, реальный токен и внешняя сеть не нужны. Первая сборка загружает
-зависимости через Go module proxy.
+`testing`, временные каталоги, in-memory pipes и fake Bot API/панель/TCP/TLS на
+loopback; реальный Telegram, реальные credentials и внешняя сеть не нужны.
+Pinned Xray и настоящий авторизованный путь проверяет только одноразовый
+[Relay probe ladder workflow](../.github/workflows/probe-ladder.yml), а не unit mocks.
+Первая сборка загружает зависимости через Go module proxy.
 
 ```sh
 make vpnctl-test     # gofmt -l, go vet ./..., go test ./...

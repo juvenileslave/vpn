@@ -97,6 +97,10 @@ def serve(logfile):
 
     class HTTP(BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path.startswith("/ladder/"):
+                from probe_ladder_runtime import serve_http
+                serve_http(self, logfile, lock)
+                return
             self.send_response(204)
             self.end_headers()
 

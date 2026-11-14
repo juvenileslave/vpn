@@ -376,3 +376,27 @@ relay port, одного serverName/path/fingerprint/public key/shortId/UUID н�
 переключить usable pointer. Нельзя копировать старый credential snapshot поверх
 отдельного отзыва. Repository revert не равен host restoration. Linux guest
 не заменяет разрешённый семидневный российский home/mobile pilot AC-12.
+
+## Потребление client bundle в probe ladder
+
+`vpnctl probe ladder` из [PROBES.md](PROBES.md) потребляет приватный client JSON
+этого renderer, а не строит второй VLESS/XHTTP/REALITY профиль. Временная копия
+меняет только local listener, явно выбранный literal адрес семьи и log sink;
+credentials, fingerprint, stream-one/padding, routing и server bundle immutable.
+Explicit `--xray` проверяется на accepted core version; normal probe ничего не
+скачивает. Никаких panel writes/rollback, новых SNI или deployment ролей нет.
+
+Отдельный [Relay probe ladder workflow](../.github/workflows/probe-ladder.yml)
+запускает `runtime_vm.sh probe-ladder` только в НОВОМ GitHub-hosted guest.
+Он переиспользует accepted network/cover/base/Node/profile setup и cleanup,
+после настоящего baseline запускает actual `vpnctl` text/JSON, проверяет
+authorized 1/20 MiB byte/hash receipts и SQLite facts, wrong credentials,
+IPv6 direct-exit listener down без family fallback, 17 KiB close, slow stream,
+deadline/SIGTERM и независимые synthetic controls/outage. Client → node family
+не подменяется внутренней same-exit s2s failover policy.
+
+Это narrow acceptance probe, не повтор 5-minute replay/load/rollback matrix
+полного profiles workflow. Его public report `probe-ladder-runtime.json` получает
+PASS только после всех behavioral gates и удаления owned ресурсов. Synthetic
+namespaces не являются реальными российскими/outside provider measurements;
+production и исходный архитектурный план остаются без изменений.

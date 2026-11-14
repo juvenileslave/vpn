@@ -23,4 +23,7 @@ apt-get update -q
 apt-get install -y -q nginx libnginx-mod-stream certbot openssl openssh-server curl dnsmasq-base iproute2 nftables tcpdump ethtool golang-go > /var/tmp/vpn-profiles-packages.log
 systemctl start ssh
 "$ROOT/.venv/bin/python" "$ROOT/ansible/roles/profiles/tests/runtime_vm.py" cleanup-smoke
+if [[ ${1:-} == probe-ladder ]]; then
+  exec "$ROOT/.venv/bin/python" "$ROOT/ansible/roles/profiles/tests/runtime_vm.py" probe-ladder
+fi
 exec "$ROOT/.venv/bin/python" "$ROOT/ansible/roles/profiles/tests/runtime_vm.py"

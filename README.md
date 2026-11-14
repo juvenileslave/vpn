@@ -30,9 +30,13 @@
 - [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
   серверных и клиентских конфигураций; не публикация через панель.
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go,
-  read-only Telegram-бот ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)) и
-  [panel plan/show](docs/PANEL_WRITE.md). Публикация и rollback заблокированы
-  отсутствующим CAS в закреплённой панели; узлы не изменяются.
+  read-only Telegram-бот ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)),
+  [probe ladder / diagnose](docs/PROBES.md) и [panel plan/show](docs/PANEL_WRITE.md).
+  Публикация и rollback заблокированы отсутствующим CAS в закреплённой панели;
+  узлы не изменяются.
+- [Probe ladder и классификатор](docs/PROBES.md) — bounded REALITY/VLESS/XHTTP,
+  отдельные family/vantage controls, `unknown` при недостаточном evidence;
+  не детектор конкретной системы цензуры и не автоматическая remediation.
 - [Участие и управление репозиторием](CONTRIBUTING.md) — ветки, PR, проверки,
   условия слияния и откат.
 - [Безопасность](SECURITY.md) — приватное сообщение об уязвимости.
@@ -71,7 +75,7 @@ Actions. Whitespace/EOF hooks могут исправлять файлы, кро
 отдельный обязательный CI job `Secret scan`, который использует gitleaks для
 доступной истории Git.
 
-Runtime-сценарии [base](.github/workflows/base.yml), [cover-site](.github/workflows/cover-site.yml), [RemnaNode](.github/workflows/remnawave-node.yml) и [profiles](.github/workflows/profiles.yml) запускаются только на
+Runtime-сценарии [base](.github/workflows/base.yml), [cover-site](.github/workflows/cover-site.yml), [RemnaNode](.github/workflows/remnawave-node.yml), [profiles](.github/workflows/profiles.yml) и [probe ladder](.github/workflows/probe-ladder.yml) запускаются только на
 одноразовом GitHub-hosted Linux guest. Команды и prerequisites — в документации
 компонента, фактические результаты — в его PR. Production-rollout и российский
 пилот этим не выполняются.

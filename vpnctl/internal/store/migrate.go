@@ -45,6 +45,21 @@ var migrations = []migration{
 			update_id INTEGER PRIMARY KEY CHECK (update_id > 0)
 		) STRICT`,
 	),
+	// Version 3: explicit ladder/vantage identities and measured body time.
+	// Defaults preserve every legacy probe and operation without reinterpretation.
+	execAll(
+		`ALTER TABLE probes ADD COLUMN run_id TEXT NOT NULL DEFAULT '' CHECK (length(run_id) IN (0, 32))`,
+		`ALTER TABLE probes ADD COLUMN vantage TEXT NOT NULL DEFAULT '' CHECK (length(vantage) <= 63)`,
+		`ALTER TABLE probes ADD COLUMN network TEXT NOT NULL DEFAULT '' CHECK (length(network) <= 63)`,
+		`ALTER TABLE probes ADD COLUMN vantage_kind TEXT NOT NULL DEFAULT '' CHECK (vantage_kind IN ('', 'in_country', 'outside', 'local_dc', 'external_http'))`,
+		`ALTER TABLE probes ADD COLUMN scope TEXT NOT NULL DEFAULT '' CHECK (scope IN ('', 'node_path', 'same_address_control', 'external_http'))`,
+		`ALTER TABLE probes ADD COLUMN endpoint_identity TEXT NOT NULL DEFAULT '' CHECK (length(endpoint_identity) IN (0, 64))`,
+		`ALTER TABLE probes ADD COLUMN config_identity TEXT NOT NULL DEFAULT '' CHECK (length(config_identity) IN (0, 64))`,
+		`ALTER TABLE probes ADD COLUMN sni_identity TEXT NOT NULL DEFAULT '' CHECK (length(sni_identity) IN (0, 64))`,
+		`ALTER TABLE probes ADD COLUMN expected_bytes INTEGER NOT NULL DEFAULT 0 CHECK (expected_bytes BETWEEN 0 AND 20971520)`,
+		`ALTER TABLE probes ADD COLUMN body_duration_ns INTEGER NOT NULL DEFAULT 0 CHECK (body_duration_ns >= 0)`,
+		`ALTER TABLE probes ADD COLUMN throughput_floor INTEGER NOT NULL DEFAULT 0 CHECK (throughput_floor BETWEEN 0 AND 1000000000000)`,
+	),
 }
 
 func execAll(statements ...string) migration {

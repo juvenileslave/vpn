@@ -1196,7 +1196,7 @@ class Lab:
         attempt("verify-owned-temporary-mounts-absent", verify_unmounted)
         return failures
 
-    def execute(self):
+    def execute(self, *, ladder_only=False):
         self.stage = "accepted-runtime-role-contracts"
         runtime_contracts()
         self.stage = "network"
@@ -1232,6 +1232,12 @@ class Lab:
         self.client(candidate, "relay-0", 1080)
         time.sleep(5)
         self.transfer()
+        if ladder_only:
+            from probe_ladder_runtime import run_ladder_acceptance
+            self.stage = "probe-ladder-actual-CLI"
+            run_ladder_acceptance(self, candidate)
+            self.evidence["behavioral_result"] = "PASS"
+            return self.evidence
         self.stage = "TLS-H1-H2-origin-baselines"
         self.tls_matrix()
         self.denied_ports()
@@ -1339,7 +1345,7 @@ def child():
         raise SystemExit("unknown disposable child operation")
 
 
-def main(*, cleanup_only=False):
+def main(*, cleanup_only=False, ladder_only=False):
     guard_identity()
     guard_fresh_state()
     lab = None
@@ -1351,7 +1357,7 @@ def main(*, cleanup_only=False):
     try:
         with tempfile.TemporaryDirectory(prefix="vpn-profiles-", dir="/var/tmp") as temporary:
             lab = Lab(Path(temporary))
-            lab.evidence["operation"] = "cleanup-smoke" if cleanup_only else "full-runtime"
+            lab.evidence["operation"] = "cleanup-smoke" if cleanup_only else "probe-ladder-runtime" if ladder_only else "full-runtime"
             try:
                 if cleanup_only:
                     runtime_contracts()
@@ -1361,7 +1367,7 @@ def main(*, cleanup_only=False):
                     lab.relay_daemon()
                     lab.evidence["behavioral_result"] = "NOT_RUN"
                 else:
-                    lab.execute()
+                    lab.execute(ladder_only=ladder_only)
             except BaseException as error:
                 failed = True
                 lab.evidence["failed_stage"] = getattr(lab, "stage", "initialization")
@@ -1396,7 +1402,7 @@ def main(*, cleanup_only=False):
     lab.evidence["result"] = "FAIL" if failed else "PASS"
     report_dir = ROOT / "artifacts/active-probing"
     report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    name = "profiles-cleanup-smoke.json" if cleanup_only else "profiles-runtime.json"
+    name = "profiles-cleanup-smoke.json" if cleanup_only else "probe-ladder-runtime.json" if ladder_only else "profiles-runtime.json"
     private_json(report_dir / name, lab.evidence)
     print(json.dumps(lab.evidence, sort_keys=True, indent=2), flush=True)
     if failed:
@@ -1405,7 +1411,9 @@ def main(*, cleanup_only=False):
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) > 1:
+        if len(sys.argv) > 1 and sys.argv[1] == "probe-ladder":
+            main(ladder_only=True)
+        elif len(sys.argv) > 1:
             child()
         else:
             main()

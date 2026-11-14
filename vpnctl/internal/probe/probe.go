@@ -10,8 +10,10 @@ package probe
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -128,6 +130,8 @@ type HTTPRequest struct {
 	// MaxHeaderBytes bounds the response status line and header; zero means
 	// DefaultMaxHeaderBytes.
 	MaxHeaderBytes int64
+	// HashBody records SHA-256 of the bounded body without retaining payloads.
+	HashBody bool
 }
 
 // DefaultMaxHeaderBytes is the response header limit used when
@@ -147,7 +151,8 @@ type Observation struct {
 	Error      string         `json:"error,omitempty"`
 
 	// TLSVersion is the negotiated version after a successful handshake.
-	TLSVersion uint16 `json:"tls_version,omitempty"`
+	TLSVersion  uint16       `json:"tls_version,omitempty"`
+	Certificate *Certificate `json:"certificate,omitempty"`
 
 	// StatusCode is the status of the final (non-1xx) HTTP response, or 101
 	// when the server switched protocols.
@@ -158,9 +163,22 @@ type Observation struct {
 	// HeaderReceived is when the response header was parsed.
 	HeaderReceived time.Time `json:"header_received,omitzero"`
 	// BytesRead counts response body bytes consumed, at most MaxBytes.
-	BytesRead int64 `json:"bytes_read,omitempty"`
+	BytesRead    int64         `json:"bytes_read,omitempty"`
+	BodyDuration time.Duration `json:"body_duration_ns,omitempty"`
+	SHA256       string        `json:"sha256,omitempty"`
 	// LimitReached reports that MaxBytes were read and the body had more.
 	LimitReached bool `json:"limit_reached,omitempty"`
+}
+
+// Certificate contains bounded facts, not names or raw certificate bytes.
+// IssuerSHA256 identifies the DER-encoded issuer, avoiding untrusted issuer text.
+type Certificate struct {
+	IssuerSHA256 string    `json:"issuer_sha256"`
+	NotBefore    time.Time `json:"not_before"`
+	NotAfter     time.Time `json:"not_after"`
+	SANMatch     bool      `json:"san_match"`
+	Verified     bool      `json:"verified"`
+	ALPN         string    `json:"alpn"`
 }
 
 // Duration is the elapsed time of the stage.
@@ -330,12 +348,28 @@ func handshake(ctx context.Context, conn net.Conn, serverName string, roots *x50
 	})
 	err := tc.HandshakeContext(ctx)
 	obs.End = time.Now()
+	state := tc.ConnectionState()
+	certs := state.PeerCertificates
+	var verification *tls.CertificateVerificationError
+	if len(certs) == 0 && errors.As(err, &verification) {
+		certs = verification.UnverifiedCertificates
+	}
+	if len(certs) > 0 {
+		cert := certs[0]
+		issuer := sha256.Sum256(cert.RawIssuer)
+		obs.Certificate = &Certificate{
+			IssuerSHA256: hex.EncodeToString(issuer[:]),
+			NotBefore:    cert.NotBefore, NotAfter: cert.NotAfter,
+			SANMatch: cert.VerifyHostname(serverName) == nil,
+			Verified: err == nil, ALPN: state.NegotiatedProtocol,
+		}
+	}
 	if err != nil {
 		obs.Outcome, obs.Error = classifyTLS(ctx, err), err.Error()
 		return nil, obs
 	}
 	obs.Outcome = OutcomeSuccess
-	obs.TLSVersion = tc.ConnectionState().Version
+	obs.TLSVersion = state.Version
 	return tc, obs
 }
 

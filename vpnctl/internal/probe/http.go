@@ -3,7 +3,10 @@ package probe
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"math"
 	"net"
@@ -124,10 +127,20 @@ func transfer(ctx context.Context, conn net.Conn, u *url.URL, req HTTPRequest, b
 	}
 
 	budget.remaining = math.MaxInt64
-	n, err := io.CopyN(io.Discard, resp.Body, req.MaxBytes)
+	var destination io.Writer = io.Discard
+	var digest hash.Hash
+	if req.HashBody {
+		digest = sha256.New()
+		destination = digest
+	}
+	n, err := io.CopyN(destination, resp.Body, req.MaxBytes)
 	obs.BytesRead = n
+	obs.BodyDuration = time.Since(obs.HeaderReceived)
+	if req.HashBody {
+		obs.SHA256 = hex.EncodeToString(digest.Sum(nil))
+	}
 	switch {
-	case err == io.EOF:
+	case errors.Is(err, io.EOF):
 	case err != nil:
 		return fail(classifyHTTP(ctx, err), err)
 	default:
