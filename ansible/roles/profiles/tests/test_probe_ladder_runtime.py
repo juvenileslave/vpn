@@ -2,11 +2,13 @@
 import hashlib
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from probe_ladder_runtime import AUTH_BYTES, SMALL_BYTES, LARGE_BYTES, PATTERN, payload_digest
+from probe_ladder_runtime import AUTH_BYTES, SMALL_BYTES, LARGE_BYTES, PATTERN, payload_digest, read_probe_rows
 
 
 class PayloadExpectationTest(unittest.TestCase):
@@ -29,6 +31,30 @@ class PayloadExpectationTest(unittest.TestCase):
                                 capture_output=True, timeout=5, check=False)
         self.assertEqual(result.returncode, 2)
         self.assertNotIn(b"PASS", result.stdout)
+
+
+class StoreReaderTest(unittest.TestCase):
+    def test_missing_database_is_not_created_as_empty_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "missing.db"
+            with self.assertRaises(sqlite3.OperationalError):
+                read_probe_rows(path, "fixture")
+            self.assertFalse(path.exists())
+
+    def test_closed_reader_keeps_successive_writer_observations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state.db"
+            with sqlite3.connect(path) as database:
+                database.execute("CREATE TABLE probes (id INTEGER PRIMARY KEY, run_id TEXT, stage TEXT, family TEXT, outcome TEXT, error_code TEXT, bytes INTEGER, duration_ns INTEGER, vantage TEXT, network TEXT, scope TEXT, expected_bytes INTEGER, body_duration_ns INTEGER) STRICT")
+            database.close()
+            expected = ("throughput", "ipv6", "success", "", LARGE_BYTES, 100, "inside", "synthetic", "node_path", LARGE_BYTES, 50)
+            for index in range(3):
+                with sqlite3.connect(path) as database:
+                    database.execute("INSERT INTO probes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (index + 1, "fixture", *expected))
+                database.close()
+                before = path.read_bytes()
+                self.assertEqual(read_probe_rows(path, "fixture"), [expected] * (index + 1))
+                self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

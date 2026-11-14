@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -22,6 +23,13 @@ PATTERN = bytes(range(256)) * 256
 AUTH_BYTES = 256
 SMALL_BYTES = 1 << 20
 LARGE_BYTES = 20 << 20
+
+
+def read_probe_rows(path, run_id):
+    # Connection.__exit__ commits/rolls back; it does NOT close SQLite/WAL.
+    # Verification never creates a missing database or becomes another writer.
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as database:
+        return database.execute("SELECT stage, family, outcome, error_code, bytes, duration_ns, vantage, network, scope, expected_bytes, body_duration_ns FROM probes WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
 
 
 def payload_digest(size):
@@ -241,8 +249,7 @@ class LadderAcceptance:
             raise AssertionError("probe CLI made a global claim")
         self.reports[node["name"]+"-"+str(vantage)+"-"+family] = output
         try:
-            with sqlite3.connect(self.database) as database:
-                rows = database.execute("SELECT stage, family, outcome, error_code, bytes, duration_ns, vantage, network, scope, expected_bytes, body_duration_ns FROM probes WHERE run_id=? ORDER BY id", (report["run_id"],)).fetchall()
+            rows = read_probe_rows(self.database, report["run_id"])
         except sqlite3.Error as error:
             self.lab.evidence["probe_store_reader_error"] = {
                 "sqlite_version": sqlite3.sqlite_version,
