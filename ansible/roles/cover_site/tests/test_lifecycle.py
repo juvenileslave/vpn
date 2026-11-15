@@ -176,6 +176,35 @@ class TransactionTests(unittest.TestCase):
                 self.assertEqual(json.loads(self.settings.read_text()), {'port': port})
 
 
+class ConfigTests(unittest.TestCase):
+    def config(self, version, *, tls=True):
+        return lifecycle.config(Path('/release'), {
+            'hostname': 'cover.example.test', 'port': 9443, 'nginx_version': version}, tls)
+
+    def test_http2_syntax_follows_supported_nginx_release(self):
+        for version, modern in (('1.24.0', False), ('1.25.0', False),
+                                ('1.25.1', True), ('1.28.3', True)):
+            with self.subTest(version=version):
+                text = self.config(version)
+                if modern:
+                    self.assertIn('listen 127.0.0.1:9443 ssl;\n    http2 on;', text)
+                    self.assertNotIn('ssl http2', text)
+                else:
+                    self.assertIn('listen 127.0.0.1:9443 ssl http2;', text)
+                    self.assertNotIn('http2 on;', text)
+
+    def test_http_bootstrap_claims_no_tls_or_http2(self):
+        for version in ('1.24.0', '1.28.3'):
+            text = self.config(version, tls=False)
+            self.assertNotIn('http2', text)
+            self.assertNotIn('ssl_certificate', text)
+            self.assertIn('listen [::]:80;', text)
+
+    def test_malformed_release_is_rejected_before_writing_a_release(self):
+        for version in ('1.28', '1.28.3 (Ubuntu)', ''):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'MAJOR.MINOR.PATCH'):
+                self.config(version)
+
 
 class OwnershipTests(unittest.TestCase):
     def setUp(self):

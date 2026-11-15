@@ -1,0 +1,5 @@
+# GitHub already publishes the ubuntu-26.04 hosted image, while the pinned
+# actionlint release predates that label in its built-in list.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

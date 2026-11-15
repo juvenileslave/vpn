@@ -158,8 +158,9 @@ def preflight(value, *, before_install=False):
         return
     output = subprocess.run(['nginx', '-v'], capture_output=True, text=True, timeout=10)
     version = re.search(r'nginx/(\d+\.\d+\.\d+)', output.stderr)
-    if not version or version.group(1) != value['nginx_version']:
-        raise ValueError('Unsupported nginx upstream version; expected 1.24.0 distribution security build')
+    expected = value['nginx_version']
+    if not version or version.group(1) != expected:
+        raise ValueError(f'Unsupported nginx upstream version; expected {expected} distribution security build')
     features = subprocess.run(['nginx', '-V'], capture_output=True, text=True, timeout=10).stderr
     if '--with-http_v2_module' not in features or '--with-http_ssl_module' not in features:
         raise ValueError('nginx must provide TLS and HTTP/2 modules')
@@ -228,6 +229,14 @@ def certificate(path, value):
         raise ValueError('Fullchain differs from the checked leaf and chain')
 
 
+def upstream(value):
+    """Return the checked MAJOR.MINOR.PATCH nginx release from settings."""
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', value['nginx_version'])
+    if not match:
+        raise ValueError('nginx_version must be a MAJOR.MINOR.PATCH release')
+    return tuple(int(part) for part in match.groups())
+
+
 def config(path, value, tls):
     text = f'''{MARKER}. Immutable checked release.
 server {{
@@ -244,9 +253,15 @@ server {{
 }}
 '''
     if tls:
+        # 1.25.1 moved HTTP/2 from the listen parameter to a directive; the
+        # deprecated parameter is not emitted for newer distributions.
+        if upstream(value) >= (1, 25, 1):
+            listen = f"listen 127.0.0.1:{value['port']} ssl;\n    http2 on;"
+        else:
+            listen = f"listen 127.0.0.1:{value['port']} ssl http2;"
         text += f'''
 server {{
-    listen 127.0.0.1:{value['port']} ssl http2;
+    {listen}
     server_name {value['hostname']};
     server_tokens off;
     ssl_certificate {path}/certificate/fullchain.pem;

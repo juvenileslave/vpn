@@ -2,7 +2,7 @@
 - name: Require supported OS and explicit cover inputs
   ansible.builtin.assert:
     that:
-      - ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04'
+      - ansible_distribution == 'Ubuntu' and ansible_distribution_version in cover_nginx_versions
       - reality_sni is defined and reality_sni is string
       - reality_sni is match('^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$')
       - cover_tls_port is integer and cover_tls_port is not boolean
@@ -13,11 +13,14 @@
       - cover_acme_agree_tos is boolean and cover_acme_agree_tos
       - cover_acme_http_reachable is boolean and cover_acme_http_reachable
       - cover_disposable_test is boolean
-      - cover_nginx_version == '1.24.0'
       - cover_certificate_min_lifetime is integer and cover_certificate_min_lifetime >= 3600
       - cover_disposable_test or (cover_acme_test_ca == '' and cover_certificate_trust == '/etc/ssl/certs/ca-certificates.crt' and cover_acme_directory in ['https://acme-v02.api.letsencrypt.org/directory', 'https://acme-staging-v02.api.letsencrypt.org/directory'])
-    fail_msg: "Нужны Ubuntu 24.04, один reality_sni, статический сайт, ACME contact/TOS и подтверждение DNS/TCP/80."
+    fail_msg: "Нужны Ubuntu 24.04 или 26.04, один reality_sni, статический сайт, ACME contact/TOS и подтверждение DNS/TCP/80."
     quiet: true
+
+- name: Resolve the exact upstream nginx release for this Ubuntu
+  ansible.builtin.set_fact:
+    cover_nginx_version: "{{ cover_nginx_versions[ansible_distribution_version] }}"
 
 - name: Require disposable guard for local ACME testing
   when: cover_disposable_test

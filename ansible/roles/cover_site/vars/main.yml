@@ -1,0 +1,6 @@
+---
+# Exact upstream nginx release in each supported Ubuntu LTS. Any other
+# distribution/version pair is refused instead of guessing TLS/HTTP2 syntax.
+cover_nginx_versions:
+  "24.04": "1.24.0"
+  "26.04": "1.28.3"

@@ -6,7 +6,10 @@ set -euo pipefail
 }
 [[ $EUID == 0 && -d /run/systemd/system ]] || { echo 'Root/systemd required.' >&2; exit 2; }
 . /etc/os-release
-[[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || { echo 'Ubuntu 24.04 required.' >&2; exit 2; }
+case $ID:$VERSION_ID in
+  ubuntu:24.04|ubuntu:26.04) ;;
+  *) echo 'Ubuntu 24.04 or 26.04 required.' >&2; exit 2 ;;
+esac
 for path in /etc/cover-site /usr/local/libexec/cover-site /var/lib/cover-site /var/log/cover-site /var/www/cover-site-acme /etc/nginx/sites-enabled/cover-site.conf /etc/systemd/system/cover-site-{recover.service,renew.service,renew.timer}; do
   [[ ! -e $path && ! -L $path ]] || { echo 'Refusing non-fresh role-owned state.' >&2; exit 2; }
 done
