@@ -6,7 +6,10 @@ set -euo pipefail
 }
 [[ $EUID == 0 && -d /run/systemd/system ]] || { echo 'Root/systemd required.' >&2; exit 2; }
 . /etc/os-release
-[[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || { echo 'Ubuntu 24.04 required.' >&2; exit 2; }
+case $ID:$VERSION_ID in
+  ubuntu:24.04|ubuntu:26.04) ;;
+  *) echo 'Ubuntu 24.04 or 26.04 required.' >&2; exit 2 ;;
+esac
 for path in /etc/cover-site /usr/local/libexec/cover-site /var/lib/cover-site /var/log/cover-site /var/www/cover-site-acme /etc/nginx/sites-enabled/cover-site.conf /etc/systemd/system/cover-site-{recover.service,renew.service,renew.timer}; do
   [[ ! -e $path && ! -L $path ]] || { echo 'Refusing non-fresh role-owned state.' >&2; exit 2; }
 done
@@ -48,7 +51,10 @@ HTML
 printf 'body { max-width: 48rem; margin: 3rem auto; color: #243; }\n' >"$WORK/source/journal.css"
 printf '<!doctype html><title>Field notes</title><p>Synthetic observations of coastal weather.</p>\n' >"$WORK/source/notes.html"
 printf 'Retired synthetic local note.\n' >"$WORK/source/retired.txt"
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/ca/key.pem" -out "$WORK/ca/cert.pem" -days 2 -subj /CN=Disposable-ACME-API-CA >"$WORK/openssl.log" 2>&1
+# Ubuntu 26.04 enforces RFC 5280 keyUsage for trust anchors, so the disposable
+# API CA carries explicit CA extensions instead of a bare self-signed subject.
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/ca/key.pem" -out "$WORK/ca/cert.pem" -days 2 -subj /CN=Disposable-ACME-API-CA \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -addext "subjectKeyIdentifier=hash" >"$WORK/openssl.log" 2>&1
 openssl req -newkey rsa:2048 -nodes -keyout "$WORK/api-key.pem" -out "$WORK/api.csr" -subj /CN=localhost >>"$WORK/openssl.log" 2>&1
 printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >"$WORK/api.ext"
 openssl x509 -req -in "$WORK/api.csr" -CA "$WORK/ca/cert.pem" -CAkey "$WORK/ca/key.pem" -CAcreateserial -out "$WORK/api.pem" -days 2 -extfile "$WORK/api.ext" >>"$WORK/openssl.log" 2>&1

@@ -7,11 +7,13 @@
 
 ## Платформа и граница владения
 
-Поддерживается Ubuntu 24.04 с nginx upstream **1.24.0**, включая обновления
-безопасности пакета дистрибутива. Роль проверяет upstream version и наличие
-модулей SSL/H2; другой nginx отклоняется. Используется синтаксис
-`listen 127.0.0.1:<port> ssl http2`, применимый к 1.24.0, а не новая директива
-`http2 on` из 1.25.1. TLS разрешён только 1.2/1.3. UDP, QUIC, H3 и Alt-Svc нет.
+Поддерживаются Ubuntu 24.04 с nginx upstream **1.24.0** и Ubuntu 26.04 с
+**1.28.3**, включая обновления безопасности пакета дистрибутива. Точная пара
+«release Ubuntu / upstream nginx» задана в роли; другая пара, несовпадающая
+upstream version или отсутствие модулей SSL/H2 отклоняются. Для 1.24.0
+используется `listen 127.0.0.1:<port> ssl http2`; начиная с 1.25.1
+генерируются `listen ... ssl` и `http2 on`, без deprecated listen-параметра.
+TLS разрешён только 1.2/1.3. UDP, QUIC, H3 и Alt-Svc нет.
 
 TLS слушает **только `127.0.0.1` в host network namespace**. Xray/RemnaNode
 обязан работать в той же сетевой namespace (`network_mode: host`); loopback
@@ -214,7 +216,7 @@ settings, отказ HTTP rollback и read-only ownership/type validation.
 Внешние сервисные команды в этих unit tests изолированы: это не nginx/ACME proof.
 
 Полный service/certificate сценарий **только в свежем disposable
-GitHub-hosted Ubuntu 24.04 systemd guest**, после `make -C ansible bootstrap`:
+GitHub-hosted Ubuntu 24.04 или 26.04 systemd guest**, после `make -C ansible bootstrap`:
 
 ```sh
 sudo env PATH="$PATH" HOME="$HOME" \
@@ -286,18 +288,21 @@ pidfd подтверждает exit; live identity mismatch по-прежнем�
 Linux guest proof не разрешает production rollout и не заменяет отдельный
 pilot на целевой платформе/сети.
 
-Внешние gates исправленного сценария: свежий GitHub-hosted Ubuntu 24.04 с root,
-systemd, netns/veth, systemd-nspawn/machinectl и разрешёнными cgroups; сеть до
-public Ubuntu mirrors и pinned Go/Pebble modules. Нельзя подменять эти gates
-existing VM, production DNS/CA или фиктивным service proof. Переиспользованный
-CI-host с уже существующим owned state отклоняется. Сами исправления не являются
-повторным успешным renewal/reboot прогоном; интегратор публикует фактический
-результат полного driver и обязательных repository/secret checks.
+Внешние gates исправленного сценария: свежий GitHub-hosted Ubuntu 24.04 или
+26.04 с root, systemd, netns/veth, systemd-nspawn/machinectl и разрешёнными
+cgroups; сеть до public Ubuntu mirrors и pinned Go/Pebble modules. Оба образа
+запускаются отдельными CI job; успех одного не переносится на другой. Нельзя
+подменять эти gates existing VM, production DNS/CA или фиктивным service proof.
+Переиспользованный CI-host с уже существующим owned state отклоняется. Сами
+исправления не являются повторным успешным renewal/reboot прогоном; интегратор
+публикует фактический результат полного driver и обязательных
+repository/secret checks.
 
 ## Источники синтаксиса и lifecycle
 
 - [nginx listen/virtual server](https://nginx.org/en/docs/http/ngx_http_core_module.html#listen): `listen ... ssl http2`, default vhost behaviour.
 - [nginx HTTP/2 module](https://nginx.org/en/docs/http/ngx_http_v2_module.html): ALPN/H2 и новая директива с 1.25.1.
+- [Ubuntu 24.04 nginx](https://packages.ubuntu.com/noble/nginx) и [Ubuntu 26.04 nginx](https://packages.ubuntu.com/resolute/nginx): upstream 1.24.0/1.28.3 и сборка с модулями SSL/H2.
 - [nginx HTTPS](https://nginx.org/en/docs/http/configuring_https_servers.html): certificate/key и TLS protocol configuration.
 - [Certbot webroot/renewal/custom CA](https://eff-certbot.readthedocs.io/en/stable/using.html): HTTP-01, deploy hook, отдельные directories, REQUESTS_CA_BUNDLE и hook exit semantics.
 - [Certbot CLI renew flag](https://github.com/certbot/certbot/blob/main/certbot/src/certbot/_internal/cli/__init__.py): `--no-random-sleep-on-renew` устанавливает `random_sleep_on_renew=false`; jitter остаётся в owned systemd timer.

@@ -8,7 +8,14 @@ set -euo pipefail
   echo 'Root/systemd and an existing synthetic checked cover release required.' >&2; exit 2;
 }
 . /etc/os-release
-[[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || exit 2
+case $ID:$VERSION_ID in
+  ubuntu:24.04|ubuntu:26.04) ;;
+  *) echo 'Ubuntu 24.04 or 26.04 required.' >&2; exit 2 ;;
+esac
+case $VERSION_CODENAME in
+  noble|resolute) ;;
+  *) echo 'Unexpected Ubuntu codename.' >&2; exit 2 ;;
+esac
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 python3 - <<'PY'
 import json, os
@@ -30,15 +37,15 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { echo "FAIL guest reboot: $*" >&2; exit 1; }
-printf '\n=== Build fresh public Ubuntu 24.04 booted guest\n'
-debootstrap --variant=minbase noble "$GUEST" http://archive.ubuntu.com/ubuntu >"$WORK/debootstrap.log" 2>&1 || { cat "$WORK/debootstrap.log"; fail debootstrap; }
+printf '\n=== Build fresh public Ubuntu %s (%s) booted guest\n' "$VERSION_ID" "$VERSION_CODENAME"
+debootstrap --variant=minbase "$VERSION_CODENAME" "$GUEST" http://archive.ubuntu.com/ubuntu >"$WORK/debootstrap.log" 2>&1 || { cat "$WORK/debootstrap.log"; fail debootstrap; }
 # Prevent package postinst from starting host-visible daemons in the unbooted chroot.
 printf '#!/bin/sh\nexit 101\n' >"$GUEST/usr/sbin/policy-rc.d"
 chmod 755 "$GUEST/usr/sbin/policy-rc.d"
-cat >"$GUEST/etc/apt/sources.list" <<'APT'
-deb http://archive.ubuntu.com/ubuntu noble main universe
-deb http://archive.ubuntu.com/ubuntu noble-updates main universe
-deb http://security.ubuntu.com/ubuntu noble-security main universe
+cat >"$GUEST/etc/apt/sources.list" <<APT
+deb http://archive.ubuntu.com/ubuntu $VERSION_CODENAME main universe
+deb http://archive.ubuntu.com/ubuntu $VERSION_CODENAME-updates main universe
+deb http://security.ubuntu.com/ubuntu $VERSION_CODENAME-security main universe
 APT
 chroot "$GUEST" apt-get update -q >"$WORK/apt.log" 2>&1
 chroot "$GUEST" apt-get install -y -q systemd-sysv dbus python3 nginx curl openssl iproute2 >>"$WORK/apt.log" 2>&1 || { cat "$WORK/apt.log"; fail 'guest packages'; }
