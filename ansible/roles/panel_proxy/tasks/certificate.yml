@@ -9,6 +9,14 @@
     group: root
     mode: "0750"
 
+- name: Create the script directory
+  ansible.builtin.file:
+    path: "{{ panel_proxy_script_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Install the TLS bootstrap script
   ansible.builtin.copy:
     src: panel_proxy_tls.py
