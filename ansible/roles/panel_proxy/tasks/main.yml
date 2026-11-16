@@ -9,8 +9,8 @@
     update_cache: true
     cache_valid_time: 86400
 
-- name: Ensure the admin endpoint listens only on loopback
-  ansible.builtin.include_tasks: certificate.yml
+- name: Remove artifacts of the retired TLS variant
+  ansible.builtin.include_tasks: cleanup.yml
 
 - name: Render and activate the loopback site
   ansible.builtin.include_tasks: site.yml
@@ -18,10 +18,12 @@
 - name: Apply pending reloads before verifying the endpoint
   ansible.builtin.meta: flush_handlers
 
-- name: Verify the panel answers through the loopback TLS endpoint
-  when: panel_proxy_verify | bool
+- name: Verify the panel answers through the loopback endpoint
+  when:
+    - panel_proxy_verify | bool
+    - not ansible_check_mode
   block:
-    - name: Request the panel through nginx with the role's own CA
+    - name: Request the panel through nginx
       ansible.builtin.command:
         argv:
           - curl
@@ -34,9 +36,7 @@
           - "%{http_code}"
           - --max-time
           - "10"
-          - --cacert
-          - "{{ panel_proxy_ca_certificate }}"
-          - "https://{{ panel_proxy_bind }}:{{ panel_proxy_port }}/"
+          - "http://{{ panel_proxy_bind }}:{{ panel_proxy_port }}/"
       register: panel_proxy_probe
       changed_when: false
       retries: 5
@@ -49,7 +49,7 @@
           - panel_proxy_probe.rc == 0
           - panel_proxy_probe.stdout | trim == '200'
         fail_msg: >-
-          https://{{ panel_proxy_bind }}:{{ panel_proxy_port }}/ did not answer 200.
+          http://{{ panel_proxy_bind }}:{{ panel_proxy_port }}/ did not answer 200.
           Check that the panel is running on {{ panel_proxy_upstream }} and that
           nginx is active.
         quiet: true

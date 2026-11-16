@@ -1,24 +1,17 @@
 # {{ panel_proxy_marker }}. Manual edits are overwritten.
 # Loopback-only admin endpoint: the operator forwards this port over SSH.
 # Public nginx vhosts never include this file, and no public listen exists here.
+# Plain HTTP on 127.0.0.1 is a browser secure context; the SSH tunnel carries
+# the real transport encryption, and the panel sets no cookies.
 map $http_upgrade $panel_proxy_connection_upgrade {
     default upgrade;
     ''      close;
 }
 
 server {
-    listen {{ panel_proxy_listen_address }}:{{ panel_proxy_port }} ssl;
-    server_name {{ panel_proxy_server_name }};
+    listen {{ panel_proxy_listen_address }}:{{ panel_proxy_port }};
+    server_name {{ panel_proxy_server_name | default('localhost') }};
     server_tokens off;
-
-    ssl_certificate {{ panel_proxy_certificate }};
-    ssl_certificate_key {{ panel_proxy_certificate_key }};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers {{ panel_proxy_tls_ciphers }};
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:panel_proxy_tls:1m;
-    ssl_session_timeout 10m;
-    ssl_session_tickets off;
 
     client_max_body_size {{ panel_proxy_client_max_body_size }};
     add_header Cache-Control "no-store" always;
@@ -33,7 +26,7 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto {{ panel_proxy_forwarded_proto }};
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-Port $server_port;
         proxy_set_header X-Remnawave-Client-Type {{ panel_proxy_client_type }};

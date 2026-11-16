@@ -1,26 +1,22 @@
 ---
 # Loopback-only admin endpoint for the Remnawave panel. Nothing here is bound
-# to a public address: the operator reaches it through `ssh -L`.
+# to a public address: the operator reaches it through `ssh -L`, and the panel
+# is never exposed. No TLS is terminated here: 127.0.0.1 is a secure context in
+# browsers, the transport is the SSH tunnel, and the panel sets no cookies.
 panel_proxy_bind: 127.0.0.1
 panel_proxy_port: 7443
 # `panel_bind:panel_port` contract of the remnawave_panel role.
 panel_proxy_upstream: 127.0.0.1:3000
-
-# TLS material produced by the role: one local CA, one short-lived leaf for the
-# loopback name. Nothing is signed by a public CA, so the CA certificate itself
-# is the only thing an operator imports once.
-panel_proxy_tls_dir: /etc/panel-proxy/tls
-panel_proxy_ca_days: 3650
-panel_proxy_certificate_days: 397
-panel_proxy_renew_before_days: 30
 panel_proxy_server_name: localhost
 
-# Sent to the panel, which uses it to tell browsers from clients.
+# Sent to the panel, which uses it to tell browsers from clients, and the value
+# its middleware requires even though the loopback hop itself is plain HTTP.
 panel_proxy_client_type: browser
+panel_proxy_forwarded_proto: https
 panel_proxy_client_max_body_size: 16m
 panel_proxy_proxy_connect_timeout: 5s
 panel_proxy_proxy_send_timeout: 120s
 panel_proxy_proxy_read_timeout: 120s
 
-# The verifier runs on the host itself and trusts only the role's own CA.
+# The verifier runs on the host itself against the loopback endpoint.
 panel_proxy_verify: true

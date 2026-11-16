@@ -27,19 +27,15 @@
     fail_msg: "panel_proxy_upstream equals the listen address; the panel role must bind a different port"
     quiet: true
 
-- name: Validate TLS paths, validity windows and header value
+- name: Validate header values and proxy limits
   ansible.builtin.assert:
     that:
-      - panel_proxy_tls_dir is match('^/[A-Za-z0-9._/-]+$')
       - panel_proxy_server_name is match('^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$')
       - panel_proxy_client_type is match('^[a-z][a-z0-9-]{0,31}$')
-      - (panel_proxy_ca_days | int) >= 365
-      - (panel_proxy_certificate_days | int) >= 30
-      - (panel_proxy_renew_before_days | int) >= 1
-      - (panel_proxy_renew_before_days | int) < (panel_proxy_certificate_days | int)
+      - panel_proxy_forwarded_proto in ['http', 'https']
       - (panel_proxy_client_max_body_size | string) is match('^[0-9]+[kKmM]?$')
       - (panel_proxy_proxy_connect_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
       - (panel_proxy_proxy_send_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
       - (panel_proxy_proxy_read_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
-    fail_msg: "Invalid TLS directory, server name, client type, validity window, body size or timeout"
+    fail_msg: "Invalid server name, client type, forwarded scheme, body size or timeout"
     quiet: true

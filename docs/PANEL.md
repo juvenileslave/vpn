@@ -162,7 +162,7 @@ cd ansible
 
 ```sh
 ssh -L 7443:127.0.0.1:7443 <cp-host>
-# затем https://127.0.0.1:7443/ ; CA-сертификат — /etc/panel-proxy/tls/ca.pem
+# затем http://127.0.0.1:7443/ ; TLS не терминируется, шифрует SSH-туннель
 ```
 
 Ручная проверка на хосте: `docker compose -p remnawave ps` (все `healthy`),

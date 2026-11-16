@@ -1,8 +1,0 @@
-[Unit]
-Description=Renew the loopback panel certificate
-After=nginx.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 {{ panel_proxy_tls_script }} --directory {{ panel_proxy_tls_dir }} --address {{ panel_proxy_bind }} --name {{ panel_proxy_server_name }} --ca-days {{ panel_proxy_ca_days }} --certificate-days {{ panel_proxy_certificate_days }} --renew-before-days {{ panel_proxy_renew_before_days }}
-ExecStartPost=/bin/systemctl reload nginx
