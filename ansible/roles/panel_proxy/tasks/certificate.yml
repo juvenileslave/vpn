@@ -64,6 +64,7 @@
   register: panel_proxy_renew_units
 
 - name: Enable the renewal timer
+  when: not ansible_check_mode
   ansible.builtin.systemd:
     name: panel-proxy-cert-renew.timer
     enabled: true
