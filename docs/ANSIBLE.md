@@ -6,17 +6,29 @@
 не означает production deployment. [PROFILES.md](PROFILES.md) отделяет offline
 candidate от проверенного runtime и panel publication.
 
+## Bootstrap чистого хоста до приватной панели
+
+[BOOTSTRAP.md](BOOTSTRAP.md) описывает отдельный guarded entrypoint
+`playbooks/bootstrap.yml`: первоначальный root-доступ (ключ или интерактивный
+`--ask-pass`) → Linux-администратор через `base` → новое key-only SSH-подключение
+с проверкой UID/`sudo -n` → hardening/firewall → `docker` → приватная панель
+`remnawave_panel` на правильном control-plane хосте. Playbook переиспользует
+существующие роли; небольшая роль `bootstrap` добавляет только подготовку
+минимального хоста и gates переподключения. Пример inventory не является
+bootstrap-ready: в нём нет администратора, hardening-переключателей,
+panel-пинов/доменов и источника секретов.
+
 ## Файлы и топология
 
 ```text
 ansible/
   ansible.cfg
-  playbooks/{base,cover_site,remnawave_node,profiles}.yml
+  playbooks/{base,bootstrap,cover_site,remnawave_node,profiles}.yml
   inventories/example/
     hosts.yml
     group_vars/{all,exit,relay,cp}.yml
     host_vars/{exit,relay,cp}-example.yml
-  roles/{base,cover_site,remnawave_node,profiles}/
+  roles/{base,bootstrap,cover_site,remnawave_node,profiles}/
   scripts/validate_inventory.py
   scripts/tests/{test_validate_inventory,test_render_profiles}.py
 ```

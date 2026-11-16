@@ -1,0 +1,12 @@
+---
+# Selected Linux administrator from base_admin_users. With exactly one entry
+# the name is derived; with several administrators it must be set explicitly.
+bootstrap_admin_name: >-
+  {{ base_admin_users[0].name
+     if (base_admin_users | default([])) | length == 1 else '' }}
+
+# Absolute path on the controller, outside the repository, to an unencrypted
+# OpenSSH private key whose public part is declared for the selected
+# administrator. The same key is used for the key-only Ansible connection and
+# for the independent new-connection verification.
+bootstrap_admin_private_key_file: ""

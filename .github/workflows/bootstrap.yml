@@ -1,0 +1,64 @@
+name: Ansible bootstrap
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax-and-unit:
+    name: Bootstrap syntax and filters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Установить закреплённый ansible-core
+        run: make -C ansible bootstrap
+      - name: Проверить синтаксис bootstrap playbook
+        working-directory: ansible
+        run: ../.venv/bin/ansible-playbook -i inventories/example/hosts.yml playbooks/bootstrap.yml --syntax-check
+      - name: Unit-тесты фильтров bootstrap
+        run: .venv/bin/python -m unittest discover --start-directory ansible/roles/bootstrap/tests --verbose
+
+  runtime:
+    name: Bootstrap runtime (${{ matrix.root_auth }})
+    needs: syntax-and-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        root_auth: [key, password]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Получить публичные файлы
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Подготовить Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Установить закреплённый ansible-core
+        run: make -C ansible bootstrap
+      # The GitHub-hosted runner is a disposable VM destroyed after the job.
+      - name: Реальный SSH bootstrap, admin gates, Docker и private panel
+        env:
+          ROOT_AUTH: ${{ matrix.root_auth }}
+        run: >-
+          sudo VPN_BOOTSTRAP_DISPOSABLE_GUEST=yes
+          GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"
+          bash ansible/roles/bootstrap/tests/runtime_vm.sh "$ROOT_AUTH"
