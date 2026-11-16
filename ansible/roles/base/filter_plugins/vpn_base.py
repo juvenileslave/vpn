@@ -264,6 +264,13 @@ def _admin_errors(errors, users):
     return names
 
 
+def admin_errors(users) -> list[str]:
+    """Validate only ``base_admin_users``; shared with the bootstrap entrypoint."""
+    errors: list[str] = []
+    _admin_errors(errors, users)
+    return errors
+
+
 def input_errors(cfg) -> list[str]:
     """Validate the complete role input; an empty list means safe to proceed."""
     errors: list[str] = []

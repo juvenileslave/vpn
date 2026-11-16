@@ -1,0 +1,15 @@
+---
+# Minimal packages required before gather_facts and the Python modules of the
+# base role can run on a fresh Debian/Ubuntu systemd host. They are installed
+# only when a checked prerequisite is absent; apt is told not to upgrade or
+# remove anything.
+bootstrap_prereq_packages:
+  - python3
+  - sudo
+  - python3-apt
+
+# Ansible and the base role use this interpreter after the preparation step.
+bootstrap_python: /usr/bin/python3
+
+# Host TCP ports that the panel stack must never publish, even on loopback.
+bootstrap_panel_forbidden_host_ports: [5432, 6379]

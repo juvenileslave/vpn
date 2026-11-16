@@ -1,0 +1,53 @@
+---
+# The panel role publishes the panel on panel_bind only and publishes no
+# PostgreSQL/Valkey host ports. This file checks the live host instead of
+# trusting the rendered compose file.
+- name: List TCP listeners on the panel host
+  ansible.builtin.command:
+    argv: [ss, -H, -l, -n, -t]
+  register: bootstrap_panel_listeners
+  changed_when: false
+  check_mode: false
+  become: false
+
+- name: Refuse a panel or database published beyond loopback
+  vars:
+    _bootstrap_listener_problems: >-
+      {{ bootstrap_panel_listeners.stdout
+         | bootstrap_listener_problems(panel_bind, panel_port,
+             bootstrap_panel_forbidden_host_ports) }}
+  ansible.builtin.assert:
+    that: _bootstrap_listener_problems | length == 0
+    fail_msg: >-
+      Панель не изолирована на {{ panel_bind }}:{{ panel_port }}:
+      {{ _bootstrap_listener_problems | join('; ') }}.
+    quiet: true
+
+- name: Query the private panel endpoint with forwarded headers
+  ansible.builtin.uri:
+    url: "{{ panel_bind | bootstrap_panel_url(panel_port) }}"
+    headers:
+      X-Forwarded-For: "127.0.0.1"
+      X-Forwarded-Proto: "https"
+      X-Remnawave-Client-Type: "browser"
+    status_code: 200
+    timeout: 30
+    return_content: false
+    use_proxy: false
+  register: bootstrap_panel_http
+  changed_when: false
+  check_mode: false
+  become: false
+  retries: 5
+  delay: 3
+  until: bootstrap_panel_http.status | default(0) == 200
+  failed_when: false
+
+- name: Require a private HTTP 200 from the panel
+  ansible.builtin.assert:
+    that: bootstrap_panel_http.status | default(0) == 200
+    fail_msg: >-
+      Приватный loopback-эндпоинт панели не вернул HTTP 200 (получено
+      {{ bootstrap_panel_http.status | default('нет ответа') }}). В --check
+      новая панель не запускается; это не PASS.
+    quiet: true

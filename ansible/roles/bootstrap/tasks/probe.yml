@@ -1,0 +1,31 @@
+---
+# The first connection may be root by key or by an interactive --ask-pass
+# password. A prepared host with root login already closed reports unreachable;
+# that is not a success by itself: the administrator phases must still prove
+# key access and sudo before any hardening.
+- name: Probe the initial root connection
+  ansible.builtin.raw: /bin/true
+  register: bootstrap_root_probe
+  changed_when: false
+  check_mode: false
+  become: false
+  ignore_unreachable: true
+  failed_when: false
+
+- name: Record whether the initial root connection works
+  ansible.builtin.set_fact:
+    bootstrap_root_available: >-
+      {{ (bootstrap_root_probe.rc | default(1)) == 0
+         and not (bootstrap_root_probe.unreachable | default(false)) }}
+
+- name: Record the initial access path
+  ansible.builtin.set_fact:
+    bootstrap_root_phase: "{{ 'root' if bootstrap_root_available else 'admin' }}"
+
+- name: Note a prepared host with root login closed
+  ansible.builtin.debug:
+    msg: >-
+      root-доступ недоступен; продолжаю через администратора
+      {{ bootstrap_admin_selected }} (повторный запуск). Новый ключ и sudo
+      будут проверены отдельным SSH-подключением.
+  when: not bootstrap_root_available

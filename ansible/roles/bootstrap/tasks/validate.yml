@@ -1,0 +1,249 @@
+---
+# Controller-side checks. The playbook runs this with connection: local, so no
+# host is contacted and no password or key material leaves the controller.
+# These checks reuse the base and panel role validators instead of defining a
+# second, incompatible input schema.
+
+- name: Capture inventory SSH options
+  ansible.builtin.set_fact:
+    bootstrap_inventory_ssh_common_args: "{{ ansible_ssh_common_args | default('') }}"
+
+- name: Refuse SSH options that weaken host-key or key-only access
+  vars:
+    _bootstrap_ssh_problems: >-
+      {{ bootstrap_inventory_ssh_common_args | bootstrap_ssh_args_problems }}
+  ansible.builtin.assert:
+    that: _bootstrap_ssh_problems | length == 0
+    fail_msg: >-
+      ansible_ssh_common_args небезопасен для bootstrap:
+      {{ _bootstrap_ssh_problems | join('; ') }}.
+    quiet: true
+
+- name: Build the key-only SSH options for the administrator phases
+  ansible.builtin.set_fact:
+    bootstrap_key_only_ssh_args: >-
+      -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes
+      -o PubkeyAuthentication=yes
+      -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no
+      -o HostbasedAuthentication=no -o GSSAPIAuthentication=no
+      -o PreferredAuthentications=publickey
+      {{ bootstrap_inventory_ssh_common_args }}
+
+- name: Validate the declared administrators with the base role rules
+  vars:
+    _bootstrap_admin_errors: >-
+      {{ base_admin_users | default([]) | bootstrap_admin_errors }}
+  ansible.builtin.assert:
+    that: _bootstrap_admin_errors | length == 0
+    fail_msg: "Некорректные base_admin_users: {{ _bootstrap_admin_errors | join('; ') }}"
+    quiet: true
+
+- name: Require at least one declared administrator
+  ansible.builtin.assert:
+    that: (base_admin_users | default([]) | length) > 0
+    fail_msg: >-
+      base_admin_users должен содержать выбранного Linux-администратора с
+      ключом и sudo.
+    quiet: true
+
+- name: Require an explicit selected administrator
+  vars:
+    _bootstrap_admin_matches: >-
+      {{ base_admin_users | default([])
+         | selectattr('name', 'equalto', bootstrap_admin_name) | list }}
+  ansible.builtin.assert:
+    that:
+      - bootstrap_admin_name is string
+      - (bootstrap_admin_name | string | length) > 0
+      - _bootstrap_admin_matches | length == 1
+    fail_msg: >-
+      bootstrap_admin_name должен выбирать ровно одну запись base_admin_users.
+      При нескольких администраторах задайте имя явно в inventory/vars.
+    quiet: true
+
+- name: Remember the selected administrator across plays
+  vars:
+    _bootstrap_admin_entry: >-
+      {{ (base_admin_users | selectattr('name', 'equalto', bootstrap_admin_name)
+          | list) | first }}
+  ansible.builtin.set_fact:
+    bootstrap_admin_selected: "{{ _bootstrap_admin_entry.name }}"
+
+- name: Require a usable selected administrator
+  vars:
+    _bootstrap_admin_entry: >-
+      {{ (base_admin_users | selectattr('name', 'equalto', bootstrap_admin_selected)
+          | list) | first }}
+  ansible.builtin.assert:
+    that:
+      - _bootstrap_admin_entry.sudo | default(true) is sameas true
+      - _bootstrap_admin_entry.authorized_keys | default([]) | length > 0
+      - base_admin_sudo_nopasswd | default(true) is sameas true
+    fail_msg: >-
+      Выбранный bootstrap_admin_name должен иметь sudo: true, непустой
+      authorized_keys и base_admin_sudo_nopasswd: true (ключ без пароля).
+    quiet: true
+
+- name: Require a string administrator private key path
+  ansible.builtin.assert:
+    that: bootstrap_admin_private_key_file is string
+    fail_msg: bootstrap_admin_private_key_file должен быть строкой.
+    quiet: true
+
+- name: Require an absolute administrator private key path
+  ansible.builtin.assert:
+    that:
+      - (bootstrap_admin_private_key_file | length) > 0
+      - bootstrap_admin_private_key_file is abs
+    fail_msg: >-
+      bootstrap_admin_private_key_file должен быть абсолютным путём к
+      нешифрованному приватному ключу на управляющей машине.
+    quiet: true
+
+- name: Check the administrator private key file
+  ansible.builtin.stat:
+    path: "{{ bootstrap_admin_private_key_file | expanduser }}"
+  register: bootstrap_admin_key_stat
+
+- name: Require a regular administrator private key file
+  ansible.builtin.assert:
+    that: bootstrap_admin_key_stat.stat.isreg | default(false)
+    fail_msg: >-
+      bootstrap_admin_private_key_file должен быть обычным файлом на
+      управляющей машине.
+    quiet: true
+
+- name: Require a private key outside the repository with a safe mode
+  vars:
+    _bootstrap_key_path: "{{ bootstrap_admin_private_key_file | expanduser }}"
+    _bootstrap_repo_root: "{{ (role_path ~ '/../../..') | realpath }}"
+  ansible.builtin.assert:
+    that:
+      - not ((_bootstrap_key_path | realpath) ~ '/').startswith(_bootstrap_repo_root ~ '/')
+      - bootstrap_admin_key_stat.stat.mode in ['0600', '0400']
+    fail_msg: >-
+      bootstrap_admin_private_key_file должен лежать вне репозитория и иметь
+      режим 0600 или 0400.
+    quiet: true
+
+- name: Derive the public key from the administrator private key
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -y
+      - -f
+      - "{{ bootstrap_admin_private_key_file | expanduser }}"
+      - -P
+      - ""
+  register: bootstrap_admin_key_public
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  no_log: true
+
+- name: Require an unencrypted administrator private key
+  ansible.builtin.assert:
+    that: bootstrap_admin_key_public.rc == 0
+    fail_msg: >-
+      Приватный ключ не читается без пароля. Нужен нешифрованный ключ OpenSSH;
+      парольная фраза не может быть передана неинтерактивной проверке.
+    quiet: true
+
+- name: Require the private key to belong to the selected administrator
+  vars:
+    _bootstrap_admin_entry: >-
+      {{ (base_admin_users | selectattr('name', 'equalto', bootstrap_admin_selected)
+          | list) | first }}
+  ansible.builtin.assert:
+    that: >-
+      bootstrap_admin_key_public.stdout
+      | bootstrap_key_matches(_bootstrap_admin_entry.authorized_keys)
+    fail_msg: >-
+      Приватный ключ не соответствует ни одному authorized_keys выбранного
+      администратора.
+    quiet: true
+
+- name: Require the declared hardening and firewall switches
+  ansible.builtin.assert:
+    that:
+      - base_ssh_enabled | default(false) is sameas true
+      - base_firewall_enabled | default(false) is sameas true
+      - base_ssh_permit_root_login | default('no') == 'no'
+      - (base_ssh_trusted_cidrs | default([])) is sequence
+      - (base_ssh_trusted_cidrs | default([])) is not string
+      - (base_ssh_trusted_cidrs | default([])) | length > 0
+      - (base_ssh_port | default(22)) is integer
+      - (base_ssh_port | default(22)) is not boolean
+      - ((base_ssh_port | default(22)) | int) >= 1
+      - ((base_ssh_port | default(22)) | int) <= 65535
+      - ((ansible_port | default(22)) | int) == ((base_ssh_port | default(22)) | int)
+    fail_msg: >-
+      Bootstrap применяет hardening: нужны base_ssh_enabled=true,
+      base_firewall_enabled=true, base_ssh_permit_root_login=no, непустой
+      base_ssh_trusted_cidrs и ansible_port, совпадающий с base_ssh_port.
+    quiet: true
+
+- name: Require safe SSH source networks
+  vars:
+    _bootstrap_cidr_errors: >-
+      {{ (base_ssh_trusted_cidrs | default([]))
+         | map('bootstrap_cidr_error') | select('string') | list }}
+  ansible.builtin.assert:
+    that: _bootstrap_cidr_errors | length == 0
+    fail_msg: >-
+      Некорректные base_ssh_trusted_cidrs:
+      {{ _bootstrap_cidr_errors | join('; ') }}.
+    quiet: true
+
+- name: Require a supported control-plane placement
+  ansible.builtin.assert:
+    that: cp_placement | default('') in ['exit', 'dedicated']
+    fail_msg: cp_placement должен быть 'exit' или 'dedicated'.
+    quiet: true
+
+- name: Require the documented topology groups
+  vars:
+    _bootstrap_exits: "{{ groups['exit'] | default([]) }}"
+    _bootstrap_relays: "{{ groups['relay'] | default([]) }}"
+    _bootstrap_cps: "{{ groups['cp'] | default([]) }}"
+  ansible.builtin.assert:
+    that:
+      - _bootstrap_exits | length == 1
+      - _bootstrap_relays | length == 1
+      - (_bootstrap_cps | length == 1) if cp_placement == 'dedicated' else (_bootstrap_cps | length == 0)
+      - _bootstrap_exits | intersect(_bootstrap_relays) | length == 0
+      - _bootstrap_exits | intersect(_bootstrap_cps) | length == 0
+      - _bootstrap_relays | intersect(_bootstrap_cps) | length == 0
+    fail_msg: >-
+      Bootstrap ожидает ровно один exit, ровно один relay и либо один отдельный
+      cp (cp_placement=dedicated), либо пустую группу cp (cp_placement=exit).
+      Хост не может входить в две группы.
+    quiet: true
+
+- name: Select the control-plane group
+  ansible.builtin.set_fact:
+    bootstrap_panel_group: "{{ 'exit' if cp_placement == 'exit' else 'cp' }}"
+
+- name: Select the panel host
+  ansible.builtin.set_fact:
+    bootstrap_panel_host: "{{ groups[bootstrap_panel_group] | first }}"
+
+# The panel role owns pin/domain/secrets validation. Running only its
+# validation task file on the selected host touches no host and keeps one
+# authoritative schema; the real role validates again before it changes
+# anything.
+- name: Validate the private panel inputs on the control-plane host
+  ansible.builtin.include_role:
+    name: ../roles/remnawave_panel
+    tasks_from: validate
+  when: inventory_hostname == bootstrap_panel_host
+
+- name: Refuse a panel port that collides with the SSH or database port
+  when: inventory_hostname == bootstrap_panel_host
+  ansible.builtin.assert:
+    that:
+      - (panel_port | default(3000) | int) not in [5432, 6379]
+      - (panel_port | default(3000) | int) != (base_ssh_port | default(22) | int)
+    fail_msg: >-
+      panel_port не должен совпадать с 5432, 6379 или SSH-портом.
+    quiet: true

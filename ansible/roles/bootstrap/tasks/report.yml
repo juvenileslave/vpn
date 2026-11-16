@@ -1,0 +1,86 @@
+---
+- name: Collect the bootstrap host list
+  ansible.builtin.set_fact:
+    _bootstrap_report_hosts: >-
+      {{ (groups['exit'] | default([]))
+         + (groups['relay'] | default([]))
+         + (groups['cp'] | default([])) }}
+
+- name: Collect hosts without the pre-hardening administrator gate
+  ansible.builtin.set_fact:
+    _bootstrap_unverified: >-
+      {{ (_bootstrap_unverified | default([]))
+         + ([item] if not (hostvars[item].bootstrap_admin_verified | default(false)) else []) }}
+  loop: "{{ _bootstrap_report_hosts }}"
+
+- name: Collect hosts without the post-hardening administrator gate
+  ansible.builtin.set_fact:
+    _bootstrap_unverified_after: >-
+      {{ (_bootstrap_unverified_after | default([]))
+         + ([item] if not (hostvars[item].bootstrap_admin_verified_after_hardening | default(false)) else []) }}
+  loop: "{{ _bootstrap_report_hosts }}"
+
+- name: Refuse a summary for gates that did not run
+  ansible.builtin.assert:
+    that:
+      - _bootstrap_unverified | default([]) | length == 0
+      - _bootstrap_unverified_after | default([]) | length == 0
+      - _bootstrap_report_hosts | length > 0
+    fail_msg: >-
+      Не для всех хостов выполнены проверки нового администратора
+      ({{ (_bootstrap_unverified | default([])) + (_bootstrap_unverified_after | default([])) }}).
+      Итоговый статус не публикуется.
+    quiet: true
+
+- name: Require the private panel gate on exactly the selected host
+  vars:
+    _bootstrap_panel_host: "{{ hostvars[_bootstrap_report_hosts[0]].bootstrap_panel_host }}"
+  ansible.builtin.assert:
+    that:
+      - _bootstrap_panel_host in _bootstrap_report_hosts
+      - hostvars[_bootstrap_panel_host].bootstrap_panel_verified | default(false) is sameas true
+    fail_msg: >-
+      Приватная доступность панели не подтверждена на выбранном control-plane
+      хосте; итоговый статус не публикуется.
+    quiet: true
+
+- name: Report the initial access path per host
+  vars:
+    _bootstrap_phase: "{{ hostvars[item].bootstrap_root_phase | default('admin') }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item }}: начальный root-доступ
+      {{ 'использован' if _bootstrap_phase == 'root'
+         else 'недоступен — повторный запуск через администратора' }}
+  loop: "{{ _bootstrap_report_hosts }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Report the secret-safe bootstrap status and tunnel command
+  vars:
+    _bootstrap_panel_host: "{{ hostvars[_bootstrap_report_hosts[0]].bootstrap_panel_host }}"
+    _bootstrap_panel_vars: "{{ hostvars[_bootstrap_panel_host] }}"
+    _bootstrap_panel_port: "{{ _bootstrap_panel_vars.panel_port | default(3000) }}"
+    _bootstrap_panel_bind: "{{ _bootstrap_panel_vars.panel_bind | default('127.0.0.1') }}"
+    _bootstrap_panel_address: "{{ _bootstrap_panel_vars.ansible_host | default(_bootstrap_panel_host) }}"
+    _bootstrap_panel_ssh_port: "{{ _bootstrap_panel_vars.ansible_port | default(22) }}"
+    _bootstrap_admin: "{{ _bootstrap_panel_vars.bootstrap_admin_selected }}"
+    _bootstrap_bind_target: >-
+      {{ ('[' ~ _bootstrap_panel_bind ~ ']') if ':' in _bootstrap_panel_bind
+         else _bootstrap_panel_bind }}:{{ _bootstrap_panel_port }}
+    _bootstrap_port_args: >-
+      {{ ('-p ' ~ (_bootstrap_panel_ssh_port | string))
+         if (_bootstrap_panel_ssh_port | int) != 22 else '' }}
+    _bootstrap_tunnel: >-
+      ssh {{ _bootstrap_port_args }}
+      -N -L {{ _bootstrap_panel_port }}:{{ _bootstrap_bind_target }}
+      {{ _bootstrap_admin }}@{{ _bootstrap_panel_address }}
+  ansible.builtin.debug:
+    msg:
+      - "Bootstrap завершён: base (SSH/firewall), Docker и приватная панель применены."
+      - "Linux-администратор: {{ _bootstrap_admin }} — только ключ; UID и sudo -n проверены новым SSH-подключением."
+      - "Панель: {{ _bootstrap_panel_bind }}:{{ _bootstrap_panel_port }} на {{ _bootstrap_panel_host }}; PostgreSQL/Valkey без host-портов; HTTP 200 с forwarded-заголовками."
+      - "SSH-туннель: {{ _bootstrap_tunnel }}"
+      - "Проверка через туннель: curl -H 'X-Forwarded-For: 127.0.0.1' -H 'X-Forwarded-Proto: https' http://127.0.0.1:{{ _bootstrap_panel_port }}/"
+      - "Браузерный UI требует loopback-эндпоинт роли panel_proxy; эта задача его не устанавливает."
+      - "Учётная запись администратора Remnawave и VPN-подписки этой задачей не создаются."

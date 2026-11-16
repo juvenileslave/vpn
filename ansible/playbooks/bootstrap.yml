@@ -1,0 +1,179 @@
+---
+# One guarded entrypoint for clean Debian/Ubuntu hosts:
+#   initial root access (key or interactive --ask-pass password)
+#   -> Linux administrator through the base role
+#   -> a new key-only administrator connection with UID/sudo proof
+#   -> existing SSH hardening and firewall contracts
+#   -> Docker -> private Remnawave panel on the control-plane host.
+#
+# Not part of this playbook: Remnawave administrator credentials, VPN
+# subscriptions, RemnaNode, cover site, panel_proxy, DNS or public HTTPS.
+# See docs/BOOTSTRAP.md. Every real failure stops the run before the next
+# dangerous phase; a host whose root login is already closed continues only
+# through the declared administrator key.
+
+- name: Validate every bootstrap input before contacting a host
+  hosts: all
+  connection: local
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Validate bootstrap, base, topology and panel input
+      ansible.builtin.import_role:
+        name: ../roles/bootstrap
+        tasks_from: validate
+
+# An ignored unreachable root probe is the expected branch on a rerun, but
+# any_errors_fatal still aborts the run when it sees one. Keep the probe in a
+# non-fatal play; the play that actually mutates the host stays fatal.
+- name: Probe the initial root access
+  hosts: all
+  gather_facts: false
+  serial: 1
+  become: true
+  vars:
+    # The documented first-run access is root by key or by --ask-pass. Do not
+    # persist or print the password; it is used only by this connection.
+    ansible_user: root
+    ansible_python_interpreter: /usr/bin/python3
+    base_ssh_enabled: false
+    base_firewall_enabled: false
+  tasks:
+    - name: Probe root and record the initial access path
+      ansible.builtin.import_role:
+        name: ../roles/bootstrap
+        tasks_from: probe
+
+- name: Create the Linux administrator through the initial root access
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    ansible_user: root
+    ansible_python_interpreter: /usr/bin/python3
+    base_ssh_enabled: false
+    base_firewall_enabled: false
+  tasks:
+    - name: Prepare the host and create administrators without closing root
+      when: bootstrap_root_available | bool
+      block:
+        - name: Prepare Python and sudo on the minimal host
+          ansible.builtin.import_role:
+            name: ../roles/bootstrap
+            tasks_from: prepare_host
+
+        - name: Apply base with SSH and firewall management disabled
+          ansible.builtin.import_role:
+            name: ../roles/base
+
+- name: Verify a new key-only administrator connection and sudo
+  hosts: all
+  connection: local
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  become: false
+  tasks:
+    - name: Prove the selected key, UID and sudo -n on a new SSH process
+      ansible.builtin.import_role:
+        name: ../roles/bootstrap
+        tasks_from: verify
+
+    - name: Record the pre-hardening administrator gate
+      ansible.builtin.set_fact:
+        bootstrap_admin_verified: true
+
+- name: Apply SSH hardening and the firewall through the administrator
+  hosts: all
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    ansible_user: "{{ bootstrap_admin_selected }}"
+    ansible_ssh_private_key_file: "{{ bootstrap_admin_private_key_file | expanduser }}"
+    ansible_password: ""
+    ansible_ssh_common_args: "{{ bootstrap_key_only_ssh_args }}"
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Apply base with the declared SSH and firewall contract
+      ansible.builtin.import_role:
+        name: ../roles/base
+
+- name: Verify the administrator key under the hardened SSH policy
+  hosts: all
+  connection: local
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  become: false
+  tasks:
+    - name: Prove the new key-only connection after hardening
+      ansible.builtin.import_role:
+        name: ../roles/bootstrap
+        tasks_from: verify
+
+    - name: Record the post-hardening administrator gate
+      ansible.builtin.set_fact:
+        bootstrap_admin_verified_after_hardening: true
+
+- name: Install Docker Engine and Compose on every inventory host
+  hosts: all
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    ansible_user: "{{ bootstrap_admin_selected }}"
+    ansible_ssh_private_key_file: "{{ bootstrap_admin_private_key_file | expanduser }}"
+    ansible_password: ""
+    ansible_ssh_common_args: "{{ bootstrap_key_only_ssh_args }}"
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Apply the pinned Docker role
+      ansible.builtin.import_role:
+        name: ../roles/docker
+
+- name: Run the private panel only on the control-plane host
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    ansible_user: "{{ bootstrap_admin_selected }}"
+    ansible_ssh_private_key_file: "{{ bootstrap_admin_private_key_file | expanduser }}"
+    ansible_password: ""
+    ansible_ssh_common_args: "{{ bootstrap_key_only_ssh_args }}"
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Apply the panel role on exactly one host
+      ansible.builtin.import_role:
+        name: ../roles/remnawave_panel
+      when: inventory_hostname == bootstrap_panel_host
+
+    - name: Check that the panel is reachable only through loopback
+      ansible.builtin.import_role:
+        name: ../roles/bootstrap
+        tasks_from: panel_check
+      when: inventory_hostname == bootstrap_panel_host
+
+    - name: Record the private panel gate
+      when: inventory_hostname == bootstrap_panel_host
+      ansible.builtin.set_fact:
+        bootstrap_panel_verified: true
+
+- name: Report the secret-safe status and SSH tunnel command
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Print only verified bootstrap results
+      ansible.builtin.import_role:
+        name: ../roles/bootstrap
+        tasks_from: report

@@ -1,0 +1,62 @@
+---
+# Nothing here runs before this file: facts and Python-dependent modules would
+# fail on a minimal image. Only packages proven absent are installed; apt is
+# told not to upgrade or remove anything.
+- name: Detect the minimal host prerequisites
+  ansible.builtin.raw: |
+    set -eu
+    . /etc/os-release
+    if [ "${ID:-}" != ubuntu ] && [ "${ID:-}" != debian ]; then
+      echo "bootstrap: поддерживаются только Debian и Ubuntu" >&2
+      exit 10
+    fi
+    if [ ! -d /run/systemd/system ]; then
+      echo "bootstrap: нужен systemd" >&2
+      exit 11
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+      echo "bootstrap: нужен apt-get" >&2
+      exit 12
+    fi
+    if command -v sudo >/dev/null 2>&1 && [ ! -x /usr/sbin/visudo ]; then
+      echo "bootstrap: sudo установлен без visudo; исправьте хост вручную" >&2
+      exit 13
+    fi
+    missing=""
+    [ -x "{{ bootstrap_python }}" ] || missing="$missing python3"
+    command -v sudo >/dev/null 2>&1 || missing="$missing sudo"
+    "{{ bootstrap_python }}" -c 'import apt' >/dev/null 2>&1 || missing="$missing python3-apt"
+    printf 'missing=%s\n' "${missing# }"
+  register: bootstrap_prereq_check
+  changed_when: false
+  check_mode: false
+  become: false
+
+- name: Parse the missing prerequisites
+  ansible.builtin.set_fact:
+    bootstrap_missing_prereqs: >-
+      {{ bootstrap_prereq_check.stdout | trim | regex_replace('^missing=', '') }}
+
+- name: Refuse check mode on a host without the Python prerequisites
+  ansible.builtin.assert:
+    that: >-
+      not ansible_check_mode or (bootstrap_missing_prereqs | length == 0)
+    fail_msg: >-
+      --check не устанавливает {{ bootstrap_missing_prereqs }}. Сначала выполните
+      реальный запуск; check mode не даёт PASS для пропущенной подготовки хоста.
+    quiet: true
+
+- name: Install only the missing Python and sudo prerequisites
+  ansible.builtin.raw: |
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    apt-get install -y -q --no-install-recommends --no-upgrade --no-remove \
+      {{ bootstrap_prereq_packages | join(' ') }}
+  when:
+    - not ansible_check_mode
+    - bootstrap_missing_prereqs | length > 0
+  changed_when: true
+  become: false
+
+- name: Gather facts after the prerequisites are available
+  ansible.builtin.setup:
