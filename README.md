@@ -24,6 +24,9 @@
   операторский контент и Certbot; не публичный альтернативный backend.
 - [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
   management-путь с mTLS/JWT и source ACL роли base.
+- [Loopback-эндпоинт панели](docs/PANEL_PROXY.md) — nginx только на loopback,
+  собственный CA и короткоживущий сертификат, вход через `ssh -L`; панель
+  наружу не публикуется.
 - [VictoriaMetrics](docs/METRICS_ROLE.md) — закреплённый single-node store
   метрик со скрейпом node_exporter и панели, retention 30 дней и query API
   только на loopback или по source ACL; не алертинг и не production-стек.

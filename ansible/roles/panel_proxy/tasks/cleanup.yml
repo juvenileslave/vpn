@@ -1,0 +1,37 @@
+---
+# The first revision of this role terminated TLS with a local CA. That design
+# needed a client trust-store change, so it was dropped: plain loopback HTTP
+# behind the SSH tunnel needs no certificate at all. Every artifact it created
+# is role-owned and is removed here, including private keys.
+- name: Check which retired artifacts exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ panel_proxy_retired_paths }}"
+  register: panel_proxy_retired
+
+- name: Disable the retired renewal timer
+  when:
+    - not ansible_check_mode
+    - panel_proxy_retired.results | selectattr('stat.exists') | selectattr('item', 'search', 'panel-proxy-cert-renew.timer') | list | length > 0
+  ansible.builtin.systemd:
+    name: panel-proxy-cert-renew.timer
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Remove retired certificate material and units
+  when: item.stat.exists
+  loop: "{{ panel_proxy_retired.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: absent
+  notify: Reload nginx
+
+- name: Reload systemd after removing retired units
+  when:
+    - not ansible_check_mode
+    - panel_proxy_retired.results | selectattr('stat.exists') | list | length > 0
+  ansible.builtin.systemd:
+    daemon_reload: true
