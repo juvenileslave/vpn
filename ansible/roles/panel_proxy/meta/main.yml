@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: panel_proxy
+  author: juvenileslave/vpn
+  description: Loopback-only nginx TLS endpoint in front of the Remnawave panel
+  license: none
+  min_ansible_version: "2.19"
+  platforms:
+    - name: Debian
+    - name: Ubuntu
+dependencies: []

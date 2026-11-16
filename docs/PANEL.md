@@ -155,12 +155,19 @@ cd ansible
 # после просмотра diff — тот же запуск без --check --diff
 ```
 
-Доступ к панели — только через SSH-туннель:
-`ssh -L 3000:127.0.0.1:3000 <cp-host>`, затем `http://127.0.0.1:3000`.
+Доступ к панели — только через SSH-туннель. Прямой запрос к
+`http://127.0.0.1:3000` панель отклоняет: ей нужны `X-Forwarded-For` и
+`X-Forwarded-Proto`, поэтому перед панелью стоит loopback-эндпоинт роли
+`panel_proxy` (см. [PANEL_PROXY.md](PANEL_PROXY.md)):
+
+```sh
+ssh -L 7443:127.0.0.1:7443 <cp-host>
+# затем https://127.0.0.1:7443/ ; CA-сертификат — /etc/panel-proxy/tls/ca.pem
+```
 
 Ручная проверка на хосте: `docker compose -p remnawave ps` (все `healthy`),
-`ss -ltn` (порт панели только на loopback, порты 5432/6379 отсутствуют),
-`stat -c %a /opt/remnawave/*.env` (`600`).
+`ss -ltn` (порт панели и порт panel_proxy только на loopback, порты 5432/6379
+отсутствуют), `stat -c %a /opt/remnawave/*.env` (`600`).
 
 ## Обновление образов
 

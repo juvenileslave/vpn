@@ -1,0 +1,11 @@
+---
+# Loopback admin endpoint for the Remnawave panel (architecture task 2.1/2.2).
+# Nothing becomes public: the role binds nginx to a loopback address and the
+# operator reaches it through `ssh -L`. The role is resolved by path because
+# ansible.cfg does not set roles_path.
+- name: Loopback nginx endpoint for the panel
+  hosts: "{{ panel_proxy_hosts | default('cp') }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: "{{ playbook_dir }}/../roles/panel_proxy"

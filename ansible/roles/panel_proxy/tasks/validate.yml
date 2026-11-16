@@ -1,0 +1,45 @@
+---
+# Pure variable checks: run before anything touches the host.
+- name: Validate loopback bind address
+  ansible.builtin.assert:
+    that:
+      - panel_proxy_bind is string
+      - panel_proxy_bind is match('^(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|::1)$')
+    fail_msg: "panel_proxy_bind must be 127.x.y.z or ::1: the admin endpoint is never published"
+    quiet: true
+
+- name: Validate port range and upstream contract
+  ansible.builtin.assert:
+    that:
+      - panel_proxy_port | int >= 1
+      - panel_proxy_port | int <= 65535
+      - panel_proxy_upstream is string
+      - panel_proxy_upstream is match('^(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]):[0-9]{1,5}$')
+      - (panel_proxy_upstream.split(':') | last | int) >= 1
+      - (panel_proxy_upstream.split(':') | last | int) <= 65535
+    fail_msg: "panel_proxy_upstream must be 127.x.y.z:port or [::1]:port (panel_bind:panel_port of the panel role)"
+    quiet: true
+
+- name: Refuse an endpoint that proxies to itself
+  ansible.builtin.assert:
+    that:
+      - not (panel_proxy_upstream is match('^' ~ (panel_proxy_bind | regex_escape) ~ ':' ~ (panel_proxy_port | string) ~ '$'))
+    fail_msg: "panel_proxy_upstream equals the listen address; the panel role must bind a different port"
+    quiet: true
+
+- name: Validate TLS paths, validity windows and header value
+  ansible.builtin.assert:
+    that:
+      - panel_proxy_tls_dir is match('^/[A-Za-z0-9._/-]+$')
+      - panel_proxy_server_name is match('^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$')
+      - panel_proxy_client_type is match('^[a-z][a-z0-9-]{0,31}$')
+      - (panel_proxy_ca_days | int) >= 365
+      - (panel_proxy_certificate_days | int) >= 30
+      - (panel_proxy_renew_before_days | int) >= 1
+      - (panel_proxy_renew_before_days | int) < (panel_proxy_certificate_days | int)
+      - (panel_proxy_client_max_body_size | string) is match('^[0-9]+[kKmM]?$')
+      - (panel_proxy_proxy_connect_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
+      - (panel_proxy_proxy_send_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
+      - (panel_proxy_proxy_read_timeout | string) is match('^[1-9][0-9]*(ms|s|m)?$')
+    fail_msg: "Invalid TLS directory, server name, client type, validity window, body size or timeout"
+    quiet: true

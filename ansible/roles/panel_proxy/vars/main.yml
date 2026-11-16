@@ -1,0 +1,12 @@
+---
+panel_proxy_marker: "Managed by Ansible role panel_proxy"
+# nginx needs brackets around an IPv6 literal in listen.
+panel_proxy_listen_address: "{{ panel_proxy_bind if '.' in panel_proxy_bind else '[' ~ panel_proxy_bind ~ ']' }}"
+panel_proxy_site_available: /etc/nginx/sites-available/panel_proxy.conf
+panel_proxy_site_enabled: /etc/nginx/sites-enabled/panel_proxy.conf
+panel_proxy_tls_script: /usr/local/lib/panel-proxy/panel_proxy_tls.py
+panel_proxy_ca_certificate: "{{ panel_proxy_tls_dir }}/ca.pem"
+panel_proxy_certificate: "{{ panel_proxy_tls_dir }}/server.pem"
+panel_proxy_certificate_key: "{{ panel_proxy_tls_dir }}/server.key"
+panel_proxy_tls_ciphers: >-
+  ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305
