@@ -217,7 +217,10 @@ step "Проверка предусловий одноразового гост�
 for tool in script sshpass ssh-keygen ssh-keyscan curl; do
   command -v "$tool" >/dev/null 2>&1 || fail "нужен $tool"
 done
-if systemctl is-active --quiet ufw.service; then fail "UFW активен; bootstrap не отключает чужой firewall"; fi
+if [[ -r /etc/ufw/ufw.conf ]] \
+   && grep -Eq '^[[:space:]]*ENABLED[[:space:]]*=[[:space:]]*yes[[:space:]]*$' /etc/ufw/ufw.conf; then
+  fail "UFW включён (ENABLED=yes); bootstrap не отключает чужой firewall"
+fi
 if systemctl is-active --quiet firewalld.service; then fail "firewalld активен; bootstrap не отключает чужой firewall"; fi
 getent passwd "$ADMIN" >/dev/null 2>&1 && fail "гость не чистый: $ADMIN уже существует"
 [[ ! -e /etc/sudoers.d/vpn-base ]] || fail "гость не чистый: /etc/sudoers.d/vpn-base"
