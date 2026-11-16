@@ -24,11 +24,13 @@
         name: ../roles/bootstrap
         tasks_from: validate
 
-- name: Create the Linux administrator through the initial root access
+# An ignored unreachable root probe is the expected branch on a rerun, but
+# any_errors_fatal still aborts the run when it sees one. Keep the probe in a
+# non-fatal play; the play that actually mutates the host stays fatal.
+- name: Probe the initial root access
   hosts: all
   gather_facts: false
   serial: 1
-  any_errors_fatal: true
   become: true
   vars:
     # The documented first-run access is root by key or by --ask-pass. Do not
@@ -43,6 +45,18 @@
         name: ../roles/bootstrap
         tasks_from: probe
 
+- name: Create the Linux administrator through the initial root access
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    ansible_user: root
+    ansible_python_interpreter: /usr/bin/python3
+    base_ssh_enabled: false
+    base_firewall_enabled: false
+  tasks:
     - name: Prepare the host and create administrators without closing root
       when: bootstrap_root_available | bool
       block:
