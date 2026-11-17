@@ -28,6 +28,8 @@ const usage = `usage:
   vpnctl bot --config PATH
   vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH [--format text|json]
   vpnctl diagnose --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH [--format text|json]
+  vpnctl entrance gate --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH [--format text|json]
+  vpnctl entrance rotation plan --node NAME --provider hetzner|cloudflare --current LABEL --candidate LABEL [--family ipv4|ipv6] --store PATH [--confirm] [--format text|json]
   vpnctl panel [plan|show|apply] --config PATH --bundle MANIFEST --objects PATH [--ca-file PATH] [--apply]
 `
 
@@ -60,6 +62,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runProbe(args[1:], stdout, stderr)
 	case "diagnose":
 		return runDiagnosisCommand(args[1:], stdout, stderr, false)
+	case "entrance":
+		return runEntrance(args[1:], stdout, stderr)
 	case "panel":
 		return runPanel(args[1:], stdout, stderr)
 	case "help", "-h", "--help":

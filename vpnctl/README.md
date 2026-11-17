@@ -4,8 +4,10 @@
 (этап 5). Реализованы **строгий контракт конфигурации**, команда его проверки,
 **read-only Telegram-бот** `vpnctl bot` (см. [TELEGRAM_BOT.md](../docs/TELEGRAM_BOT.md)),
 авторизованная `probe ladder` и консервативный `diagnose`
-([PROBES.md](../docs/PROBES.md)), а также **read-only `panel plan/show`** для
-существующего renderer bundle ([PANEL_WRITE.md](../docs/PANEL_WRITE.md)).
+([PROBES.md](../docs/PROBES.md)), **read-only `panel plan/show`** для
+существующего renderer bundle ([PANEL_WRITE.md](../docs/PANEL_WRITE.md)), а также
+офлайн-срез #74: трёхзначный `entrance gate` и план ротации входа
+([ENTRANCE_GATE.md](../docs/ENTRANCE_GATE.md)).
 Запись в панель и rollback заблокированы: закреплённый API не поддерживает
 атомарные write-preconditions. Воркера, mTLS probe-агента и команд изменения
 инфраструктуры нет.
@@ -13,6 +15,9 @@
 ## Чего утилита не делает
 
 - Не меняет панель: у клиента панели только GET-запросы.
+- Не публикует подписку, не меняет профиль и не вращает IP: `entrance gate`
+  только оценивает записанное evidence, а `entrance rotation plan` не вызывает
+  провайдера и не меняет адрес, DNS или firewall.
 - `config validate` не открывает сетевых соединений; `probe ladder` делает
   только явно запрошенные bounded пробы по внешнему файлу, а `diagnose` читает
   локальное evidence и ничего не запускает на узлах.
@@ -35,6 +40,8 @@
 | | Ошибка конфигурации, окружения, `getMe`, панели или типизированная ошибка Telegram — `bot failed`/`bot stopped` в stderr. | 1 |
 | `vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH` | TCP → verified TLS/cover → REALITY/VLESS/XHTTP → exact 1 MiB → exact 20 MiB; text или `--format json`/`--json`. | 0 — все пять этапов успешны; 4 — выполненный этап отказал |
 | `vpnctl diagnose --node NAME --inputs PATH --store PATH [--family ipv4|ipv6]` | Pure scoped verdict с confidence/missing_evidence; никакой remediation. | 0 — supported hypothesis; 3 — insufficient evidence / `unknown` |
+| `vpnctl entrance gate --node NAME --inputs PATH --store PATH [--family ipv4\|ipv6]` | Трёхзначный gate входа по принятым ladder observations: TCP, declared-SNI TLS, REALITY/VLESS/XHTTP, 1 MiB и 20 MiB; text/JSON, только labels и коды. | 0 — `clean` от двух независимых in-country сетей; 3 — `unknown`; 4 — `failed` (вход или выход) |
+| `vpnctl entrance rotation plan --node NAME --provider hetzner\|cloudflare --current LABEL --candidate LABEL --store PATH [--confirm]` | Офлайн-план ротации входа: preflight, read-only verify, обязательное `--confirm`, явный отказ от mutation, rollback; только opaque identities, без provider-вызовов. | 0 — план `ready` (mutation не выполнена); 3 — `refused`; 1/2 — ошибки |
 | Ошибка external inputs, pinned core, store, private cleanup или output | Короткий secret-safe code; не успех сетевой пробы. | 1 |
 | `vpnctl panel [plan] --config PATH --bundle MANIFEST --objects PATH` | Проверка bundle и безопасный JSON-diff; только GET. `apply` без `--apply` выполняет тот же plan. | 0 |
 | `vpnctl panel show --config PATH --bundle MANIFEST --objects PATH` | Только текущие объявленные identities и наличие effective fields. | 0 |
