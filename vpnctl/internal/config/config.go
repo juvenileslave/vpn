@@ -25,6 +25,8 @@ type Config struct {
 	Nodes    []Node
 	Probe    Probe
 	Bot      Bot
+	Metrics  *Metrics
+	Alerts   *Alerts
 	LogLevel string
 }
 
@@ -81,6 +83,50 @@ type Bot struct {
 	ChatIDs []int64
 }
 
+// Metrics describes how to reach the VictoriaMetrics query API.
+type Metrics struct {
+	// Endpoint is the HTTPS API root; a path prefix is preserved.
+	Endpoint *url.URL
+	// TokenEnv is the optional environment variable holding a bearer token.
+	TokenEnv string
+	Timeout  time.Duration
+	Interval time.Duration
+}
+
+// Alerts holds the stateful alert worker settings.
+type Alerts struct {
+	// StateDB is the SQLite database holding alert state and the outbox.
+	StateDB string
+	// Grace delays the transition to unknown.
+	Grace time.Duration
+	// FlapSamples is the consecutive firing sample count.
+	FlapSamples int
+	// Retention keeps deleted-rule state and delivered outbox rows.
+	Retention    time.Duration
+	OutboxMaxAge time.Duration
+	RetryBase    time.Duration
+	RetryMax     time.Duration
+	MaxAttempts  int
+	Jitter       time.Duration
+	// Scope is the observation scope shown in notifications.
+	Scope string
+}
+
+// Defaults applied to optional metrics and alerts fields.
+const (
+	DefaultMetricsTimeout  = 10 * time.Second
+	DefaultMetricsInterval = time.Minute
+	DefaultAlertGrace      = 5 * time.Minute
+	DefaultAlertFlap       = 2
+	DefaultAlertRetention  = 24 * time.Hour
+	DefaultOutboxMaxAge    = time.Hour
+	DefaultRetryBase       = 30 * time.Second
+	DefaultRetryMax        = 10 * time.Minute
+	DefaultMaxAttempts     = 5
+	DefaultAlertJitter     = 10 * time.Second
+	DefaultAlertScope      = "metrics"
+)
+
 // Problem is a single validation failure at a configuration path such as
 // "nodes[1].port".
 type Problem struct {
@@ -125,11 +171,13 @@ var (
 // and values from zero values; durations stay strings so that parse failures
 // are reported with their configuration path.
 type rawConfig struct {
-	Panel    *rawPanel `yaml:"panel"`
-	Nodes    []rawNode `yaml:"nodes"`
-	Probe    *rawProbe `yaml:"probe"`
-	Bot      *rawBot   `yaml:"bot"`
-	LogLevel string    `yaml:"log_level"`
+	Panel    *rawPanel   `yaml:"panel"`
+	Nodes    []rawNode   `yaml:"nodes"`
+	Probe    *rawProbe   `yaml:"probe"`
+	Bot      *rawBot     `yaml:"bot"`
+	Metrics  *rawMetrics `yaml:"metrics"`
+	Alerts   *rawAlerts  `yaml:"alerts"`
+	LogLevel string      `yaml:"log_level"`
 }
 
 type rawPanel struct {
@@ -160,6 +208,26 @@ type rawBot struct {
 type rawOperator struct {
 	ID   *int64 `yaml:"id"`
 	Role string `yaml:"role"`
+}
+
+type rawMetrics struct {
+	Endpoint string `yaml:"endpoint"`
+	TokenEnv string `yaml:"token_env"`
+	Timeout  string `yaml:"timeout"`
+	Interval string `yaml:"interval"`
+}
+
+type rawAlerts struct {
+	StateDB      string `yaml:"state_db"`
+	Grace        string `yaml:"grace"`
+	FlapSamples  *int   `yaml:"flap_samples"`
+	Retention    string `yaml:"retention"`
+	OutboxMaxAge string `yaml:"outbox_max_age"`
+	RetryBase    string `yaml:"retry_base"`
+	RetryMax     string `yaml:"retry_max"`
+	MaxAttempts  *int   `yaml:"max_attempts"`
+	Jitter       string `yaml:"jitter"`
+	Scope        string `yaml:"scope"`
 }
 
 // Load reads, strictly decodes and validates the configuration at path.
@@ -269,6 +337,11 @@ func validate(raw rawConfig) (Config, error) {
 	}
 
 	cfg.Bot = validateBot(raw.Bot, add)
+	cfg.Metrics = validateMetrics(raw.Metrics, add)
+	cfg.Alerts = validateAlerts(raw.Alerts, add)
+	if cfg.Metrics != nil && cfg.Alerts != nil && cfg.Metrics.Interval > 0 && cfg.Alerts.Jitter > cfg.Metrics.Interval {
+		add("alerts.jitter", "must not exceed metrics.interval")
+	}
 
 	switch {
 	case raw.LogLevel == "":
@@ -439,6 +512,148 @@ func isLoopbackHost(host string) bool {
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.IsLoopback()
+}
+
+var scopePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,31}$`)
+
+// validateMetrics accepts an optional metrics section. The endpoint uses the
+// same rules as metrics.NewClient; a token is referenced only by env name.
+func validateMetrics(raw *rawMetrics, add func(path, format string, args ...any)) *Metrics {
+	if raw == nil {
+		return nil
+	}
+	m := &Metrics{}
+	switch {
+	case raw.Endpoint == "":
+		add("metrics.endpoint", "is required")
+	default:
+		m.Endpoint = validateMetricsEndpoint(raw.Endpoint, add)
+	}
+	switch {
+	case raw.TokenEnv == "":
+	case !tokenEnvPattern.MatchString(raw.TokenEnv):
+		add("metrics.token_env", "must be an environment variable name matching %s", tokenEnvPattern)
+	default:
+		m.TokenEnv = raw.TokenEnv
+	}
+	m.Timeout = optionalPositiveDuration("metrics.timeout", raw.Timeout, DefaultMetricsTimeout, add)
+	m.Interval = optionalPositiveDuration("metrics.interval", raw.Interval, DefaultMetricsInterval, add)
+	if m.Interval > 24*time.Hour {
+		add("metrics.interval", "must not exceed 24h")
+	}
+	return m
+}
+
+func validateMetricsEndpoint(raw string, add func(path, format string, args ...any)) *url.URL {
+	const path = "metrics.endpoint"
+	u, err := url.Parse(raw)
+	if err != nil {
+		add(path, "is not a valid URL")
+		return nil
+	}
+	ok := true
+	if u.Scheme != "https" {
+		add(path, "must use https")
+		ok = false
+	}
+	if u.User != nil {
+		add(path, "must not contain userinfo")
+		ok = false
+	}
+	if u.Hostname() == "" {
+		add(path, "must have a host")
+		ok = false
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		add(path, "must not contain a query or fragment")
+		ok = false
+	}
+	if !ok {
+		return nil
+	}
+	return u
+}
+
+// validateAlerts accepts an optional alerts section and fills documented
+// defaults for omitted optional fields.
+func validateAlerts(raw *rawAlerts, add func(path, format string, args ...any)) *Alerts {
+	if raw == nil {
+		return nil
+	}
+	a := &Alerts{
+		Grace:        optionalNonNegativeDuration("alerts.grace", raw.Grace, DefaultAlertGrace, add),
+		FlapSamples:  DefaultAlertFlap,
+		Retention:    optionalPositiveDuration("alerts.retention", raw.Retention, DefaultAlertRetention, add),
+		OutboxMaxAge: optionalPositiveDuration("alerts.outbox_max_age", raw.OutboxMaxAge, DefaultOutboxMaxAge, add),
+		RetryBase:    optionalPositiveDuration("alerts.retry_base", raw.RetryBase, DefaultRetryBase, add),
+		RetryMax:     optionalPositiveDuration("alerts.retry_max", raw.RetryMax, DefaultRetryMax, add),
+		MaxAttempts:  DefaultMaxAttempts,
+		Jitter:       optionalNonNegativeDuration("alerts.jitter", raw.Jitter, DefaultAlertJitter, add),
+		Scope:        DefaultAlertScope,
+	}
+	switch {
+	case raw.StateDB == "":
+		add("alerts.state_db", "is required")
+	case strings.ContainsRune(raw.StateDB, 0):
+		add("alerts.state_db", "must not contain NUL bytes")
+	default:
+		a.StateDB = raw.StateDB
+	}
+	if raw.FlapSamples != nil {
+		switch {
+		case *raw.FlapSamples < 1:
+			add("alerts.flap_samples", "must be positive, got %d", *raw.FlapSamples)
+		case *raw.FlapSamples > 1000:
+			add("alerts.flap_samples", "must not exceed 1000, got %d", *raw.FlapSamples)
+		default:
+			a.FlapSamples = *raw.FlapSamples
+		}
+	}
+	if raw.MaxAttempts != nil {
+		switch {
+		case *raw.MaxAttempts < 1:
+			add("alerts.max_attempts", "must be positive, got %d", *raw.MaxAttempts)
+		case *raw.MaxAttempts > 100:
+			add("alerts.max_attempts", "must not exceed 100, got %d", *raw.MaxAttempts)
+		default:
+			a.MaxAttempts = *raw.MaxAttempts
+		}
+	}
+	if a.RetryMax < a.RetryBase && a.RetryBase > 0 && a.RetryMax > 0 {
+		add("alerts.retry_max", "must not be less than alerts.retry_base")
+	}
+	if raw.Scope != "" {
+		switch {
+		case !scopePattern.MatchString(raw.Scope):
+			add("alerts.scope", "must match %s", scopePattern)
+		default:
+			a.Scope = raw.Scope
+		}
+	}
+	return a
+}
+
+func optionalPositiveDuration(path, raw string, def time.Duration, add func(path, format string, args ...any)) time.Duration {
+	if raw == "" {
+		return def
+	}
+	return positiveDuration(path, raw, add)
+}
+
+func optionalNonNegativeDuration(path, raw string, def time.Duration, add func(path, format string, args ...any)) time.Duration {
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		add(path, "must be a Go duration such as 5s, got %q", raw)
+		return 0
+	}
+	if d < 0 {
+		add(path, "must not be negative, got %s", raw)
+		return 0
+	}
+	return d
 }
 
 func positiveDuration(path, raw string, add func(path, format string, args ...any)) time.Duration {
