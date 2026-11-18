@@ -402,7 +402,10 @@ func (s *Store) DeleteAlertStatesMissingBefore(ctx context.Context, cutoff time.
 		return 0, invalid("retention cutoff must be between the Unix epoch and year 2262")
 	}
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM alert_states WHERE missing_since > 0 AND missing_since < ?`, timeToNS(cutoff))
+		`DELETE FROM alert_states
+		 WHERE missing_since > 0 AND missing_since < ?
+		   AND NOT EXISTS (SELECT 1 FROM alert_outbox o WHERE o.rule = alert_states.rule)`,
+		timeToNS(cutoff))
 	if err != nil {
 		return 0, dbError("prune alert states", err)
 	}
@@ -549,7 +552,7 @@ func (s *Store) MarkAlertDelivered(ctx context.Context, id int64, now time.Time)
 		return invalid("alert delivery time must be between the Unix epoch and year 2262")
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE alert_outbox SET delivered_at = ?, claimed_until = 0
+		`UPDATE alert_outbox SET delivered_at = ?, claimed_until = 0, abandoned_at = 0
 		 WHERE id = ? AND delivered_at = 0`, timeToNS(now), id)
 	if err != nil {
 		return dbError("mark alert delivered", err)
@@ -612,17 +615,24 @@ func (s *Store) RecordAlertFailure(ctx context.Context, id int64, now time.Time,
 }
 
 // ExpireAlertOutbox marks undelivered notifications that passed their maximum
-// age as abandoned. An abandoned row is never retried, remains visible as
-// expired, and is removed later by PruneAlertOutbox after the retention
-// period, so a long sink outage cannot grow the queue without bound.
-func (s *Store) ExpireAlertOutbox(ctx context.Context, now time.Time) (int64, error) {
+// age, or exhausted their attempts after a crash, as abandoned. A row with an
+// active claim lease is left to its sender, so an in-flight delivery is not
+// declared expired underneath it. An abandoned row is never retried, remains
+// visible as expired, and is removed later by PruneAlertOutbox after the
+// retention period, so a long sink outage cannot grow the queue without bound.
+func (s *Store) ExpireAlertOutbox(ctx context.Context, now time.Time, maxAttempts int) (int64, error) {
 	if !validTime(now) || now.IsZero() {
 		return 0, invalid("alert expiry time must be between the Unix epoch and year 2262")
 	}
+	if maxAttempts < 1 {
+		return 0, invalid("alert max attempts must be positive")
+	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE alert_outbox SET abandoned_at = ?, claimed_until = 0
-		 WHERE delivered_at = 0 AND abandoned_at = 0 AND expires_at <= ?`,
-		timeToNS(now), timeToNS(now))
+		 WHERE delivered_at = 0 AND abandoned_at = 0
+		   AND (claimed_until = 0 OR claimed_until <= ?)
+		   AND (expires_at <= ? OR attempts >= ?)`,
+		timeToNS(now), timeToNS(now), timeToNS(now), maxAttempts)
 	if err != nil {
 		return 0, dbError("expire alert notifications", err)
 	}

@@ -106,6 +106,10 @@ func runMetricsCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "metrics check failed: %s\n", err)
 		return ExitError
 	}
+	if ctx.Err() != nil {
+		fmt.Fprintln(stderr, "metrics check canceled")
+		return ExitError
+	}
 
 	if *format == "json" {
 		enc := json.NewEncoder(stdout)

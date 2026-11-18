@@ -58,7 +58,6 @@ func (f *fakeMetrics) serve(w http.ResponseWriter, r *http.Request) {
 	f.auth = r.Header.Get("Authorization")
 	mode, value := f.mode, f.value
 	f.mu.Unlock()
-
 	w.Header().Set("Content-Type", "application/json")
 	switch mode {
 	case "empty":
@@ -95,6 +94,12 @@ func (f *fakeMetrics) requestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.requests
+}
+
+func (f *fakeMetrics) lastAuth() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.auth
 }
 
 // fakeSink records accepted alerts and can fail a fixed number of attempts.
@@ -314,12 +319,31 @@ func TestDecideTransitions(t *testing.T) {
 	if event != "" || backOK.State != store.AlertOK {
 		t.Fatalf("unknown to ok = %+v, %q", backOK, event)
 	}
+}
 
-	// A deleted rule keeps its last state until retention prunes it.
-	missing := backOK
-	missing.MissingSince = now.Add(4 * time.Minute)
-	if missing.State != store.AlertOK {
-		t.Fatalf("missing state = %+v", missing)
+func TestDecideUnknownToFiringNeedsFlapSamples(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	rule := testRule("rule-a")
+	cfg := testWorkerConfig(&now)
+	cfg.FlapSamples = 2
+
+	alert := func(state metrics.State) metrics.Alert {
+		return metrics.Alert{
+			Rule: "rule-a", Severity: metrics.SeverityWarning, State: state,
+			Value: 95, Threshold: 90, Labels: map[string]string{"instance": "exit-01"},
+		}
+	}
+	unknown, event := decide(nil, alert(metrics.StateUnknown), rule, cfg, now)
+	if event != "" || unknown.State != store.AlertUnknown {
+		t.Fatalf("initial unknown = %+v, %q", unknown, event)
+	}
+	next, event := decide(&unknown, alert(metrics.StateFiring), rule, cfg, now.Add(time.Minute))
+	if event != "" || next.PendingState != store.AlertFiring || next.PendingSamples != 1 {
+		t.Fatalf("first firing sample = %+v, %q", next, event)
+	}
+	next, event = decide(&next, alert(metrics.StateFiring), rule, cfg, now.Add(2*time.Minute))
+	if event != store.EventFiring || next.State != store.AlertFiring {
+		t.Fatalf("confirmed firing = %+v, %q", next, event)
 	}
 }
 
@@ -340,6 +364,9 @@ func TestWorkerFiringRecoveryAndRestart(t *testing.T) {
 	}
 	if res.Notified != 1 || res.Delivered != 1 || len(sink.alerts()) != 1 {
 		t.Fatalf("first cycle = %+v, sent %d", res, len(sink.alerts()))
+	}
+	if got := f.lastAuth(); got != "Bearer "+testMetricsToken {
+		t.Fatalf("Authorization = %q, want bearer token", got)
 	}
 	msg := sink.alerts()[0].Message
 	for _, want := range []string{"firing", "rule=rule-a", "severity=warning", "scope=synthetic", "value=95", "condition=> 90", "labels=", "observed_at="} {

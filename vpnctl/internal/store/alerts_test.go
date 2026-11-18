@@ -140,6 +140,79 @@ func TestAlertStatePruningOnlyForMissingRules(t *testing.T) {
 	}
 }
 
+func TestAlertStatePruningKeepsRulesWithOutboxRows(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	defer s.Close()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	st := testAlertState("missing", AlertFiring, 0, now)
+	st.MissingSince = now.Add(-2 * time.Hour)
+	out := testOutbox(st.Rule, "alerts.missing.firing.aaaaaaaa.0", EventFiring, now)
+	if _, _, err := s.CommitAlertTransition(ctx, 0, st, out); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.ListOpenAlertOutbox(ctx, 10)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("open outbox = %+v, %v", open, err)
+	}
+	if n, err := s.DeleteAlertStatesMissingBefore(ctx, now.Add(-time.Hour)); err != nil || n != 0 {
+		t.Fatalf("prune with live outbox = %d, %v; want 0", n, err)
+	}
+	if err := s.RecordAlertFailure(ctx, open[0].ID, now, now, true); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PruneAlertOutbox(ctx, now.Add(time.Hour), now.Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("prune outbox = %d, %v; want 1", n, err)
+	}
+	if n, err := s.DeleteAlertStatesMissingBefore(ctx, now.Add(-time.Hour)); err != nil || n != 1 {
+		t.Fatalf("prune after outbox removal = %d, %v; want 1", n, err)
+	}
+}
+
+func TestAlertOutboxExpireRespectsClaimsAndExhaustedAttempts(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	defer s.Close()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	claimedState := testAlertState("claimed", AlertFiring, 0, now)
+	claimedOut := testOutbox("claimed", "alerts.claimed.firing.aaaaaaaa.0", EventFiring, now)
+	claimedOut.ExpiresAt = now.Add(time.Minute)
+	if _, _, err := s.CommitAlertTransition(ctx, 0, claimedState, claimedOut); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := s.ClaimAlertOutbox(ctx, now, 10*time.Minute, 3)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v, %v, %v", claimed, ok, err)
+	}
+	if n, err := s.ExpireAlertOutbox(ctx, now.Add(2*time.Minute), 3); err != nil || n != 0 {
+		t.Fatalf("expire active claim = %d, %v; want 0", n, err)
+	}
+	if err := s.MarkAlertDelivered(ctx, claimed.ID, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if pending, expired, err := s.AlertOutboxStatus(ctx, now.Add(2*time.Minute)); err != nil || pending != 0 || expired != 0 {
+		t.Fatalf("status after late delivery = %d/%d, %v", pending, expired, err)
+	}
+
+	exhaustedState := testAlertState("exhausted", AlertFiring, 0, now)
+	exhaustedOut := testOutbox("exhausted", "alerts.exhausted.firing.bbbbbbbb.0", EventFiring, now)
+	exhaustedOut.ExpiresAt = now.Add(time.Hour)
+	if _, _, err := s.CommitAlertTransition(ctx, 0, exhaustedState, exhaustedOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.ClaimAlertOutbox(ctx, now, time.Minute, 1); err != nil || !ok {
+		t.Fatalf("exhausted claim = %v, %v", ok, err)
+	}
+	if n, err := s.ExpireAlertOutbox(ctx, now.Add(2*time.Minute), 1); err != nil || n != 1 {
+		t.Fatalf("expire exhausted row = %d, %v; want 1", n, err)
+	}
+	if pending, expired, err := s.AlertOutboxStatus(ctx, now.Add(2*time.Minute)); err != nil || pending != 0 || expired != 1 {
+		t.Fatalf("status after exhaustion = %d/%d, %v", pending, expired, err)
+	}
+}
+
 func TestAlertMutes(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTemp(t)

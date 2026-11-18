@@ -363,13 +363,13 @@ func (w *Worker) Cycle(ctx context.Context) (Result, error) {
 	}
 
 	cutoff := now.Add(-w.cfg.Retention)
-	if _, err := w.store.DeleteAlertStatesMissingBefore(ctx, cutoff); err != nil {
-		return res, err
-	}
-	if _, err := w.store.ExpireAlertOutbox(ctx, now); err != nil {
+	if _, err := w.store.ExpireAlertOutbox(ctx, now, w.cfg.MaxAttempts); err != nil {
 		return res, err
 	}
 	if _, err := w.store.PruneAlertOutbox(ctx, cutoff, cutoff); err != nil {
+		return res, err
+	}
+	if _, err := w.store.DeleteAlertStatesMissingBefore(ctx, cutoff); err != nil {
 		return res, err
 	}
 	if err := w.deliver(ctx, &res, now); err != nil {
