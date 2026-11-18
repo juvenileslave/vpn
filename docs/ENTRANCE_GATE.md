@@ -176,10 +176,10 @@ Gate пишет одну marker-запись в `probes` на каждый за�
 содержит ladder context и не реконструируется как ladder run; он также
 исключён из ladder-window (`LatestLadderProbes`). Полный `scope`
 (окно, vantages, число сетей, per-stage facts) доступен в text/JSON-выводе; в
-schema 3 его нельзя сохранить отдельной scoped-записью, не смешав с ladder
+schema 4 его нельзя сохранить отдельной scoped-записью, не смешав с ladder
 evidence, поэтому persisted marker хранит только решение и label/family.
-Схема SQLite не меняется (версия 3); marker-записи используют существующие
-CHECK-констрейнты.
+Этот PR не добавляет миграцию; текущая схема (версия 4) уже содержит таблицы
+alert-воркера, а marker-записи используют существующие CHECK-констрейнты.
 
 ## 6. План ротации входа
 

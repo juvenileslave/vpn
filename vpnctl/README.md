@@ -4,12 +4,14 @@
 (этап 5). Реализованы **строгий контракт конфигурации**, команда его проверки,
 **read-only Telegram-бот** `vpnctl bot` (см. [TELEGRAM_BOT.md](../docs/TELEGRAM_BOT.md)),
 авторизованная `probe ladder` и консервативный `diagnose`
-([PROBES.md](../docs/PROBES.md)), **read-only `panel plan/show`** для
-существующего renderer bundle ([PANEL_WRITE.md](../docs/PANEL_WRITE.md)), а также
-офлайн-срез #74: трёхзначный `entrance gate` и план ротации входа
+([PROBES.md](../docs/PROBES.md)), **stateful alert-воркер** `vpnctl metrics
+check|run` и `vpnctl alerts list|mute` ([METRICS_ALERTS.md](../docs/METRICS_ALERTS.md)),
+**read-only `panel plan/show`** для существующего renderer bundle
+([PANEL_WRITE.md](../docs/PANEL_WRITE.md)), а также офлайн-срез #74:
+трёхзначный `entrance gate` и план ротации входа
 ([ENTRANCE_GATE.md](../docs/ENTRANCE_GATE.md)).
 Запись в панель и rollback заблокированы: закреплённый API не поддерживает
-атомарные write-preconditions. Воркера, mTLS probe-агента и команд изменения
+атомарные write-preconditions. mTLS probe-агента и команд изменения
 инфраструктуры нет.
 
 ## Чего утилита не делает
@@ -24,6 +26,9 @@
 - Токены бота/панели читает только из переменных окружения при `vpnctl bot`
   или read-only `vpnctl panel`; client credentials для ladder — из приватного
   файла принятого renderer вне Git.
+- `metrics run` только читает VictoriaMetrics и отправляет уведомления через
+  принятый sink; `metrics check` не пишет состояние и ничего не отправляет.
+  Ремедиации, ротации IP и paging-гарантий нет.
 - Не меняет production, DNS, firewall или сертификаты.
 
 `config validate` проверяет только сам файл: успешный результат не означает, что
@@ -48,6 +53,11 @@
 | `vpnctl panel apply --apply` | Отказ до чтения файлов/токена, сети и SQLite: атомарной защиты в API нет. | 3 |
 | `panel`: stale UUID, ownership-конфликт, потенциально lossy update | Безопасный отказ; панель не меняется. | 3 |
 | `panel`: неверные inputs, token/TLS/HTTP/response ошибки | Значения и сырые diagnostics не выводятся. | 1 |
+| `vpnctl metrics check --config PATH --rules PATH [--format text|json]` | Один цикл вычислений: все правила проверяются до запроса, затем типизированные `ok`/`firing`/`unknown`; состояние не пишется. | 0 — все `ok`; 4 — есть `firing`; 5 — нет `firing`, есть `unknown` |
+| `vpnctl metrics run --config PATH --rules PATH` | Цикл по `metrics.interval` с jitter; состояние и outbox в SQLite версии 4, доставка через `notify.Sink`; `SIGINT`/`SIGTERM` — штатная остановка. | 0 — штатная остановка; 1 — ошибка |
+| `vpnctl alerts list --config PATH [--format text|json]` | Состояния, активные mute, `pending`/`expired` outbox и до 20 открытых записей. | 0; 1 — ошибка конфигурации/базы |
+| `vpnctl alerts mute --config PATH --rule NAME [--until RFC3339]` | Окно mute (по умолчанию 24h); состояние продолжает записываться, уведомления подавлены. | 0; 1 — ошибка; 2 — неверные аргументы |
+| `metrics`/`alerts`: неверные флаги, отсутствие обязательных путей | Описание использования в stderr. | 2 |
 | Неизвестная команда, лишние аргументы, нет `--config` | Описание использования в stderr. | 2 |
 
 
@@ -96,6 +106,13 @@ bot:
     - id: 100000002
       role: viewer
   chat_ids: [-1000000000001]
+metrics:
+  endpoint: https://metrics.example.com/select/0/prometheus
+  token_env: VPNCTL_METRICS_TOKEN
+  timeout: 10s
+  interval: 60s
+alerts:
+  state_db: alerts.db
 ```
 
 ## Правила проверки
@@ -127,13 +144,19 @@ bot:
 | `bot.state_db` | Обязательно; путь к SQLite-базе с offset и обработанными `update_id`. |
 | `bot.operators` | Непустой список; `id` — положительный уникальный числовой Telegram user ID, `role` — `admin` или `viewer`. |
 | `bot.chat_ids` | Необязательно; ненулевые уникальные chat ID, которым разрешены ответы в не-private чатах. |
+| `metrics` | Необязательно. Нужна `metrics check\|run`. `endpoint` — только `https`, с хостом, без userinfo/query/fragment; путь сохраняется. |
+| `metrics.token_env` | Необязательно; имя переменной окружения с bearer-токеном, не значение. |
+| `metrics.timeout`, `metrics.interval` | Положительные Go-длительности; по умолчанию `10s` и `60s`. |
+| `alerts` | Необязательно. Нужна `metrics run` и `alerts list\|mute`; `state_db` обязателен при наличии секции. |
+| `alerts.grace`, `flap_samples`, `retention`, `outbox_max_age`, `retry_base`, `retry_max`, `max_attempts`, `jitter`, `scope` | Необязательные параметры политики; defaults и границы — в [METRICS_ALERTS.md](../docs/METRICS_ALERTS.md). |
 
 ## Почему в конфигурации только имена переменных токенов
 
 Конфигурация должна быть безопасна для хранения, ревью и передачи: в ней нет
-секретов. Поэтому `panel.token_env` и `bot.token_env` содержат **имена**
-переменных окружения (например, `VPNCTL_PANEL_TOKEN`, `VPNCTL_BOT_TOKEN`), а не
-значения токенов. Шаблон имени отвергает типичные значения токенов (строчные
+секретов. Поэтому `panel.token_env`, `bot.token_env` и необязательный
+`metrics.token_env` содержат **имена** переменных окружения (например,
+`VPNCTL_PANEL_TOKEN`, `VPNCTL_BOT_TOKEN`, `VPNCTL_METRICS_TOKEN`), а не значения
+токенов. Шаблон имени отвергает типичные значения токенов (строчные
 буквы, `-`, `.`), а поля `token` в схеме нет, и оно отклоняется как неизвестное.
 Userinfo в `panel.url` и `bot.api_base` запрещено по той же причине и не
 повторяется в сообщении об ошибке. Значения токенов читает из окружения

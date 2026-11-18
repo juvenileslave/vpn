@@ -2,11 +2,13 @@
 
 Пакет `vpnctl/internal/store` — локальное SQLite-хранилище из задачи 5.2
 [архитектурного плана](ARCHITECTURE_PLAN.md): история проб, метаданные
-возобновляемых операций и состояние Telegram-бота (offset и обработанные
-`update_id`). Это библиотека без собственной команды CLI. Пакет используют
-`vpnctl bot`, `probe ladder`, `diagnose` и тесты; воркер, планировщик, очередь и облачная оркестрация (в том
-числе смена IP) здесь не реализованы. Версии конфигов апстримов из пункта 5.2 в
-эту поставку не входят.
+возобновляемых операций, состояние Telegram-бота (offset и обработанные
+`update_id`) и состояние alert-воркера (переходы, outbox, mute, run lock).
+Это библиотека без собственной команды CLI. Пакет используют
+`vpnctl bot`, `probe ladder`, `diagnose`, `vpnctl metrics run`,
+`vpnctl alerts list|mute` и тесты; облачная оркестрация (в том числе смена IP)
+здесь не реализована. Версии конфигов апстримов из пункта 5.2 в эту поставку
+не входят. Семантика алертов — [METRICS_ALERTS.md](METRICS_ALERTS.md).
 
 ## Драйвер и подключение
 
@@ -46,6 +48,12 @@ op, err = s.UpdateOperation(ctx, op.ID, op.Revision, store.StateRunning, "create
 
 offset, err := s.BotOffset(ctx)                          // 0, если бот ещё не работал
 claimed, err := s.ClaimBotUpdate(ctx, 12345)             // false для дубликата
+
+st, err := s.GetAlertState(ctx, "node-cpu-busy")         // ErrNotFound до первого наблюдения
+states, err := s.ListAlertStates(ctx)
+st, inserted, err := s.CommitAlertTransition(ctx, revision, next, outbox)
+mutes, err := s.ListAlertMutes(ctx)
+pending, expired, err := s.AlertOutboxStatus(ctx, now)
 ```
 
 Все чтения и записи принимают `context.Context`; отменённый контекст прерывает
@@ -173,7 +181,7 @@ pending ──► running ──► succeeded
 ## Схема и миграции
 
 Версия схемы хранится в `PRAGMA user_version`, принадлежность файла — в
-`PRAGMA application_id = 0x76706e63` (`vpnc`). Текущая версия — 3.
+`PRAGMA application_id = 0x76706e63` (`vpnc`). Текущая версия — 4.
 
 ```text
 probes(id INTEGER PK AUTOINCREMENT, target, stage, family, outcome,
@@ -186,6 +194,18 @@ operations(id TEXT PK, kind, state, step, revision >= 1,
            created_at INTEGER ns UTC, updated_at INTEGER ns UTC)    STRICT
 telegram_offsets(id INTEGER PK CHECK (id = 1), update_offset >= 0)  STRICT
 telegram_updates(update_id INTEGER PK > 0)                          STRICT
+alert_states(rule TEXT PK, state ok|firing|unknown, severity,
+             comparison, value REAL, threshold REAL, labels JSON,
+             fingerprint SHA-256, since, last_change, revision,
+             pending_state, pending_since, pending_samples,
+             missing_since)                                         STRICT
+alert_outbox(id INTEGER PK AUTOINCREMENT, rule, event, fingerprint,
+             dedupe_key UNIQUE, severity, message, created_at,
+             attempts, next_attempt_at, claimed_until, delivered_at,
+             abandoned_at, expires_at)                              STRICT
+  index alert_outbox_due(delivered_at, abandoned_at, next_attempt_at, id)
+alert_mutes(rule TEXT PK, until)                                     STRICT
+alert_runs(id INTEGER PK CHECK (id = 1), owner, expires_at)          STRICT
 ```
 
 Версия 2 добавляет `telegram_offsets` и `telegram_updates`; существующие базы
@@ -197,6 +217,13 @@ telegram_updates(update_id INTEGER PK > 0)                          STRICT
 переклассифицируются в авторизованные. Для probe-истории используйте отдельный
 локальный файл: она не обязана обновлять рабочую базу бота.
 
+Версия 4 только создаёт таблицы алертов (`alert_states`, `alert_outbox`,
+`alert_mutes`, `alert_runs`). Строки и схема версий 1–3 не меняются: пробы,
+операции и Telegram offset остаются доступными без переклассификации. Таблицы
+алертов можно держать в той же базе или в отдельном файле, указанном в
+`alerts.state_db`; alert-воркер использует только их. Семантика состояний,
+очереди и блокировок описана в [METRICS_ALERTS.md](METRICS_ALERTS.md).
+
 Столбцы дополнительно ограничены `CHECK` (допустимые значения и длины).
 
 - Каждая миграция и запись новой `user_version` выполняются в одной транзакции:
@@ -207,10 +234,11 @@ telegram_updates(update_id INTEGER PK > 0)                          STRICT
 - База с версией новее поддерживаемой отклоняется (`ErrUnsupportedSchema`) без
   изменений: откат бинарника не может открыть базу, обновлённую новой версией.
 
-Откат к бинарнику до версии 3 не понижает базу: старый бинарник отклонит её как
-`ErrUnsupportedSchema`. Сохраняйте probe-записи и совместимый reader либо
-закрытую pre-upgrade backup отдельно; автоматического удаления новых столбцов
-или данных нет. Revert PR кода не является downgrade внешнего SQLite-файла.
+Откат к бинарнику до версии 4 не понижает базу: старый бинарник отклонит её как
+`ErrUnsupportedSchema`. Сохраняйте probe-записи, alert-состояние и совместимый
+reader либо закрытую pre-upgrade backup отдельно; автоматического удаления
+новых столбцов или данных нет. Revert PR кода не является downgrade внешнего
+SQLite-файла.
 
 ### Существующие файлы и владение при ошибке
 
@@ -261,13 +289,14 @@ telegram_updates(update_id INTEGER PK > 0)                          STRICT
 Тесты используют настоящие временные базы SQLite в `t.TempDir()` — без моков и
 без проверок текста SQL — и покрывают: сохранение после закрытия и повторного
 открытия, изоляцию баз, порядок и лимиты проб, отсутствующие ID, откат
-неудачной миграции, миграции 1 → 2 → 3 с сохранением строк, scoped identities и отклонение
-устаревшей ревизии, конкурирующих писателей (одна успешная запись),
-неизменность терминальных состояний, монотонность bot offset, одновременный
-claim одного `update_id` (ровно один победитель), retention обработанных ID,
-посторонние и повреждённые файлы, сохранение чужих `-wal`/`-shm`/`-journal` при
-неудачном открытии (в том числе с отменённым контекстом), инъекцию параметров
-через путь.
+неудачной миграции, миграции 1 → 2 → 3 → 4 с сохранением строк, scoped
+identities и отклонение устаревшей ревизии, конкурирующих писателей (одна
+успешная запись), неизменность терминальных состояний, монотонность bot offset,
+одновременный claim одного `update_id` (ровно один победитель), retention
+обработанных ID, переходы и ревизии alert-состояния, дедупликацию outbox,
+порядок выдачи, claim/backoff/abandon/expiry, mute и run lock, посторонние и
+повреждённые файлы, сохранение чужих `-wal`/`-shm`/`-journal` при неудачном
+открытии (в том числе с отменённым контекстом), инъекцию параметров через путь.
 
 ```sh
 cd vpnctl

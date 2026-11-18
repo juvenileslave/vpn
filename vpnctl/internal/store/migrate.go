@@ -60,6 +60,53 @@ var migrations = []migration{
 		`ALTER TABLE probes ADD COLUMN body_duration_ns INTEGER NOT NULL DEFAULT 0 CHECK (body_duration_ns >= 0)`,
 		`ALTER TABLE probes ADD COLUMN throughput_floor INTEGER NOT NULL DEFAULT 0 CHECK (throughput_floor BETWEEN 0 AND 1000000000000)`,
 	),
+	// Version 4: stateful metric alerts. Only new tables are created, so every
+	// probe, operation and Telegram row from versions 1-3 is preserved.
+	execAll(
+		`CREATE TABLE alert_states (
+			rule            TEXT    PRIMARY KEY CHECK (length(rule) BETWEEN 1 AND 64),
+			state           TEXT    NOT NULL CHECK (state IN ('ok', 'firing', 'unknown')),
+			severity        TEXT    NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
+			comparison      TEXT    NOT NULL CHECK (comparison IN ('', '>', '>=', '<', '<=', '==', '!=')),
+			value           REAL    NOT NULL,
+			threshold       REAL    NOT NULL,
+			labels          TEXT    NOT NULL CHECK (length(labels) <= 4096),
+			fingerprint     TEXT    NOT NULL CHECK (length(fingerprint) = 64),
+			since           INTEGER NOT NULL CHECK (since > 0),
+			last_change     INTEGER NOT NULL CHECK (last_change > 0),
+			revision        INTEGER NOT NULL CHECK (revision >= 1),
+			pending_state   TEXT    NOT NULL CHECK (pending_state IN ('', 'firing', 'unknown')),
+			pending_since   INTEGER NOT NULL DEFAULT 0 CHECK (pending_since >= 0),
+			pending_samples INTEGER NOT NULL DEFAULT 0 CHECK (pending_samples >= 0),
+			missing_since   INTEGER NOT NULL DEFAULT 0 CHECK (missing_since >= 0)
+		) STRICT`,
+		`CREATE TABLE alert_outbox (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			rule           TEXT    NOT NULL CHECK (length(rule) BETWEEN 1 AND 64),
+			event          TEXT    NOT NULL CHECK (event IN ('firing', 'recovery', 'unknown', 'removed')),
+			fingerprint    TEXT    NOT NULL CHECK (length(fingerprint) = 64),
+			dedupe_key     TEXT    NOT NULL UNIQUE CHECK (length(dedupe_key) BETWEEN 1 AND 128),
+			severity       TEXT    NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
+			message        TEXT    NOT NULL CHECK (length(message) BETWEEN 1 AND 4096),
+			created_at     INTEGER NOT NULL CHECK (created_at > 0),
+			attempts       INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+			next_attempt_at INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at >= 0),
+			claimed_until  INTEGER NOT NULL DEFAULT 0 CHECK (claimed_until >= 0),
+			delivered_at   INTEGER NOT NULL DEFAULT 0 CHECK (delivered_at >= 0),
+			abandoned_at   INTEGER NOT NULL DEFAULT 0 CHECK (abandoned_at >= 0),
+			expires_at     INTEGER NOT NULL CHECK (expires_at > 0)
+		) STRICT`,
+		`CREATE INDEX alert_outbox_due ON alert_outbox (delivered_at, abandoned_at, next_attempt_at, id)`,
+		`CREATE TABLE alert_mutes (
+			rule  TEXT    PRIMARY KEY CHECK (length(rule) BETWEEN 1 AND 64),
+			until INTEGER NOT NULL CHECK (until > 0)
+		) STRICT`,
+		`CREATE TABLE alert_runs (
+			id         INTEGER PRIMARY KEY CHECK (id = 1),
+			owner      TEXT    NOT NULL CHECK (length(owner) BETWEEN 1 AND 64),
+			expires_at INTEGER NOT NULL CHECK (expires_at > 0)
+		) STRICT`,
+	),
 }
 
 func execAll(statements ...string) migration {

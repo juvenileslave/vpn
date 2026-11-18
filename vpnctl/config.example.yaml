@@ -38,3 +38,29 @@ bot:
       role: viewer
   # Необязательные явно разрешённые не-private чаты (например, группа).
   chat_ids: [-1000000000001]
+
+# Необязательная секция для `vpnctl metrics check|run`. Нужна только этим
+# командам. Токен не хранится: token_env — имя переменной окружения с
+# bearer-токеном, если VictoriaMetrics закрыта авторизацией.
+metrics:
+  # HTTPS API root; путь сохраняется (prefix /select/0/prometheus).
+  endpoint: https://metrics.example.com/select/0/prometheus
+  # token_env: VPNCTL_METRICS_TOKEN
+  timeout: 10s
+  # Период опроса для `metrics run` по умолчанию — 1m.
+  interval: 60s
+
+# Необязательная секция с состоянием alert-воркера. state_db — локальная
+# SQLite-база со схемой версии 4; родительский каталог должен существовать.
+alerts:
+  state_db: alerts.db
+  # Необязательные параметры; значения ниже совпадают с defaults.
+  grace: 5m
+  flap_samples: 2
+  retention: 24h
+  outbox_max_age: 1h
+  retry_base: 30s
+  retry_max: 10m
+  max_attempts: 5
+  jitter: 10s
+  scope: metrics

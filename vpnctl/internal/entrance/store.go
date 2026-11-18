@@ -19,7 +19,7 @@ const (
 )
 
 // AppendGate records the entrance decision as one unscoped probe row bound to
-// the node label, address family and evaluation time. Schema version 3 allows
+// the node label, address family and evaluation time. The schema allows
 // ladder context only on run-scoped rows, so this marker deliberately carries
 // no identities or vantage labels; the evidence it summarizes remains in the
 // ladder rows, and the full scope is printed by the CLI. A store failure is
