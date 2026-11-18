@@ -44,9 +44,11 @@ func AppendRun(ctx context.Context, database *store.Store, report *RunReport) er
 }
 
 // ReadRuns reconstructs metadata only. Legacy primitives and Globalping HTTP
-// remain distinct evidence, not substitute REALITY/VLESS handshakes.
+// remain distinct evidence, not substitute REALITY/VLESS handshakes. The
+// bounded window contains only run-scoped ladder rows, so gate/rotation
+// markers cannot evict evidence or force a permanent truncated result.
 func ReadRuns(ctx context.Context, database *store.Store, node string) ([]RunReport, bool, error) {
-	records, err := database.LatestProbes(ctx, node, store.MaxLimit)
+	records, err := database.LatestLadderProbes(ctx, node, store.MaxLimit)
 	if err != nil {
 		return nil, false, shortError("store_read_failed")
 	}

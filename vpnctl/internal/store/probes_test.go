@@ -89,6 +89,48 @@ func TestLatestProbesOrderingAndLimit(t *testing.T) {
 	}
 }
 
+func TestLatestLadderProbesExcludesMarkersAndGlobalping(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+
+	marker := probeAt("exit-01", 1)
+	marker.Stage = "entrance_gate"
+	if _, err := s.AppendProbe(ctx, marker); err != nil {
+		t.Fatal(err)
+	}
+
+	http := probeAt("exit-01", 2)
+	http.Stage, http.RunID = "globalping_http", strings.Repeat("a", 32)
+	http.Vantage, http.Network, http.VantageKind, http.Scope = "global", "global", "external_http", "external_http"
+	http.EndpointIdentity, http.ConfigIdentity, http.SNIIdentity =
+		strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
+	if _, err := s.AppendProbe(ctx, http); err != nil {
+		t.Fatal(err)
+	}
+
+	ladder := probeAt("exit-01", 3)
+	ladder.Stage, ladder.RunID = "tcp", strings.Repeat("e", 32)
+	ladder.Vantage, ladder.Network, ladder.VantageKind, ladder.Scope = "ru-wifi", "ru-net", "in_country", "node_path"
+	ladder.EndpointIdentity, ladder.ConfigIdentity, ladder.SNIIdentity =
+		strings.Repeat("f", 64), strings.Repeat("1", 64), strings.Repeat("2", 64)
+	ladderRecord, err := s.AppendProbe(ctx, ladder)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := s.LatestProbes(ctx, "exit-01", MaxLimit)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("all probes = %d, %v; want 3", len(all), err)
+	}
+	ladderOnly, err := s.LatestLadderProbes(ctx, "exit-01", MaxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ladderOnly) != 1 || ladderOnly[0].ID != ladderRecord.ID {
+		t.Fatalf("ladder probes = %+v, want only record %d", ladderOnly, ladderRecord.ID)
+	}
+}
+
 func TestAppendProbeRoundTripsFields(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTemp(t)

@@ -188,6 +188,11 @@ func (r LadderRequest) identities() (endpoint, config, sni string) {
 	return endpoint, identity(strings.Join(parts, "\x00")), identity(r.ServerName)
 }
 
+// Valid reports whether v carries bounded labels and a known vantage kind.
+// It validates the declared label only; it does not prove the network's
+// geography or independence.
+func (v Vantage) Valid() bool { return v.valid() }
+
 func (v Vantage) valid() bool {
 	if !labelPattern.MatchString(v.Name) || !labelPattern.MatchString(v.Network) {
 		return false

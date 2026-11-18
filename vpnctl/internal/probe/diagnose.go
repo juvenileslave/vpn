@@ -349,6 +349,23 @@ func completeStages(report RunReport) (stageSet, bool) {
 	return stages, true
 }
 
+// AcceptedStages returns the stage events of one recorded ladder attempt keyed
+// by stage and reports whether that attempt is complete and internally
+// consistent enough to compare. It performs no network, clock or store access,
+// so consumers of recorded evidence share the same acceptance rules as
+// Classify.
+func (r RunReport) AcceptedStages() (map[Stage]Event, bool) {
+	stages, ok := completeStages(r)
+	if !ok {
+		return nil, false
+	}
+	result := make(map[Stage]Event, len(stages))
+	for stage, event := range stages {
+		result[stage] = event
+	}
+	return result, true
+}
+
 func healthy(stages stageSet) bool {
 	for _, stage := range ladderStages {
 		if stages[stage].Outcome != OutcomeSuccess {
