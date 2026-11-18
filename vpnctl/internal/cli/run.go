@@ -29,6 +29,10 @@ const usage = `usage:
   vpnctl probe ladder --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH --xray PATH [--format text|json]
   vpnctl diagnose --node NAME [--family ipv4|ipv6] --inputs PATH --store PATH [--format text|json]
   vpnctl panel [plan|show|apply] --config PATH --bundle MANIFEST --objects PATH [--ca-file PATH] [--apply]
+  vpnctl metrics check --config PATH --rules PATH [--format text|json]
+  vpnctl metrics run --config PATH --rules PATH
+  vpnctl alerts list --config PATH [--format text|json]
+  vpnctl alerts mute --config PATH --rule NAME [--until RFC3339]
 `
 
 // Exit codes returned by Run.
@@ -62,6 +66,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runDiagnosisCommand(args[1:], stdout, stderr, false)
 	case "panel":
 		return runPanel(args[1:], stdout, stderr)
+	case "metrics", "alerts":
+		return runMetricsCommand(args[0], args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitOK

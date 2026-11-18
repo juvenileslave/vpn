@@ -379,3 +379,114 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatalf("error = %v, want os.ErrNotExist", err)
 	}
 }
+
+const observabilityYAML = `metrics:
+  endpoint: https://metrics.example.com/select/0/prometheus
+  token_env: VPNCTL_METRICS_TOKEN
+  timeout: 3s
+  interval: 30s
+alerts:
+  state_db: alerts.db
+  grace: 2m
+  flap_samples: 3
+  retention: 12h
+  outbox_max_age: 30m
+  retry_base: 10s
+  retry_max: 5m
+  max_attempts: 4
+  jitter: 5s
+  scope: prod_vm
+`
+
+func TestMetricsAndAlertsSections(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validYAML+observabilityYAML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metrics == nil || cfg.Alerts == nil {
+		t.Fatalf("sections = %+v, %+v", cfg.Metrics, cfg.Alerts)
+	}
+	if got := cfg.Metrics.Endpoint.String(); got != "https://metrics.example.com/select/0/prometheus" {
+		t.Errorf("endpoint = %q", got)
+	}
+	if cfg.Metrics.TokenEnv != "VPNCTL_METRICS_TOKEN" || cfg.Metrics.Timeout != 3*time.Second || cfg.Metrics.Interval != 30*time.Second {
+		t.Errorf("metrics = %+v", cfg.Metrics)
+	}
+	want := Alerts{
+		StateDB:      "alerts.db",
+		Grace:        2 * time.Minute,
+		FlapSamples:  3,
+		Retention:    12 * time.Hour,
+		OutboxMaxAge: 30 * time.Minute,
+		RetryBase:    10 * time.Second,
+		RetryMax:     5 * time.Minute,
+		MaxAttempts:  4,
+		Jitter:       5 * time.Second,
+		Scope:        "prod_vm",
+	}
+	if *cfg.Alerts != want {
+		t.Errorf("alerts = %+v, want %+v", *cfg.Alerts, want)
+	}
+}
+
+func TestMetricsAndAlertsDefaults(t *testing.T) {
+	content := validYAML + "metrics:\n  endpoint: https://metrics.example.com\nalerts:\n  state_db: alerts.db\n"
+	cfg, err := Load(writeConfig(t, content))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metrics.Timeout != DefaultMetricsTimeout || cfg.Metrics.Interval != DefaultMetricsInterval {
+		t.Errorf("metrics defaults = %+v", cfg.Metrics)
+	}
+	want := Alerts{
+		StateDB:      "alerts.db",
+		Grace:        DefaultAlertGrace,
+		FlapSamples:  DefaultAlertFlap,
+		Retention:    DefaultAlertRetention,
+		OutboxMaxAge: DefaultOutboxMaxAge,
+		RetryBase:    DefaultRetryBase,
+		RetryMax:     DefaultRetryMax,
+		MaxAttempts:  DefaultMaxAttempts,
+		Jitter:       DefaultAlertJitter,
+		Scope:        DefaultAlertScope,
+	}
+	if *cfg.Alerts != want {
+		t.Errorf("alerts = %+v, want %+v", *cfg.Alerts, want)
+	}
+}
+
+func TestMetricsAndAlertsValidationErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		replace  string
+		with     string
+		wantPath string
+	}{
+		{"missing metrics endpoint", "  endpoint: https://metrics.example.com/select/0/prometheus\n", "", "metrics.endpoint"},
+		{"http metrics endpoint", "endpoint: https://metrics.example.com", "endpoint: http://metrics.example.com", "metrics.endpoint"},
+		{"metrics userinfo", "endpoint: https://metrics.example.com", "endpoint: https://user:secret@metrics.example.com", "metrics.endpoint"},
+		{"metrics query", "endpoint: https://metrics.example.com", "endpoint: https://metrics.example.com?x=1", "metrics.endpoint"},
+		{"lowercase metrics token env", "token_env: VPNCTL_METRICS_TOKEN", "token_env: vpnctl_metrics_token", "metrics.token_env"},
+		{"metrics timeout without unit", "timeout: 3s", "timeout: 3", "metrics.timeout"},
+		{"missing alerts state db", "  state_db: alerts.db\n", "", "alerts.state_db"},
+		{"zero flap samples", "flap_samples: 3", "flap_samples: 0", "alerts.flap_samples"},
+		{"zero max attempts", "max_attempts: 4", "max_attempts: 0", "alerts.max_attempts"},
+		{"retry inversion", "retry_max: 5m", "retry_max: 1s", "alerts.retry_max"},
+		{"invalid scope", "scope: prod_vm", "scope: Prod VM", "alerts.scope"},
+		{"jitter above interval", "jitter: 5s", "jitter: 2m", "alerts.jitter"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := validYAML + observabilityYAML
+			if !strings.Contains(content, tt.replace) {
+				t.Fatalf("observabilityYAML does not contain %q", tt.replace)
+			}
+			content = strings.Replace(content, tt.replace, tt.with, 1)
+			_, err := Load(writeConfig(t, content))
+			paths := problemPaths(t, err)
+			if len(paths) != 1 || paths[0] != tt.wantPath {
+				t.Fatalf("problem paths = %q, want [%q]; error:\n%v", paths, tt.wantPath, err)
+			}
+		})
+	}
+}
