@@ -233,16 +233,24 @@ func renderEntrance(output io.Writer, result entranceOutput, format string) erro
 			return err
 		}
 		if _, err := fmt.Fprintf(output,
-			"  scope: window=%s..%s ru_vantages=%v independent_ru_networks=%d required=%d ru_verified=%t global=%t\n",
+			"  scope: window=%s..%s ru_vantages=%v independent_ru_networks=%d required=%d ru_verified=%t truncated=%t\n",
 			gate.Scope.From.Format(time.RFC3339Nano), gate.Scope.To.Format(time.RFC3339Nano),
 			gate.Scope.RUVantages, gate.Scope.IndependentRUNetworks, gate.Scope.RequiredRUVantages,
-			gate.Scope.RUVantageVerified, gate.Scope.Global); err != nil {
+			gate.Scope.RUVantageVerified, gate.Scope.QueryTruncated); err != nil {
 			return err
 		}
 		for _, vantage := range gate.Vantages {
-			if _, err := fmt.Fprintf(output, "  vantage=%s network=%s kind=%s state=%s class=%s code=%s at=%s\n",
+			if _, err := fmt.Fprintf(output, "  vantage=%s network=%s kind=%s state=%s class=%s code=%s",
 				vantage.Vantage.Name, vantage.Vantage.Network, vantage.Vantage.Kind, vantage.State,
-				vantage.FailureClass, vantage.FailureCode, vantage.ObservedAt.Format(time.RFC3339Nano)); err != nil {
+				vantage.FailureClass, vantage.FailureCode); err != nil {
+				return err
+			}
+			if !vantage.ObservedAt.IsZero() {
+				if _, err := fmt.Fprintf(output, " at=%s", vantage.ObservedAt.Format(time.RFC3339Nano)); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(output); err != nil {
 				return err
 			}
 			for _, stage := range vantage.Stages {
@@ -276,11 +284,6 @@ func renderEntrance(output io.Writer, result entranceOutput, format string) erro
 			if _, err := fmt.Fprintf(output, "  rollback/%s: %s — %s\n", step.Kind, step.Status, step.Detail); err != nil {
 				return err
 			}
-		}
-	}
-	if result.ErrorCode != "" {
-		if _, err := fmt.Fprintf(output, "error_code: %s\n", result.ErrorCode); err != nil {
-			return err
 		}
 	}
 	return nil

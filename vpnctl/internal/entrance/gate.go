@@ -90,9 +90,6 @@ const (
 	// ReasonContradictoryEvidence means two fresh accepted runs for one vantage
 	// disagree on stage outcomes or a run is dated in the future.
 	ReasonContradictoryEvidence = "contradictory_evidence"
-	// ReasonQueryTruncated means the store query hit its row limit, so older
-	// evidence cannot be ruled out.
-	ReasonQueryTruncated = "query_truncated"
 	// ReasonInvalidEvidencePlan means the comparison plan itself is malformed.
 	ReasonInvalidEvidencePlan = "invalid_evidence_plan"
 )
@@ -114,7 +111,7 @@ type Scope struct {
 	IndependentRUNetworks int             `json:"independent_ru_networks"`
 	RequiredRUVantages    int             `json:"required_ru_vantages"`
 	RUVantageVerified     bool            `json:"ru_vantage_verified"`
-	Global                bool            `json:"global"`
+	QueryTruncated        bool            `json:"query_truncated"`
 }
 
 // VantageResult is the per-vantage contribution to the gate. A missing or
@@ -159,6 +156,7 @@ type Gate struct {
 
 var (
 	labelPattern  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
+	printPattern  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$`)
 	digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
@@ -182,6 +180,7 @@ type vantageEvidence struct {
 	accepted  bool
 	client    bool
 	invalid   string
+	invalidAt time.Time
 	conflict  bool
 	signature string
 }
@@ -201,7 +200,7 @@ func Evaluate(plan probe.DiagnosisPlan, reports []probe.RunReport) Gate {
 		State: StateUnknown, Usable: false, Reason: ReasonInsufficientEvidence,
 		Scope: Scope{Target: plan.Target, Family: plan.Family,
 			Vantages: make([]probe.Vantage, 0), RUVantages: make([]string, 0),
-			RequiredRUVantages: RequiredIndependentVantages, Global: false},
+			RequiredRUVantages: RequiredIndependentVantages, QueryTruncated: plan.QueryTruncated},
 		Vantages: make([]VantageResult, 0), MissingEvidence: make([]string, 0),
 	}
 	missing := func(code string) { gate.MissingEvidence = append(gate.MissingEvidence, code) }
@@ -215,10 +214,9 @@ func Evaluate(plan probe.DiagnosisPlan, reports []probe.RunReport) Gate {
 	}
 	gate.Scope.From = plan.Now.Add(-plan.Window)
 	gate.Scope.To = plan.Now
-	if plan.QueryTruncated {
-		missing(ReasonQueryTruncated)
-		return unknown(ReasonQueryTruncated)
-	}
+	// Truncation drops only the oldest stored rows. The newest run for every
+	// vantage is still present, so it is a diagnostic and never replaces a
+	// fresh complete evaluation with a permanent unknown.
 
 	declared := make(map[string]probe.Vantage, len(plan.Vantages))
 	ruOrder := make([]string, 0, len(plan.Vantages))
@@ -257,7 +255,7 @@ func Evaluate(plan probe.DiagnosisPlan, reports []probe.RunReport) Gate {
 		}
 		stages, accepted := report.AcceptedStages()
 		if at.After(plan.Now) {
-			state.invalid = ReasonContradictoryEvidence
+			state.invalid, state.invalidAt = ReasonContradictoryEvidence, at
 			continue
 		}
 		if accepted {
@@ -270,8 +268,8 @@ func Evaluate(plan probe.DiagnosisPlan, reports []probe.RunReport) Gate {
 		if !accepted {
 			if clientEvidence(report) {
 				state.client = true
-			} else if state.invalid == "" {
-				state.invalid = ReasonInsufficientEvidence
+			} else if !state.accepted || at.After(state.at) {
+				state.invalid, state.invalidAt = ReasonInsufficientEvidence, at
 			}
 			continue
 		}
@@ -282,6 +280,9 @@ func Evaluate(plan probe.DiagnosisPlan, reports []probe.RunReport) Gate {
 		signatures[vantage.Name][signature] = true
 		if !state.accepted || at.After(state.at) {
 			state.at, state.stages, state.accepted, state.signature = at, stages, true, signature
+			if state.invalid != "" && !at.Before(state.invalidAt) {
+				state.invalid = ""
+			}
 		}
 	}
 
@@ -387,16 +388,20 @@ func Evaluate(plan probe.DiagnosisPlan, reports []probe.RunReport) Gate {
 
 // validPlan rejects a malformed comparison plan without touching any store.
 func validPlan(plan probe.DiagnosisPlan) bool {
-	if !labelPattern.MatchString(plan.Target) || (plan.Family != probe.IPv4 && plan.Family != probe.IPv6) ||
+	if !labelPattern.MatchString(plan.Target) || !printPattern.MatchString(plan.Target) ||
+		(plan.Family != probe.IPv4 && plan.Family != probe.IPv6) ||
 		!digestPattern.MatchString(plan.EndpointIdentity) || !digestPattern.MatchString(plan.ConfigIdentity) ||
 		!digestPattern.MatchString(plan.SNIIdentity) || plan.Now.IsZero() ||
 		plan.Window <= 0 || plan.Window > 30*time.Minute || plan.ThroughputFloor <= 0 ||
 		len(plan.Vantages) == 0 || len(plan.Vantages) > 16 {
 		return false
 	}
-	seen := make(map[string]bool, len(plan.Vantages))
+	seen := make(map[string]bool)
 	for _, vantage := range plan.Vantages {
-		if !vantage.Valid() || seen[vantage.Name] {
+		// Labels are echoed verbatim. Refuse dotted labels so an operator
+		// cannot accidentally print an IPv4 address or DNS name as a label.
+		if !vantage.Valid() || !printPattern.MatchString(vantage.Name) ||
+			!printPattern.MatchString(vantage.Network) || seen[vantage.Name] {
 			return false
 		}
 		seen[vantage.Name] = true

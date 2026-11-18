@@ -48,8 +48,17 @@ Gate принимает только **принятые** ladder-попытки:
 - `transfer_small` — ровно 1 MiB с exact size и SHA-256;
 - `throughput` — ровно 20 MiB с exact size и SHA-256.
 
+Неполная/непринятая *старая* попытка не перекрывает более новую принятую
+попытку той же точки: решение использует самую новую принятую попытку, а
+более новая неполная попытка остаётся `insufficient_evidence`. Это позволяет
+границе bounded store window отбросить хвост старой попытки, не превращая
+`clean` в вечный `unknown`.
+
 В store попадают только стадии, outcome/error codes, размеры и длительности.
 Адреса, SNI, URL, тела, сертификаты и credentials не сохраняются и не печатаются.
+Labels (`target`, `vantage`, `network`) выводятся в text/JSON как есть, поэтому
+gate отклоняет labels с точкой: IPv4-адрес или DNS-имя нельзя случайно выдать
+за label. Используйте короткие имена без точек (`ru-wifi`, `ru-mobile-net`).
 
 ### RU vantage и независимость
 
@@ -84,8 +93,14 @@ in-country network меньше двух, gate возвращает `unknown`, �
 | `independent_vantage` | — (`unknown`) | clean in-country сетей меньше двух |
 | `uncorroborated_failure` | — (`unknown`) | in-country точка наблюдала отказ входа/выхода, но свежее принятое evidence есть меньше чем от двух независимых in-country сетей |
 | `contradictory_evidence` | — (`unknown`) | свежие принятые попытки одной точки расходятся или датированы будущим |
-| `query_truncated` | — (`unknown`) | store query упёрся в лимит строк; старые противоречия не исключены |
 | `invalid_evidence_plan` | — (`unknown`) | malformed comparison plan |
+
+Усечение bounded store window (`scope.query_truncated=true`) не является
+отдельным вердиктом: запрос возвращает самые новые ladder-строки, а окно
+сравнения ограничено сверху. Отброшенные старые строки не могут добавить
+свежее evidence, поэтому решение принимается по доступным новым попыткам;
+если для объявленной точки свежей полной попытки нет, результат остаётся
+`unknown` (`insufficient_evidence`).
 
 Коды этапов — это наблюдаемые категории, а не доказательство конкретной
 системы фильтрации. `entrance_reality` может означать и неверный
@@ -99,7 +114,9 @@ profile/key/UUID, а `entrance_certificate`/`entrance_cover` — ошибку co
   `xray_start_failed`, `cleanup_failed`, `run_identity_failed`,
   `profile_invalid`) не превращается в отказ входа; такой результат
   объявленной in-country точки делает gate `unknown` (`client_failure`), а не
-  `clean`;
+  `clean`. Отказ pinned core/profile до первого записанного stage не создаёт
+  run-строк в store, поэтому такая попытка видна как отсутствие evidence
+  (`insufficient_evidence`), а не как `client_failure`;
 - отказ входа одной in-country точки важнее exit-отказа другой, но сам gate
   сообщает `failed` только когда свежее принятое evidence есть минимум от двух
   независимых in-country сетей; иначе `uncorroborated_failure` / `unknown`,
@@ -124,9 +141,9 @@ clean evidence от минимум двух независимых in-country с
 
 `scope` содержит целевой label, family, окно, объявленные vantages, список
 in-country labels, число объявленных независимых in-country сетей, требуемое
-число и `ru_vantage_verified`. Сколько из них реально clean, видно из
-per-vantage `state` и `missing_evidence`. `missing_evidence` содержит только
-authored коды и bounded labels.
+число, `ru_vantage_verified` и диагностический `query_truncated`. Сколько из
+них реально clean, видно из per-vantage `state` и `missing_evidence`.
+`missing_evidence` содержит только authored коды и bounded labels.
 
 ## 5. CLI
 
@@ -156,11 +173,13 @@ Exit codes `entrance gate`:
 Gate пишет одну marker-запись в `probes` на каждый запуск: stage
 `entrance_gate`, outcome `success` только для `clean` (при этом `error_code`
 пуст, как требует контракт store), иначе `failure` с reason code. Marker не
-содержит ladder context и не реконструируется как ladder run. Полный `scope`
+содержит ladder context и не реконструируется как ladder run; он также
+исключён из ladder-window (`LatestLadderProbes`). Полный `scope`
 (окно, vantages, число сетей, per-stage facts) доступен в text/JSON-выводе; в
 schema 3 его нельзя сохранить отдельной scoped-записью, не смешав с ladder
-evidence. Схема SQLite не меняется (версия 3); marker-записи используют
-существующие CHECK-констрейнты.
+evidence, поэтому persisted marker хранит только решение и label/family.
+Схема SQLite не меняется (версия 3); marker-записи используют существующие
+CHECK-констрейнты.
 
 ## 6. План ротации входа
 
@@ -250,9 +269,13 @@ Rollback не меняет DNS, firewall или publication автоматиче
   измеряет географию и не обнаруживает две точки за одним NAT/оператором.
 - Gate не хранит certificate details; TLS verification выполняется во время
   ladder, а gate использует принятые stage outcomes и opaque SNI identity.
-- Marker-записи gate/rotation лежат в `probes` и учитываются в лимите
-  `LatestProbes` (1000 строк). Частые запуски сокращают глубину ladder-окна;
-  это осознанная цена persistence без миграции.
+- Marker-записи gate/rotation и Globalping HTTP-строки не входят в
+  ladder-window: `ReadRuns` читает только run-scoped non-HTTP наблюдения.
+  Окно ограничено `MaxLimit` (1000 ladder-строк на target); при переполнении
+  отбрасываются самые старые строки, а `scope.query_truncated` становится
+  диагностическим `true`. Свежие попытки по-прежнему оцениваются; если для
+  объявленной точки в окне нет полной свежей попытки, результат `unknown`.
+  Marker-строки больше не могут сами приблизить этот предел.
 - `clean` — необходимое, но не достаточное условие публикации: exit-качество,
   панель и клиентские конфигурации проверяются отдельно.
 - Ложный `clean` опубликует недоступный вход; ложный `failed` скроет здоровый

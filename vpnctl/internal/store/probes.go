@@ -142,19 +142,31 @@ func (s *Store) AppendProbe(ctx context.Context, r ProbeRecord) (ProbeRecord, er
 // Ties on ObservedAt are ordered by descending ID. limit must be from 1
 // through MaxLimit.
 func (s *Store) LatestProbes(ctx context.Context, target string, limit int) ([]ProbeRecord, error) {
+	return s.latestProbes(ctx, target, limit, "")
+}
+
+// LatestLadderProbes returns up to limit run-scoped, non-HTTP observations for
+// target, newest first. Unscoped decision markers and Globalping HTTP rows
+// cannot consume the bounded ladder window. limit must be from 1 through
+// MaxLimit.
+func (s *Store) LatestLadderProbes(ctx context.Context, target string, limit int) ([]ProbeRecord, error) {
+	return s.latestProbes(ctx, target, limit, ` AND run_id <> '' AND scope <> 'external_http'`)
+}
+
+func (s *Store) latestProbes(ctx context.Context, target string, limit int, filter string) ([]ProbeRecord, error) {
 	if !targetPattern.MatchString(target) {
 		return nil, invalid("probe target must match %s", targetPattern)
 	}
 	if limit < 1 || limit > MaxLimit {
 		return nil, invalid("limit must be from 1 through %d", MaxLimit)
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, target, stage, family, outcome, observed_at, duration_ns, bytes, error_code,
+	query := `SELECT id, target, stage, family, outcome, observed_at, duration_ns, bytes, error_code,
 		 run_id, vantage, network, vantage_kind, scope, endpoint_identity, config_identity, sni_identity,
 		 expected_bytes, body_duration_ns, throughput_floor
-		 FROM probes WHERE target = ?
+		 FROM probes WHERE target = ?` + filter + `
 		 ORDER BY observed_at DESC, id DESC
-		 LIMIT ?`, target, limit)
+		 LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, target, limit)
 	if err != nil {
 		return nil, dbError("query probes", err)
 	}

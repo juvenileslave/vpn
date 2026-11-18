@@ -128,7 +128,7 @@ func TestCleanGateRequiresTwoIndependentRUVantages(t *testing.T) {
 	if gate.State != StateClean || !gate.Usable || gate.Reason != ReasonCleanEntrance {
 		t.Fatalf("gate = %+v", gate)
 	}
-	if gate.Scope.IndependentRUNetworks != 2 || !gate.Scope.RUVantageVerified || gate.Scope.Global {
+	if gate.Scope.IndependentRUNetworks != 2 || !gate.Scope.RUVantageVerified || gate.Scope.QueryTruncated {
 		t.Fatalf("scope = %+v", gate.Scope)
 	}
 	if len(gate.Vantages) != 2 || len(gate.Vantages[0].Stages) != 5 {
@@ -296,7 +296,7 @@ func TestOutsideFailureDoesNotBlockIndependentRUClean(t *testing.T) {
 	}
 }
 
-func TestInvalidPlanAndTruncatedQueryAreUnknown(t *testing.T) {
+func TestInvalidPlanAndTruncatedQuery(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 10, 0, 0, time.UTC)
 	t.Run("invalid", func(t *testing.T) {
 		plan := testPlan([]probe.Vantage{vantage("ru-wifi", "net-a", "in_country")}, now)
@@ -306,14 +306,107 @@ func TestInvalidPlanAndTruncatedQueryAreUnknown(t *testing.T) {
 			t.Fatalf("gate = %+v", gate)
 		}
 	})
-	t.Run("truncated", func(t *testing.T) {
-		plan := testPlan([]probe.Vantage{vantage("ru-wifi", "net-a", "in_country")}, now)
+	t.Run("truncated fresh clean still passes", func(t *testing.T) {
+		plan := testPlan([]probe.Vantage{
+			vantage("ru-wifi", "net-a", "in_country"),
+			vantage("ru-mobile", "net-b", "in_country"),
+		}, now)
 		plan.QueryTruncated = true
-		gate := Evaluate(plan, nil)
-		if gate.State != StateUnknown || gate.Usable || gate.Reason != ReasonQueryTruncated {
+		gate := Evaluate(plan, []probe.RunReport{
+			buildRun(plan.Vantages[0], now.Add(-time.Minute), testIDs(), testRunID, nil),
+			buildRun(plan.Vantages[1], now.Add(-time.Minute), testIDs(), "fedcba9876543210fedcba9876543210", nil),
+		})
+		if gate.State != StateClean || !gate.Usable || !gate.Scope.QueryTruncated {
 			t.Fatalf("gate = %+v", gate)
 		}
 	})
+	t.Run("truncated without evidence is unknown", func(t *testing.T) {
+		plan := testPlan([]probe.Vantage{vantage("ru-wifi", "net-a", "in_country")}, now)
+		plan.QueryTruncated = true
+		gate := Evaluate(plan, nil)
+		if gate.State != StateUnknown || gate.Usable || gate.Reason != ReasonInsufficientEvidence {
+			t.Fatalf("gate = %+v", gate)
+		}
+	})
+}
+
+func TestSameNetworkVantagesAreNotIndependent(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 10, 0, 0, time.UTC)
+	plan := testPlan([]probe.Vantage{
+		vantage("ru-wifi", "ru-shared-net", "in_country"),
+		vantage("ru-mobile", "ru-shared-net", "in_country"),
+	}, now)
+	gate := Evaluate(plan, []probe.RunReport{
+		buildRun(plan.Vantages[0], now.Add(-time.Minute), testIDs(), testRunID, nil),
+		buildRun(plan.Vantages[1], now.Add(-time.Minute), testIDs(), "fedcba9876543210fedcba9876543210", nil),
+	})
+	if gate.State != StateUnknown || gate.Usable || gate.Reason != ReasonIndependentVantage {
+		t.Fatalf("gate = %+v", gate)
+	}
+}
+
+func TestNewerAcceptedRunSupersedesOlderIncompleteRun(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 10, 0, 0, time.UTC)
+	plan := testPlan([]probe.Vantage{
+		vantage("ru-wifi", "net-a", "in_country"),
+		vantage("ru-mobile", "net-b", "in_country"),
+	}, now)
+	gate := Evaluate(plan, []probe.RunReport{
+		incompleteRun(plan.Vantages[0], now.Add(-2*time.Minute), testIDs(), testRunID),
+		buildRun(plan.Vantages[0], now.Add(-time.Minute), testIDs(), testRunID, nil),
+		incompleteRun(plan.Vantages[1], now.Add(-2*time.Minute), testIDs(), "fedcba9876543210fedcba9876543210"),
+		buildRun(plan.Vantages[1], now.Add(-time.Minute), testIDs(), "fedcba9876543210fedcba9876543210", nil),
+	})
+	if gate.State != StateClean || !gate.Usable {
+		t.Fatalf("gate = %+v", gate)
+	}
+}
+
+func TestNewerIncompleteRunBlocksOlderClean(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 10, 0, 0, time.UTC)
+	plan := testPlan([]probe.Vantage{
+		vantage("ru-wifi", "net-a", "in_country"),
+		vantage("ru-mobile", "net-b", "in_country"),
+	}, now)
+	gate := Evaluate(plan, []probe.RunReport{
+		buildRun(plan.Vantages[0], now.Add(-2*time.Minute), testIDs(), testRunID, nil),
+		incompleteRun(plan.Vantages[0], now.Add(-time.Minute), testIDs(), testRunID),
+		buildRun(plan.Vantages[1], now.Add(-2*time.Minute), testIDs(), "fedcba9876543210fedcba9876543210", nil),
+		incompleteRun(plan.Vantages[1], now.Add(-time.Minute), testIDs(), "fedcba9876543210fedcba9876543210"),
+	})
+	if gate.State != StateUnknown || gate.Usable || gate.Reason != ReasonInsufficientEvidence {
+		t.Fatalf("gate = %+v", gate)
+	}
+}
+
+func TestAddressLikeLabelsAreRejected(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 10, 0, 0, time.UTC)
+	tests := map[string]func(*probe.DiagnosisPlan){
+		"IPv4 target":    func(plan *probe.DiagnosisPlan) { plan.Target = "192.0.2.10" },
+		"DNS vantage":    func(plan *probe.DiagnosisPlan) { plan.Vantages[0].Name = "wifi.example.test" },
+		"IPv4 network":   func(plan *probe.DiagnosisPlan) { plan.Vantages[0].Network = "192.0.2.0" },
+		"IPv6 in target": func(plan *probe.DiagnosisPlan) { plan.Target = "2001:db8::1" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			plan := testPlan([]probe.Vantage{
+				vantage("ru-wifi", "net-a", "in_country"),
+				vantage("ru-mobile", "net-b", "in_country"),
+			}, now)
+			mutate(&plan)
+			if gate := Evaluate(plan, nil); gate.State != StateUnknown ||
+				gate.Usable || gate.Reason != ReasonInvalidEvidencePlan {
+				t.Fatalf("gate = %+v", gate)
+			}
+		})
+	}
+}
+
+func incompleteRun(v probe.Vantage, at time.Time, ident ids, runID string) probe.RunReport {
+	report := buildRun(v, at, ident, runID, nil)
+	report.Events = report.Events[:2]
+	report.Complete = false
+	return report
 }
 
 func TestPersistedGateRecordIsScopedByLabelOnly(t *testing.T) {
