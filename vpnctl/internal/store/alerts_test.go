@@ -159,6 +159,9 @@ func TestAlertStatePruningKeepsRulesWithOutboxRows(t *testing.T) {
 	if n, err := s.DeleteAlertStatesMissingBefore(ctx, now.Add(-time.Hour)); err != nil || n != 0 {
 		t.Fatalf("prune with live outbox = %d, %v; want 0", n, err)
 	}
+	if retained, err := s.GetAlertState(ctx, st.Rule); err != nil || retained.Revision != 1 {
+		t.Fatalf("retained state = %+v, %v; want revision 1", retained, err)
+	}
 	if err := s.RecordAlertFailure(ctx, open[0].ID, now, now, true); err != nil {
 		t.Fatal(err)
 	}
