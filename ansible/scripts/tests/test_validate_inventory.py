@@ -428,14 +428,16 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertEqual(self.errors(), [])
 
     def test_subscription_publication_has_one_authority(self) -> None:
-        for key, value in (
-            ("cp_proxy_server_name", "sub.example.com"),
-            ("cp_proxy_path_prefix", "/sub/"),
-            ("remnawave_panel_sub_public_domain", "sub.example.com/sub"),
+        for key, value, fragment in (
+            ("cp_proxy_server_name", "sub.example.com", "subscription_public_host"),
+            ("cp_proxy_path_prefix", "/sub/", "subscription_public_host"),
+            ("cp_proxy_upstream", "127.0.0.1:3000", "panel_bind:panel_port"),
+            ("remnawave_panel_sub_public_domain", "sub.example.com/sub",
+             "subscription_public_host"),
         ):
             with self.subTest(key=key):
                 self.all_vars[key] = value
-                self.assertInvalid("must be derived from subscription_public_host")
+                self.assertInvalid(f"must be derived from {fragment}")
 
     def test_subscription_publication_requires_declared_authority(self) -> None:
         for key in ("subscription_public_host", "subscription_public_path"):

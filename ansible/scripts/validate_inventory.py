@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 import ipaddress
 import json
+from functools import lru_cache
 from pathlib import Path
 import re
 import sys
@@ -42,7 +43,7 @@ AUTHORITY_KEYS = (
     "base_firewall_source_ports",
     # One publication authority and no separately declared duplicates.
     "subscription_public_host", "subscription_public_path",
-    "cp_proxy_server_name", "cp_proxy_path_prefix",
+    "cp_proxy_server_name", "cp_proxy_path_prefix", "cp_proxy_upstream",
     "remnawave_panel_sub_public_domain",
 )
 BOOTSTRAP_EXCEPTION_FIELDS = {"temporary", "source_cidrs"}
@@ -70,6 +71,16 @@ STATE_SCHEMA = 1
 
 # A layered variable keeps the location it came from for error messages.
 Located = tuple[Any, str]
+
+
+@lru_cache(maxsize=1)
+def profile_contract() -> Any:
+    """The accepted offline profile contract; one source for its defaults."""
+    module_path = Path(__file__).resolve().parents[1] / "roles/profiles/module_utils/profile_bundle.py"
+    spec = importlib.util.spec_from_file_location("vpn_profile_contract", module_path)
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    return contract
 
 
 class Inventory:
@@ -396,12 +407,18 @@ class Inventory:
 
         # The role defaults derive these values. A separate declaration would
         # become a second, undetected source of publication drift.
+        derived_from = {
+            "cp_proxy_upstream": "panel_bind:panel_port",
+        }
         for key in ("cp_proxy_server_name", "cp_proxy_path_prefix",
-                    "remnawave_panel_sub_public_domain"):
+                    "cp_proxy_upstream", "remnawave_panel_sub_public_domain"):
             located = values.get(key)
             if located is not None:
-                self.error(f"{located[1]}: must be derived from subscription_public_host/"
-                           "subscription_public_path; remove the duplicate declaration")
+                source = derived_from.get(
+                    key, "subscription_public_host/subscription_public_path"
+                )
+                self.error(f"{located[1]}: must be derived from {source}; "
+                           "remove the duplicate declaration")
 
     def validate_management(self, group: str, host: str, values: dict[str, Located]) -> None:
         where = f"host {host}"
@@ -580,10 +597,7 @@ class Inventory:
 
     def validate_profiles(self) -> None:
         """Static cross-role gates; DNS/certificate/runtime remain separate."""
-        module_path = Path(__file__).resolve().parents[1] / "roles/profiles/module_utils/profile_bundle.py"
-        spec = importlib.util.spec_from_file_location("vpn_profile_contract", module_path)
-        contract = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(contract)
+        contract = profile_contract()
         nodes = {}
         for group in ("exit", "relay"):
             if len(self.groups[group]) != 1:
@@ -661,9 +675,11 @@ def expected_state(inventory: Inventory) -> dict[str, Any]:
                 f"{item['proto']}/{item['port']}"
                 for item in node_values["base_firewall_vpn_ports"][0]
             ),
-            # Role/contract default for an omitted value, as in the profiles
-            # contract; an explicit value is preserved.
-            "cover_tls_port": node_values.get("cover_tls_port", (9443,))[0],
+            # Role/contract default for an omitted value, from the shared
+            # profile contract; an explicit value is preserved.
+            "cover_tls_port": node_values.get(
+                "cover_tls_port", (profile_contract().DEFAULT_COVER_TLS_PORT,)
+            )[0],
             "reality_sni": node_values["reality_sni"][0],
         }
     return state

@@ -154,20 +154,24 @@ transfer: это отдельные real runtime gates.
 публичного subscription endpoint. Из неё выводятся `SUB_PUBLIC_DOMAIN` панели и
 `server_name`/`path_prefix` vhost `cp_proxy`; upstream выводится из
 `panel_bind:panel_port`. Отдельные `remnawave_panel_sub_public_domain`,
-`cp_proxy_server_name`, `cp_proxy_path_prefix` в inventory отвергаются как
-второй источник. Детали — [DEPLOYMENT.md](DEPLOYMENT.md).
+`cp_proxy_server_name`, `cp_proxy_path_prefix` и `cp_proxy_upstream` в inventory
+отвергаются как второй источник. Детали — [DEPLOYMENT.md](DEPLOYMENT.md).
 
 Drift использует тот же валидатор и не рендерит второй конфиг:
 
 ```sh
-make -C ansible state
-make -C ansible drift STATE=/abs/outside-checkout/observed.json
+make -C ansible state STATE_INVENTORY=/abs/outside-checkout/hosts.yml
+make -C ansible drift STATE_INVENTORY=/abs/outside-checkout/hosts.yml \
+  STATE=/abs/outside-checkout/observed.json
 ```
+
+`STATE_INVENTORY` обязателен; без него `make` завершается кодом `64`.
 
 `state` пишет канонический expected state из inventory; `drift` сравнивает его с
 observed snapshot (`schema: 1`) и печатает только пути `missing`/`extra`/
 `mismatch` без значений. Exit codes: `0` — чисто, `1` — drift или неверный
-inventory, `2` — неверный snapshot. Сбор живого snapshot и сквозная проверка
+inventory, `2` — неверный snapshot, `64` — не задан обязательный
+`STATE_INVENTORY`/`STATE`. Сбор живого snapshot и сквозная проверка
 остаются runtime acceptance, а не статическим доказательством.
 
 ## Синтетический пример и приватный inventory

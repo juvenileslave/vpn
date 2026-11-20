@@ -17,6 +17,7 @@ import uuid
 from urllib.parse import urlsplit
 
 CORE_VERSION = "26.11.9"
+DEFAULT_COVER_TLS_PORT = 9443
 NODE_IMAGE = "ghcr.io/remnawave/node:3.4.5@sha256:8f5a41708dfa86acc2561a520c9b40e2ff30812a16c28cf6bba6c365ca0f7d65"
 FAMILIES = {"v4_prefer": "UseIPv4v6", "v6_prefer": "UseIPv6v4", "v4_only": "ForceIPv4"}
 DNS = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -231,7 +232,7 @@ def validate_profile_options(options):
 
 def validate_host(host, kind):
     require(isinstance(host, dict), kind + " host must be a mapping")
-    host.setdefault("cover_tls_port", 9443)
+    host.setdefault("cover_tls_port", DEFAULT_COVER_TLS_PORT)
     host.setdefault("reality_max_time_diff_ms", 300000)
     require(DNS.fullmatch(host.get("reality_sni", "")) is not None, "reality_sni must be one exact lowercase DNS name")
     cover = port(host.get("cover_tls_port"), "cover_tls_port")

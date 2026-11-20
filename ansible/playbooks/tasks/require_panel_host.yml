@@ -1,0 +1,24 @@
+---
+# Shared guard for playbooks whose target defaults to the panel host. The
+# hosts expression selects an inventory-visible group; this check refuses a
+# group that contradicts cp_placement instead of silently matching no hosts.
+- name: Require the selected panel host to match cp_placement
+  ansible.builtin.assert:
+    that:
+      - cp_placement | default('') in ['exit', 'dedicated']
+      - >-
+        (cp_placement == 'exit'
+         and (groups.get('cp', []) | length) == 0
+         and (groups.get('exit', []) | length) == 1
+         and inventory_hostname in groups.get('exit', []))
+        or
+        (cp_placement == 'dedicated'
+         and (groups.get('cp', []) | length) == 1
+         and (groups.get('exit', []) | length) == 1
+         and inventory_hostname in groups.get('cp', []))
+    fail_msg: >-
+      cp_placement={{ cp_placement | default('<missing>') }} не соответствует
+      выбранной группе panel-хоста: exit требует пустую cp-группу и exit-хост,
+      dedicated — ровно один cp-хост. Объявите корректный cp_placement или
+      явный * _hosts override.
+    quiet: true

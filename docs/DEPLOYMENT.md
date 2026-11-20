@@ -60,14 +60,32 @@ subscription_public_path: /sub/
 | `cp_proxy_path_prefix` | `<path>` | `cp_proxy` (default) |
 | `cp_proxy_upstream` | `panel_bind:panel_port` (IPv6 — `[::1]:port`) | `cp_proxy` (default) |
 
-Отдельные `remnawave_panel_sub_public_domain`, `cp_proxy_server_name` и
-`cp_proxy_path_prefix` в inventory **запрещены** `validate_inventory.py`: это
-был бы второй источник публикации. Рабочий inventory мигрируется один раз:
-удалить эти три переменные и объявить `subscription_public_host/path`. DNS, ACME
-и сертификаты не настраиваются; `cp_proxy_acme*` остаются явными входами роли.
+Отдельные `remnawave_panel_sub_public_domain`, `cp_proxy_server_name`,
+`cp_proxy_path_prefix` и `cp_proxy_upstream` в inventory **запрещены**
+`validate_inventory.py`: это был бы второй источник публикации. Рабочий
+inventory мигрируется один раз: удалить эти переменные и объявить
+`subscription_public_host/path`. DNS, ACME и сертификаты не настраиваются;
+`cp_proxy_acme*` остаются явными входами роли.
 
-Для `cp_placement: exit` playbook'и 4–5 автоматически нацелены на `exit`
-(`cp_proxy_hosts`/`panel_proxy_hosts` по-прежнему переопределяют группу).
+### Выбор panel-хоста
+
+Play-level `hosts` вычисляется до применения `group_vars`, поэтому
+`{{ cp_placement }}` в нём не виден. Все playbook'и, чей target — panel-хост
+(`cp_proxy`, `panel_proxy`, `remnawave_panel`, `backup`, `victoriametrics`),
+выбирают inventory-visible группу:
+
+```yaml
+hosts: "{{ cp_proxy_hosts | default(groups['cp'] if groups['cp'] | length else groups['exit']) }}"
+```
+
+`cp_proxy_hosts`/`panel_proxy_hosts`/`remnawave_panel_hosts` (и аналогичные)
+по-прежнему переопределяют группу. Перед ролями общий `pre_tasks` guard
+`playbooks/tasks/require_panel_host.yml` сверяет фактический
+`inventory_hostname` с `cp_placement`: `exit` требует пустую cp-группу и
+exit-хост, `dedicated` — ровно один cp-хост. Несоответствие останавливает
+запуск, а не превращается в `skipping: no hosts matched`. Проверка выбора:
+`ansible-playbook -i <inventory> playbooks/cp_proxy.yml --list-hosts` для
+exit-placement показывает exit-хост.
 
 ## Объявленные входы
 
@@ -108,9 +126,14 @@ read-only `vpnctl panel plan/show` остаётся отдельным operator-
 рендерера:
 
 ```sh
-make -C ansible state                 # artifacts/state/expected.json
-make -C ansible drift STATE=/abs/outside-checkout/observed.json
+make -C ansible state STATE_INVENTORY=/abs/outside-checkout/hosts.yml
+make -C ansible drift STATE_INVENTORY=/abs/outside-checkout/hosts.yml \
+  STATE=/abs/outside-checkout/observed.json
 ```
+
+`STATE_INVENTORY` обязателен: пример inventory не является drift-базой и не
+подставляется молча. Без него `make` завершается кодом `64` (usage). Snapshot
+собирается оператором read-only; путь к нему и значения не публикуются.
 
 `--state` принимает YAML/JSON snapshot со `schema: 1`:
 
@@ -138,7 +161,7 @@ nodes:
 детерминирован и содержит **только пути** `missing`, `extra`, `mismatch`, без
 значений (snapshot может содержать приватные адреса). Коды:
 `0` — drift отсутствует, `1` — drift или неверный inventory, `2` — неверный
-schema snapshot. Snapshot — это наблюдаемое/объявленное состояние managed
+schema snapshot, `64` — не задан обязательный `STATE_INVENTORY`/`STATE`. Snapshot — это наблюдаемое/объявленное состояние managed
 объектов, а не результат второго рендера; сбор живого snapshot на хостах
 относится к runtime acceptance ниже.
 
@@ -147,9 +170,17 @@ schema snapshot. Snapshot — это наблюдаемое/объявленно
 - Состав и порядок развёртывания: `playbooks/site.yml`.
 - Валидируемый контракт inventory: `make -C ansible validate`.
 - Единственная authority подписки и выводимые panel/cp_proxy значения.
-- Стабильный expected state и отказ на drift: `make -C ansible state|drift`.
-- Offline-тесты композиции, drift refusal и idempotency предпосылок:
-  `make -C ansible test` (запускает интегратор, не этот срез).
+- Стабильный expected state и отказ на drift: `make -C ansible state|drift`
+  с обязательным `STATE_INVENTORY`.
+- Offline-тесты композиции, drift refusal, порядка списков и role-defaults:
+  `make -C ansible test`.
+
+## Проверки
+
+На ревизии до этого review-fix фактически выполнено: `make -C ansible test` —
+83 scripts-теста, node — 17, profiles — 32; pre-commit — all Passed;
+`playbooks/site.yml --syntax-check` — OK. После review-fix интегратор
+перепроверяет полный набор.
 
 ## Что остаётся runtime acceptance
 

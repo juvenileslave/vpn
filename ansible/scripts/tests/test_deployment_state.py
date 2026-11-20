@@ -11,6 +11,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -180,6 +181,115 @@ class ManagedStateDriftTest(unittest.TestCase):
                        for item in firewall[kind]["base_firewall_vpn_ports"]),
                 node["base_firewall_vpn_ports"],
             )
+
+    def test_drift_ignores_list_order(self) -> None:
+        observed = copy.deepcopy(self.state)
+        observed["nodes"]["exit-example"]["node_port_allow"].reverse()
+        observed["nodes"]["exit-example"]["base_firewall_vpn_ports"].reverse()
+        code, _, stderr = self.run_main("--state", str(self.write_snapshot(observed)))
+        self.assertEqual(code, 0, stderr)
+
+    def test_panel_host_selection_matches_placement(self) -> None:
+        playbook = Path(sys.executable).with_name("ansible-playbook")
+        if not playbook.exists():
+            self.skipTest("run make -C ansible bootstrap")
+        environment = {
+            **os.environ,
+            "ANSIBLE_CONFIG": str(SCRIPTS.parent / "ansible.cfg"),
+            "ANSIBLE_LOCAL_TEMP": str(self.root / "ansible-tmp"),
+            "ANSIBLE_NOCOLOR": "1",
+        }
+        exit_root = self.root / "exit-placements" / "example"
+        shutil.copytree(EXAMPLE.parent, exit_root)
+        hosts = yaml.safe_load((exit_root / "hosts.yml").read_text())
+        hosts["all"]["children"]["cp"] = {}
+        (exit_root / "hosts.yml").write_text(yaml.safe_dump(hosts), encoding="utf-8")
+        all_vars = yaml.safe_load((exit_root / "group_vars" / "all.yml").read_text())
+        all_vars["cp_placement"] = "exit"
+        (exit_root / "group_vars" / "all.yml").write_text(
+            yaml.safe_dump(all_vars), encoding="utf-8"
+        )
+        (exit_root / "host_vars" / "cp-example.yml").unlink()
+        playbooks = (
+            "cp_proxy.yml", "panel_proxy.yml", "remnawave_panel.yml",
+            "backup.yml", "victoriametrics.yml",
+        )
+        for case, inventory, expected_host in (
+            ("dedicated", EXAMPLE, "cp-example"),
+            ("exit", exit_root / "hosts.yml", "exit-example"),
+        ):
+            for name in playbooks:
+                with self.subTest(placement=case, playbook=name):
+                    result = subprocess.run(
+                        [str(playbook), "-i", str(inventory),
+                         str(SCRIPTS.parent / "playbooks" / name), "--list-hosts"],
+                        cwd=SCRIPTS.parent,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(expected_host, result.stdout)
+                    self.assertNotIn("hosts (0)", result.stdout)
+
+    def test_role_defaults_match_expected_publication(self) -> None:
+        playbook = Path(sys.executable).with_name("ansible-playbook")
+        if not playbook.exists():
+            self.skipTest("run make -C ansible bootstrap")
+        output = self.root / "rendered-defaults.json"
+        render = self.root / "render-defaults.yml"
+        defaults = (
+            SCRIPTS.parent / "roles" / "remnawave_panel" / "defaults" / "main.yml",
+            SCRIPTS.parent / "roles" / "cp_proxy" / "defaults" / "main.yml",
+        )
+        render.write_text(yaml.safe_dump([{
+            "hosts": "cp-example",
+            "connection": "local",
+            "gather_facts": False,
+            "vars_files": [str(path) for path in defaults],
+            "tasks": [{
+                "name": "Render publication defaults",
+                "ansible.builtin.copy": {
+                    "content": (
+                        "{{ {'sub_public_domain': remnawave_panel_sub_public_domain,"
+                        " 'server_name': cp_proxy_server_name,"
+                        " 'path_prefix': cp_proxy_path_prefix,"
+                        " 'upstream': cp_proxy_upstream,"
+                        " 'panel_bind': panel_bind, 'panel_port': panel_port}"
+                        " | to_json }}"
+                    ),
+                    "dest": str(output),
+                    "mode": "0600",
+                },
+            }],
+        }]), encoding="utf-8")
+        environment = {
+            **os.environ,
+            "ANSIBLE_CONFIG": str(SCRIPTS.parent / "ansible.cfg"),
+            "ANSIBLE_LOCAL_TEMP": str(self.root / "ansible-tmp"),
+            "ANSIBLE_NOCOLOR": "1",
+        }
+        result = subprocess.run(
+            [str(playbook), "-i", str(EXAMPLE), str(render)],
+            cwd=SCRIPTS.parent,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(output.read_text())
+        self.assertEqual(
+            rendered["sub_public_domain"], self.state["subscription"]["sub_public_domain"]
+        )
+        self.assertEqual(rendered["server_name"], self.state["subscription"]["server_name"])
+        self.assertEqual(rendered["path_prefix"], self.state["subscription"]["path_prefix"])
+        bind, port = rendered["panel_bind"], rendered["panel_port"]
+        upstream = f"[{bind}]:{port}" if ":" in bind else f"{bind}:{port}"
+        self.assertEqual(rendered["upstream"], upstream)
 
     def test_composed_entrypoint_syntax(self) -> None:
         playbook = Path(sys.executable).with_name("ansible-playbook")
