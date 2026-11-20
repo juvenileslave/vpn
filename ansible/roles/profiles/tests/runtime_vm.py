@@ -333,6 +333,10 @@ class Lab:
         self.topology["profiles_probe_url"] = "http://192.0.2.100:18081/generate_204"
         for kind in ("exit", "relay"):
             host = self.topology[kind]
+            # Lab-local explicit port; the accepted inventory no longer reuses
+            # the upstream 2222 value, but this synthetic scenario keeps a
+            # fixed port for its socket/ACL assertions.
+            host["node_api_port"] = 2222
             host["reality_sni"] = "cover.example.test"
             host["cover_tls_port"] = 18445
             host["cover_site_source"] = str(self.work / "site")
