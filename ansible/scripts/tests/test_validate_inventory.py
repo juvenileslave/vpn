@@ -275,10 +275,15 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertTrue(self.errors())
 
     def test_management_origin_and_public_conflicts(self) -> None:
-        for value in (True, "8445", 22, 2222, 8443):
+        # The conflict must follow the declared API port; the example no longer
+        # reuses the upstream 2222 value.
+        api_port = self.all_vars["node_api_port"]
+        for value in (True, "8445", 22, api_port, 8443):
             with self.subTest(value=value):
                 self.group_vars["exit"]["cover_tls_port"] = value
                 self.assertTrue(self.errors())
+        self.group_vars["exit"]["cover_tls_port"] = api_port
+        self.assertInvalid("listener/SSH/API/origin/HTTP01 ports collide")
 
     def test_fixed_self_steal_options_rejected_by_inventory(self) -> None:
         original = copy.deepcopy(self.all_vars)
