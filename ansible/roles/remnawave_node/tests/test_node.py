@@ -62,7 +62,7 @@ class NodeInputTests(unittest.TestCase):
             with self.subTest(firewall=firewall):
                 self.assertFalse(self.allowed(firewall=firewall))
         self.assertFalse(self.allowed(exception={'temporary': True, 'source_cidrs': ['127.0.0.1/32']}))
-        self.assertTrue(self.allowed(exception={}))
+        self.assertFalse(self.allowed(exception={}))
 
     def test_remote_cp_rejects_loopback_only_management(self):
         self.assertFalse(self.allowed(['127.0.0.1/32'], placement='dedicated',

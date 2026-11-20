@@ -58,8 +58,8 @@ Ubuntu 22.04 в рантайме не проверялись.
 | `base_ssh_trusted_cidrs` | `[]` | Сети, из которых firewall пропускает SSH. |
 | `base_firewall_enabled` | `false` | Управление таблицей `inet vpn_base`. В production-like inventory обязателен `true`; `false` допустим только с явным временным `base_firewall_bootstrap_exception`. |
 | `base_firewall_bootstrap_exception` | не задан | Только для первичного bootstrap администратора: `{temporary: true, source_cidrs: […]}`; список обязан совпадать с `node_port_allow`. Не даёт права запускать `remnawave_node`. |
-| `base_firewall_vpn_ports` | `[]` | Публичные порты `{proto: tcp\|udp, port: N}`. |
-| `base_firewall_source_ports` | `[]` | Непубличные порты `{proto: tcp\|udp, port: N, source_cidrs: [CIDR, …]}`. Только явно заданные источники; список сам не включает firewall. |
+| `base_firewall_vpn_ports` | `[]` | Публичные порты `{proto: tcp\|udp, port: N}`. Для `exit`/`relay` обязателен к явному объявлению в inventory. |
+| `base_firewall_source_ports` | `[]` | Непубличные порты `{proto: tcp\|udp, port: N, source_cidrs: [CIDR, …]}`. Только явно заданные источники; список сам не включает firewall. Для `exit`/`relay` обязателен к явному объявлению. |
 | `base_firewall_allow_icmp_echo` | `true` | Ping v4/v6 (с ограничением частоты). |
 | `base_firewall_allow_dhcpv6_client` | `true` | Ответы DHCPv6 с link-local сервера. |
 | `base_firewall_acknowledged_closed_ports` | `[]` | Слушающие порты (`tcp/N`, `udp/N`), закрытие которых оператор подтверждает. |
@@ -108,6 +108,13 @@ Ubuntu 22.04 в рантайме не проверялись.
 молчаливый precedence: иначе группа и хост могли бы разойтись в пользу
 непроверенного значения. В production-like inventory `base_firewall_enabled`
 обязателен и должен быть `true`.
+
+Для `exit`/`relay` списки `base_firewall_vpn_ports` и
+`base_firewall_source_ports` обязательны к явному объявлению в inventory: role
+default `[]` — только безопасное значение роли, а не разрешение не объявлять
+политику. `base_firewall_enabled: true` обеспечивают inventory validator и
+preflight `remnawave_node`; role default остаётся `false` для совместимости с
+bootstrap-фазами.
 
 `base_firewall_enabled: false` разрешён только с явным
 `base_firewall_bootstrap_exception`:

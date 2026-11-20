@@ -93,6 +93,11 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
 Единственные firewall authority (ровно одно объявление на хост; повтор в
 `group_vars`/`host_vars` — ошибка, а не молчаливый precedence):
 
+Для `exit`/`relay` `base_firewall_vpn_ports` и `base_firewall_source_ports`
+обязательны к явному объявлению: role default `[]` не разрешает оставить
+политику пустой. `base_firewall_enabled: true` проверяют validator и preflight
+`remnawave_node`; role default `false` сохранён для bootstrap-совместимости.
+
 - `base_firewall_enabled`: для production-like inventory обязателен `true`.
   `false` допустим только с явным временным
   `base_firewall_bootstrap_exception: {temporary: true, source_cidrs: […]}`,

@@ -373,10 +373,32 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertInvalid("must not be declared as a public")
 
     def test_node_port_allow_rejects_missing_wide_and_any(self) -> None:
-        for value in ([], ["0.0.0.0/0"], ["::/0"], ["any"], ["192.0.2.1/24"], ["127.0.0.1/32", "127.0.0.1/32"]):
+        cases = (
+            ([], "must not be empty"),
+            (["0.0.0.0/0"], "unsafe or wide management CIDR"),
+            (["::/0"], "unsafe or wide management CIDR"),
+            (["any"], "must be a CIDR such as"),
+            (["192.0.2.1/24"], "invalid CIDR"),
+            (["127.0.0.1/32", "127.0.0.1/32"], "duplicate CIDR"),
+        )
+        for value, fragment in cases:
             with self.subTest(value=value):
                 self.all_vars["node_port_allow"] = value
-                self.assertTrue(self.errors())
+                self.assertInvalid(fragment)
+
+    def test_duplicate_matching_api_source_rules_are_refused(self) -> None:
+        rules = self.group_vars["exit"]["base_firewall_source_ports"]
+        rule = next(item for item in rules if item["port"] == self.all_vars["node_api_port"])
+        rules.append(copy.deepcopy(rule))
+        self.assertInvalid("found 2")
+
+    def test_node_api_port_must_differ_from_ssh(self) -> None:
+        self.all_vars["node_api_port"] = self.all_vars["base_ssh_port"]
+        self.assertInvalid("must differ from base_ssh_port")
+
+    def test_management_authority_cannot_be_redeclared_in_group_vars(self) -> None:
+        self.group_vars["exit"]["node_api_port"] = self.all_vars["node_api_port"]
+        self.assertInvalid("must have one authority")
 
     def test_dedicated_remote_cp_rejects_loopback_only_management(self) -> None:
         self.all_vars["cp_placement"] = "dedicated"
