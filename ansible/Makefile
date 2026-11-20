@@ -33,6 +33,8 @@ test:
 	@test -x $(PYTHON) || { printf '%s\n' 'Сначала выполните make -C ansible bootstrap.'; exit 1; }
 	$(PYTHON) -m unittest discover --start-directory scripts/tests --verbose
 
+# GNU make returns 2 for any failed recipe. The documented 0/1/2/64 codes are
+# observable only when calling scripts/validate_inventory.py directly.
 # Expected state derived from the inventory; this is the drift baseline.
 state:
 	@test -x $(PYTHON) || { printf '%s\n' 'Сначала выполните make -C ansible bootstrap.'; exit 1; }

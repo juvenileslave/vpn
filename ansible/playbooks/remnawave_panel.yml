@@ -8,6 +8,8 @@
   pre_tasks:
     - name: Require a consistent panel host selection
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/require_panel_host.yml"
+      vars:
+        panel_hosts_override: "{{ remnawave_panel_hosts | default('') }}"
   roles:
     # Project-local path relative to this playbook; no ANSIBLE_ROLES_PATH needed.
     - role: ../roles/remnawave_panel

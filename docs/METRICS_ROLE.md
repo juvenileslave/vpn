@@ -144,7 +144,8 @@ query-параметры или fragment. Задачи с секретами в�
     применяет firewall и не проверяет его фактическое состояние.
 - С `cp_placement: exit` переменные живут в `host_vars`/`group_vars` exit
   (playbook выбирает exit по inventory-группам; `-e victoriametrics_hosts=exit`
-  остаётся явным override); с
+  остаётся явным override и пропускает guard, поэтому согласованность выбора
+  проверяет оператор); с
   `cp_placement: dedicated` — на CP-хосте. Механизм ACL один и тот же.
 - Исходящий HTTPS к `github.com` нужен для загрузки архива.
 

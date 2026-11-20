@@ -291,6 +291,72 @@ class ManagedStateDriftTest(unittest.TestCase):
         upstream = f"[{bind}]:{port}" if ":" in bind else f"{bind}:{port}"
         self.assertEqual(rendered["upstream"], upstream)
 
+    def run_guard(
+        self,
+        name: str,
+        override: str,
+        placement: str | None,
+        host: str = "cp-example",
+        inventory: str | None = None,
+    ) -> subprocess.CompletedProcess:
+        playbook = Path(sys.executable).with_name("ansible-playbook")
+        if not playbook.exists():
+            self.skipTest("run make -C ansible bootstrap")
+        play = self.root / f"guard-{name}.yml"
+        play.write_text(yaml.safe_dump([{
+            "hosts": host,
+            "connection": "local",
+            "gather_facts": False,
+            "vars": {"panel_hosts_override": override},
+            "tasks": [{
+                "name": "Include only the panel-host guard",
+                "ansible.builtin.include_tasks": str(
+                    SCRIPTS.parent / "playbooks" / "tasks" / "require_panel_host.yml"
+                ),
+            }],
+        }]), encoding="utf-8")
+        command = [str(playbook), "-i", inventory or str(EXAMPLE)]
+        if placement is not None:
+            command.extend(["-e", f"cp_placement={placement}"])
+        command.append(str(play))
+        return subprocess.run(
+            command,
+            cwd=SCRIPTS.parent,
+            env={
+                **os.environ,
+                "ANSIBLE_CONFIG": str(SCRIPTS.parent / "ansible.cfg"),
+                "ANSIBLE_LOCAL_TEMP": str(self.root / "ansible-tmp"),
+                "ANSIBLE_NOCOLOR": "1",
+            },
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    def test_guard_refuses_contradicting_placement_without_override(self) -> None:
+        result = self.run_guard("contradicting", override="", placement="exit")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("не соответствует выбранной группе", result.stdout + result.stderr)
+
+    def test_guard_accepts_matching_placement_without_override(self) -> None:
+        result = self.run_guard("matching", override="", placement="dedicated")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_guard_is_skipped_for_explicit_override(self) -> None:
+        # The CI ad-hoc inventory has no cp_placement and only localhost.
+        missing_placement = self.run_guard(
+            "adhoc", override="all", placement=None,
+            host="localhost", inventory="localhost,",
+        )
+        self.assertEqual(missing_placement.returncode, 0,
+                         missing_placement.stdout + missing_placement.stderr)
+        # With cp_placement defined, an explicit override still skips the guard:
+        # the operator owns consistency, as documented.
+        contradicting = self.run_guard("override", override="all", placement="exit")
+        self.assertEqual(contradicting.returncode, 0,
+                         contradicting.stdout + contradicting.stderr)
+
     def test_composed_entrypoint_syntax(self) -> None:
         playbook = Path(sys.executable).with_name("ansible-playbook")
         if not playbook.exists():

@@ -165,14 +165,18 @@ make -C ansible drift STATE_INVENTORY=/abs/outside-checkout/hosts.yml \
   STATE=/abs/outside-checkout/observed.json
 ```
 
-`STATE_INVENTORY` обязателен; без него `make` завершается кодом `64`.
+`STATE_INVENTORY` обязателен; без него рецепт завершается кодом `64`, а make
+возвращает `2`.
 
 `state` пишет канонический expected state из inventory; `drift` сравнивает его с
 observed snapshot (`schema: 1`) и печатает только пути `missing`/`extra`/
-`mismatch` без значений. Exit codes: `0` — чисто, `1` — drift или неверный
+`mismatch` без значений. Exit codes прямого вызова
+`scripts/validate_inventory.py`: `0` — чисто, `1` — drift или неверный
 inventory, `2` — неверный snapshot, `64` — не задан обязательный
-`STATE_INVENTORY`/`STATE`. Сбор живого snapshot и сквозная проверка
-остаются runtime acceptance, а не статическим доказательством.
+`STATE_INVENTORY`/`STATE`. **Через make** любой провал рецепта схлопывается в
+`2`, поэтому `0`/`1`/`64` наблюдаемы только при прямом вызове валидатора.
+Сбор живого snapshot и сквозная проверка остаются runtime acceptance, а не
+статическим доказательством.
 
 ## Синтетический пример и приватный inventory
 

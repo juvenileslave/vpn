@@ -83,7 +83,9 @@ hosts: "{{ cp_proxy_hosts | default(groups.get('cp', []) if groups.get('cp', [])
 `playbooks/tasks/require_panel_host.yml` сверяет фактический
 `inventory_hostname` с `cp_placement`: `exit` требует пустую cp-группу и
 exit-хост, `dedicated` — ровно один cp-хост. Несоответствие останавливает
-запуск, а не превращается в `skipping: no hosts matched`. Проверка выбора:
+запуск, а не превращается в `skipping: no hosts matched`. Явный `*_hosts`
+override пропускает guard: согласованность выбора проверяет оператор; без
+override `cp_placement` обязателен. Проверка выбора:
 `ansible-playbook -i <inventory> playbooks/cp_proxy.yml --list-hosts` для
 exit-placement показывает exit-хост.
 
@@ -132,7 +134,8 @@ make -C ansible drift STATE_INVENTORY=/abs/outside-checkout/hosts.yml \
 ```
 
 `STATE_INVENTORY` обязателен: пример inventory не является drift-базой и не
-подставляется молча. Без него `make` завершается кодом `64` (usage). Snapshot
+подставляется молча. Без него рецепт завершается кодом `64` (usage), но make
+вернёт `2`. Snapshot
 собирается оператором read-only; путь к нему и значения не публикуются.
 
 `--state` принимает YAML/JSON snapshot со `schema: 1`:
@@ -161,9 +164,16 @@ nodes:
 детерминирован и содержит **только пути** `missing`, `extra`, `mismatch`, без
 значений (snapshot может содержать приватные адреса). Коды:
 `0` — drift отсутствует, `1` — drift или неверный inventory, `2` — неверный
-schema snapshot, `64` — не задан обязательный `STATE_INVENTORY`/`STATE`. Snapshot — это наблюдаемое/объявленное состояние managed
-объектов, а не результат второго рендера; сбор живого snapshot на хостах
-относится к runtime acceptance ниже.
+schema snapshot, `64` — не задан обязательный `STATE_INVENTORY`/`STATE`.
+
+Эти коды относятся к **прямому** вызову `scripts/validate_inventory.py`.
+GNU make схлопывает любой неуспешный рецепт в код `2`, поэтому через
+`make -C ansible state|drift` коды `0`/`1`/`64` не наблюдаются: успех — `0`,
+любой провал — `2`. Для точной диагностики вызывайте валидатор напрямую.
+
+Snapshot — это наблюдаемое/объявленное состояние managed объектов, а не
+результат второго рендера; сбор живого snapshot на хостах относится к runtime
+acceptance ниже.
 
 ## Что воспроизводимо сейчас
 

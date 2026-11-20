@@ -10,5 +10,7 @@
   pre_tasks:
     - name: Require a consistent panel host selection
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/require_panel_host.yml"
+      vars:
+        panel_hosts_override: "{{ panel_proxy_hosts | default('') }}"
   roles:
     - role: "{{ playbook_dir }}/../roles/panel_proxy"
