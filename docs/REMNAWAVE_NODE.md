@@ -76,6 +76,11 @@ namespace. В исходниках Node нет переменной bind address
    правильных source rules. Это отказ до rollout, не создание второй firewall.
 5. Явный management source входит в `node_port_allow`; source и destination
    одной IP-family. `cp_placement` поддерживает `exit` и `dedicated`.
+6. `base_firewall_enabled` — строго `true`; `base_firewall_bootstrap_exception`
+   запрещён для node rollout. `node_api_port` задан явно: неявного fallback
+   `2222` нет, и `2222` не является публичным listener. Для `dedicated`
+   удалённого CP loopback-only `node_port_allow` отвергается; публичные
+   `0.0.0.0/0`, `::/0` и `any` отвергаются для любого размещения.
 
 Числовые переменные ansible-core сохраняют integer semantics, включая native
 tagged integer subclasses при разборе inventory. Они принимаются как целые;
@@ -119,7 +124,7 @@ root-only files. Не записывайте реальные credentials в exa
 | Переменная | Значение |
 | --- | --- |
 | `remnawave_node_image` | Единственный проверенный полный tag + digest выше |
-| `node_api_port` / `remnawave_node_api_port` | Общий API-порт / role-local consumer, default 2222 |
+| `node_api_port` / `remnawave_node_api_port` | Обязательный явный API-порт; `2222` — только официальный пример, не значение по умолчанию. |
 | `node_port_allow` | Единственный source authority |
 | `base_firewall_source_ports` | Действующая matching TCP запись base |
 | `remnawave_node_dir` | Owned project directory, default `/opt/remnanode`, допустим `/opt/<name>` |
@@ -222,6 +227,38 @@ host/daemon. Затем выполните настоящий CP probe с воз
 `lifecycle.py stop <transaction-directory>`, не оставляйте восстановленный node без
 CP gate. Не удаляйте pending или daemon ownership record вручную вместо recovery.
 Для репозитория откат — отдельный revert PR; Git revert не откатывает контейнер.
+
+## Порядок rollout, check-mode и откат
+
+Принятый порядок не меняется от удобства: сначала firewall, затем
+доказательство management path, и только потом node API.
+
+1. **Firewall.** В production-like inventory `base_firewall_enabled: true`,
+   `base_ssh_trusted_cidrs` и точная source-запись для `node_api_port` уже
+   объявлены. Сначала `--check --diff`: роль рендерит кандидат, проверяет его
+   настоящим `nft -c` и показывает diff, не меняя live policy. Затем применение
+   в отдельном окне и новая SSH-сессия; `changed=0` на повторе.
+2. **Management path.** С реального CP namespace (не с произвольного хоста)
+   выполняется настоящий mTLS/JWT probe из объявленного source. Успех
+   локального/loopback probe не заменяет этот gate. Проверяется и отказ
+   постороннему source.
+3. **Node API exposure removal.** Только после шагов 1–2 запускается node
+   rollout. Preflight до первой мутации хоста требует `base_firewall_enabled:
+   true`, непустой `node_port_allow`, отсутствие public-объявления API-порта и
+   ровно одну matching TCP source-запись. Внешний scan подтверждает, что открыты
+   только объявленные client listeners и явный SSH break-glass; API закрыт.
+
+`--check` не стартует и не pull-ит контейнер, но проверяет compose/PKI и
+**действующий** `inet vpn_base/input` через `nft -j`; без установленного `nft`
+это честный отказ, а не успех. CP probe в check mode не выдаётся за
+выполненный runtime-acceptance.
+
+Откат репозитория — отдельный revert PR, он не возвращает состояние хостов.
+На узле сначала восстанавливается прежняя собственная таблица base, затем
+применяется `remnawave_node_state: rollback` с текущими credentials и повторным
+CP gate. Если прежней таблицы нет, удаляйте только `inet vpn_base` и собственный
+loader, не чужие таблицы. Production firewall/DNS/SSH не меняются этим
+репозиторием без отдельного разрешения владельца.
 
 ## Запуск и проверки
 

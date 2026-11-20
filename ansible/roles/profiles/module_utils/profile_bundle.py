@@ -243,7 +243,7 @@ def validate_host(host, kind):
     require(host.get("remnawave_node_network_mode") == "host", "cover and node must share host network namespace")
     require(type(host.get("reality_max_time_diff_ms")) is int and host["reality_max_time_diff_ms"] > 0, "reality_max_time_diff_ms must be positive")
     ssh = port(host.get("base_ssh_port", 22), "base_ssh_port")
-    api = port(host.get("node_api_port", 2222), "node_api_port")
+    api = port(host.get("node_api_port"), "node_api_port")
     service = [port(host.get("exit_direct_port"), "exit_direct_port"), port(host.get("transit_port"), "transit_port")] if kind == "exit" else host.get("relay_slot_ports")
     require(isinstance(service, list) and bool(service), "relay_slot_ports must be a nonempty list")
     service = [port(x, "listener port") for x in service]

@@ -126,3 +126,17 @@
     - Почему: в прошлый раз восстановление не проверяли.
     - Проверка: проверка этапа 2 плана — восстановление из бэкапа даёт рабочую
       панель; результат фиксируется в отчёте.
+
+13. **Node API закрыт, base firewall включён.**
+    - Правило: в production-like inventory `base_firewall_enabled: true`;
+      `node_api_port` задан явно и покрыт ровно одной TCP-записью
+      `base_firewall_source_ports`, источники которой совпадают с
+      `node_port_allow`. Пустой/публичный (`0.0.0.0/0`, `::/0`, `any`) ACL и
+      loopback-only источники для удалённого CP запрещены. Временный bootstrap
+      exception явный, ACL-scoped и не разрешает node rollout. Публичного
+      `2222`/fallback в принятом контракте нет.
+    - Почему: base firewall по умолчанию не управляет хостом, а Node слушает
+      wildcard; без действующего source ACL management API стал бы публичным.
+    - Проверка: `validate_inventory.py`, preflight `remnawave_node`, живой
+      `inet vpn_base/input` через `nft -j` до старта контейнера и внешний scan
+      на одноразовом стенде; результат runtime фиксируется отдельно.

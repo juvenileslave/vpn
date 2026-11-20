@@ -2,8 +2,11 @@
 import ipaddress
 
 
-def acl_valid(sources, rules, port, public, ssh, placement, source, address):
+def acl_valid(sources, rules, port, public, ssh, placement, source, address,
+              firewall_enabled=True, bootstrap_exception=None):
     try:
+        if firewall_enabled is not True or bootstrap_exception:
+            return False
         if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535 or port == ssh:
             return False
         if not isinstance(sources, list) or not sources:

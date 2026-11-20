@@ -1,7 +1,9 @@
 ---
 # Verified official image and stock Xray. See docs/REMNAWAVE_NODE.md.
 remnawave_node_image: ghcr.io/remnawave/node:3.4.5@sha256:8f5a41708dfa86acc2561a520c9b40e2ff30812a16c28cf6bba6c365ca0f7d65
-remnawave_node_api_port: "{{ node_api_port | default(2222) }}"
+# The inventory must declare node_api_port explicitly; 2222 is only the
+# upstream example value, never an accepted fallback or public listener.
+remnawave_node_api_port: "{{ node_api_port }}"
 remnawave_node_dir: /opt/remnanode
 remnawave_node_state: present
 remnawave_node_timeout: 120
