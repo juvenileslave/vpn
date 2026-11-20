@@ -397,19 +397,29 @@ class Inventory:
 
         public = values.get("base_firewall_vpn_ports")
         if api_port is not None:
-            if not isinstance(public, list):
-                self.error(f"{where}: base_firewall_vpn_ports must be a list")
-            elif any(isinstance(item, dict) and item.get("port") == api_port for item in public):
-                self.error(f"{where}: node_api_port must not be declared as a public "
-                           "base_firewall_vpn_ports listener")
+            if public is None:
+                self.error(f"{where}: base_firewall_vpn_ports is required")
+            else:
+                public_value, public_origin = public
+                if not isinstance(public_value, list):
+                    self.error(f"{public_origin}: must be a list")
+                elif any(isinstance(item, dict) and item.get("port") == api_port
+                         for item in public_value):
+                    self.error(f"{where}: node_api_port must not be declared as a public "
+                               "base_firewall_vpn_ports listener")
 
         rules = values.get("base_firewall_source_ports")
         if api_port is None:
             return
-        if not isinstance(rules, list):
-            self.error(f"{where}: base_firewall_source_ports must be a list")
+        if rules is None:
+            self.error(f"{where}: base_firewall_source_ports is required")
             return
-        matches = [item for item in rules if isinstance(item, dict) and item.get("port") == api_port]
+        rules_value, rules_origin = rules
+        if not isinstance(rules_value, list):
+            self.error(f"{rules_origin}: must be a list")
+            return
+        matches = [item for item in rules_value
+                   if isinstance(item, dict) and item.get("port") == api_port]
         if len(matches) != 1:
             self.error(f"{where}: node_api_port requires exactly one base_firewall_source_ports "
                        f"rule, found {len(matches)}")
