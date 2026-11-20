@@ -143,7 +143,8 @@ query-параметры или fragment. Задачи с секретами в�
     `source_cidrs`. Роль VictoriaMetrics проверяет декларацию ACL, но не
     применяет firewall и не проверяет его фактическое состояние.
 - С `cp_placement: exit` переменные живут в `host_vars`/`group_vars` exit
-  (роль применяется playbook'ом `-e victoriametrics_hosts=exit`); с
+  (playbook выбирает exit по inventory-группам; `-e victoriametrics_hosts=exit`
+  остаётся явным override); с
   `cp_placement: dedicated` — на CP-хосте. Механизм ACL один и тот же.
 - Исходящий HTTPS к `github.com` нужен для загрузки архива.
 
@@ -163,8 +164,8 @@ query-параметры или fragment. Задачи с секретами в�
 ../.venv/bin/ansible-playbook -i <inventory> --limit <хост> playbooks/victoriametrics.yml
 
 # С cp_placement: exit:
-../.venv/bin/ansible-playbook -i <inventory> -e victoriametrics_hosts=exit \
-  playbooks/victoriametrics.yml
+../.venv/bin/ansible-playbook -i <inventory> playbooks/victoriametrics.yml
+# при необходимости: -e victoriametrics_hosts=<группа или хост>
 ```
 
 В check mode архив не загружается: на чистой системе dry-run переносится на
