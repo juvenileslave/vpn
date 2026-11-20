@@ -17,11 +17,11 @@
         or
         (cp_placement == 'dedicated'
          and (groups.get('cp', []) | length) == 1
-         and (groups.get('exit', []) | length) == 1
          and inventory_hostname in groups.get('cp', []))
     fail_msg: >-
       cp_placement={{ cp_placement }} не соответствует выбранной группе
-      panel-хоста: exit требует пустую cp-группу и exit-хост, dedicated — ровно
-      один cp-хост. Объявите корректный cp_placement. Явный *_hosts override
-      пропускает guard; тогда согласованность выбора проверяет оператор.
+      panel-хоста: exit требует пустую cp-группу и ровно один exit-хост,
+      dedicated — ровно один cp-хост (exit-хост для dedicated не требуется).
+      Объявите корректный cp_placement. Явный *_hosts override пропускает
+      guard; тогда согласованность выбора проверяет оператор.
     quiet: true

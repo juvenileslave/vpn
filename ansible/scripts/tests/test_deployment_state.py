@@ -334,6 +334,22 @@ class ManagedStateDriftTest(unittest.TestCase):
             check=False,
         )
 
+    def test_guard_accepts_dedicated_without_exit_group(self) -> None:
+        # CI's dedicated metrics-only inventory declares cp without exit.
+        root = self.root / "dedicated-no-exit" / "example"
+        shutil.copytree(EXAMPLE.parent, root)
+        hosts = yaml.safe_load((root / "hosts.yml").read_text())
+        hosts["all"]["children"]["exit"] = {}
+        hosts["all"]["children"]["relay"] = {}
+        (root / "hosts.yml").write_text(yaml.safe_dump(hosts), encoding="utf-8")
+        for name in ("exit-example.yml", "relay-example.yml"):
+            (root / "host_vars" / name).unlink()
+        result = self.run_guard(
+            "dedicated-no-exit", override="", placement=None,
+            inventory=str(root / "hosts.yml"),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_guard_refuses_contradicting_placement_without_override(self) -> None:
         result = self.run_guard("contradicting", override="", placement="exit")
         self.assertNotEqual(result.returncode, 0)

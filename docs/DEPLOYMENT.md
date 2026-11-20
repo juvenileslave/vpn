@@ -82,10 +82,11 @@ hosts: "{{ cp_proxy_hosts | default(groups.get('cp', []) if groups.get('cp', [])
 по-прежнему переопределяют группу. Перед ролями общий `pre_tasks` guard
 `playbooks/tasks/require_panel_host.yml` сверяет фактический
 `inventory_hostname` с `cp_placement`: `exit` требует пустую cp-группу и
-exit-хост, `dedicated` — ровно один cp-хост. Несоответствие останавливает
-запуск, а не превращается в `skipping: no hosts matched`. Явный `*_hosts`
-override пропускает guard: согласованность выбора проверяет оператор; без
-override `cp_placement` обязателен. Проверка выбора:
+ровно один exit-хост; `dedicated` — ровно один cp-хост, наличие exit-хоста не
+требуется (metrics-only inventory может содержать только cp). Несоответствие
+останавливает запуск, а не превращается в `skipping: no hosts matched`.
+Явный `*_hosts` override пропускает guard: согласованность выбора проверяет
+оператор; без override `cp_placement` обязателен. Проверка выбора:
 `ansible-playbook -i <inventory> playbooks/cp_proxy.yml --list-hosts` для
 exit-placement показывает exit-хост.
 
