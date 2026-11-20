@@ -124,7 +124,7 @@ root-only files. Не записывайте реальные credentials в exa
 | Переменная | Значение |
 | --- | --- |
 | `remnawave_node_image` | Единственный проверенный полный tag + digest выше |
-| `node_api_port` / `remnawave_node_api_port` | Обязательный явный API-порт; `2222` — только официальный пример, не значение по умолчанию. |
+| `node_api_port` / `remnawave_node_api_port` | Обязательный явный API-порт; `2222` — только официальный пример, не значение по умолчанию. Example inventory объявляет другой явный порт и отвергает `2222`. |
 | `node_port_allow` | Единственный source authority |
 | `base_firewall_source_ports` | Действующая matching TCP запись base |
 | `remnawave_node_dir` | Owned project directory, default `/opt/remnanode`, допустим `/opt/<name>` |

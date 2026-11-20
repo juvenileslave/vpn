@@ -11,7 +11,10 @@ Debian/Ubuntu systemd-хостов: первоначальный SSH-досту�
 
 Это не развёрнутый VPN и не доказательство готовности подписок. Playbook не
 создаёт учётную запись администратора Remnawave, VPN-подписки, RemnaNode, cover,
-profiles, метрики, бота, DNS или публичный HTTPS. `docs/ARCHITECTURE_PLAN.md` не
+profiles, метрики, бота, DNS или публичный HTTPS.
+В общем упорядоченном запуске это фаза 1 `playbooks/site.yml`; остальные фазы
+(RemnaNode, cover, subscription vhost, panel_proxy, bundle) описаны в
+[DEPLOYMENT.md](DEPLOYMENT.md). `docs/ARCHITECTURE_PLAN.md` не
 изменяется.
 
 ## Предпосылки
@@ -83,7 +86,8 @@ connection-переменные inventory (`ansible_ssh_private_key_file` или
 | `cp_placement` | `dedicated` (один отдельный cp-хост) или `exit` (панель на exit, cp-группа пуста); ровно один `exit` и один `relay`, хост не в двух группах. |
 | `image_tags.remnawave_panel`, `image_tags.postgres`, `image_tags.valkey` | Точные пины по контракту роли панели; `latest` и отсутствие пина отклоняются до изменений. |
 | `panel_bind` / `panel_port` | Только loopback-адрес; порт не должен совпадать с 5432, 6379 или SSH-портом. |
-| `remnawave_panel_sub_public_domain` / `remnawave_panel_front_end_domain` | Несекретные домены по контракту роли панели; DNS не настраивается. |
+| `subscription_public_host` / `subscription_public_path` | Одна authority публичного subscription endpoint; из неё выводятся `remnawave_panel_sub_public_domain` и vhost `cp_proxy` ([DEPLOYMENT.md](DEPLOYMENT.md)). Отдельное объявление `remnawave_panel_sub_public_domain` отвергается валидатором. |
+| `remnawave_panel_front_end_domain` | Несекретный CORS-домен по контракту роли панели; DNS не настраивается. |
 | `remnawave_panel_env_file` **или** `remnawave_panel_env` | Ровно один источник секретов. Файл — абсолютный путь вне checkout; значения проверяются до запуска панели. |
 
 `base_admin_sudo_nopasswd` должен оставаться `true`: у созданных

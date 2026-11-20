@@ -1,0 +1,38 @@
+---
+# Single ordered deployment entrypoint for a clean, disposable host set
+# (docs/DEPLOYMENT.md). Every phase reuses an accepted role and playbook; no
+# hand-edited Docker/nginx file or one-off panel API call belongs here.
+#
+#   1. bootstrap.yml   base + SSH/firewall + Docker + private panel
+#   2. remnawave_node.yml  host-network node and closed management API
+#   3. cover_site.yml  private REALITY cover origin on exit/relay
+#   4. cp_proxy.yml    public subscription vhost on the panel host
+#   5. panel_proxy.yml loopback browser endpoint for the panel
+#   6. profiles.yml    offline coherent exit/relay/client bundle (candidate)
+#
+# A second run is the idempotence check. Panel writes, DNS/ACME changes and
+# production cutover are out of scope; section 6 only renders the offline
+# candidate and does not publish profiles/hosts.
+- ansible.builtin.import_playbook: bootstrap.yml
+
+# bootstrap verifies a key-only administrator in a separate SSH process. The
+# remaining phases must use exactly that verified identity instead of the
+# inventory's initial (possibly root) connection.
+- name: Adopt the verified administrator for the remaining phases
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Record the verified key-only connection
+      when: bootstrap_admin_selected is defined
+      ansible.builtin.set_fact:
+        ansible_user: "{{ bootstrap_admin_selected }}"
+        ansible_ssh_private_key_file: "{{ bootstrap_admin_private_key_file | expanduser }}"
+        ansible_password: ""
+        ansible_ssh_common_args: "{{ bootstrap_key_only_ssh_args }}"
+
+- ansible.builtin.import_playbook: remnawave_node.yml
+- ansible.builtin.import_playbook: cover_site.yml
+- ansible.builtin.import_playbook: cp_proxy.yml
+- ansible.builtin.import_playbook: panel_proxy.yml
+- ansible.builtin.import_playbook: profiles.yml

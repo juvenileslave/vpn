@@ -59,7 +59,7 @@ compose-проект `remnawave` (панель, PostgreSQL, Valkey) с прив�
 | `panel_port` | `3000` | Порт на хосте, 1–65535. |
 | `remnawave_panel_env_file` | `""` | Абсолютный путь к dotenv-файлу на управляющей машине вне репозитория. |
 | `remnawave_panel_env` | `{}` | Mapping секретов (например, из зашифрованного vars-файла). |
-| `remnawave_panel_sub_public_domain` | `""` | `SUB_PUBLIC_DOMAIN`: `host[/path]` без схемы и `/` в конце, обязателен. |
+| `remnawave_panel_sub_public_domain` | derived | `SUB_PUBLIC_DOMAIN`: выводится из `subscription_public_host` + `subscription_public_path` (например `sub.example.com/sub`), обязателен непустой. Отдельное объявление в inventory отвергается (DEPLOYMENT.md). |
 | `remnawave_panel_front_end_domain` | `*` | `FRONT_END_DOMAIN` (CORS): `*` или хост. |
 | `remnawave_panel_dir` | `/opt/remnawave` | Каталог проекта. |
 | `remnawave_panel_up_timeout` | `300` | Секунды ожидания healthy в `docker compose up --wait`. |

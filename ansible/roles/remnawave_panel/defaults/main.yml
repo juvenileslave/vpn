@@ -17,7 +17,12 @@ remnawave_panel_env: {}
 
 # Non-secret panel settings (values of FRONT_END_DOMAIN / SUB_PUBLIC_DOMAIN).
 remnawave_panel_front_end_domain: "*"
-remnawave_panel_sub_public_domain: ""
+# SUB_PUBLIC_DOMAIN is derived from the single inventory publication authority
+# `subscription_public_host` + `subscription_public_path` (docs/DEPLOYMENT.md).
+# An explicit inventory value is refused by ansible/scripts/validate_inventory.py.
+remnawave_panel_sub_public_domain: >-
+  {{ ((subscription_public_host | default('')) ~ (subscription_public_path | default('')))
+     | regex_replace('/$', '') }}
 
 # Seconds `docker compose up --wait` waits for healthy containers.
 remnawave_panel_up_timeout: 300

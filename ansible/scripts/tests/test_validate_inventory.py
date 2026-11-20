@@ -422,6 +422,52 @@ class ValidateInventoryTest(unittest.TestCase):
             rule["source_cidrs"] = ["203.0.113.30/32", "2001:db8:30::30/128"]
         self.assertEqual(self.errors(), [])
 
+    def test_subscription_publication_has_one_authority(self) -> None:
+        for key, value in (
+            ("cp_proxy_server_name", "sub.example.com"),
+            ("cp_proxy_path_prefix", "/sub/"),
+            ("remnawave_panel_sub_public_domain", "sub.example.com/sub"),
+        ):
+            with self.subTest(key=key):
+                self.all_vars[key] = value
+                self.assertInvalid("must be derived from subscription_public_host")
+
+    def test_subscription_publication_requires_declared_authority(self) -> None:
+        for key in ("subscription_public_host", "subscription_public_path"):
+            with self.subTest(key=key):
+                original = self.all_vars.pop(key)
+                self.assertInvalid("is required for the panel host")
+                self.all_vars[key] = original
+        self.assertEqual(self.errors(), [])
+
+    def test_subscription_publication_values(self) -> None:
+        cases = (
+            ("subscription_public_host", "sub", "lowercase DNS name"),
+            ("subscription_public_host", "Sub.Example.com", "lowercase DNS name"),
+            ("subscription_public_host", "sub.example.org", ".example.com"),
+            ("subscription_public_host", "192.0.2.5", "lowercase DNS name"),
+            ("subscription_public_path", "sub/", "must look like /sub/"),
+            ("subscription_public_path", "/sub", "must look like /sub/"),
+            ("subscription_public_path", "/sub/../x/", "dot segments"),
+            ("subscription_public_path", "/api/", "must not expose"),
+            ("subscription_public_path", "/admin/", "must not expose"),
+            ("subscription_public_path", "/.well-known/", "must not expose"),
+        )
+        for key, value, fragment in cases:
+            with self.subTest(key=key, value=value):
+                self.all_vars[key] = value
+                self.assertInvalid(fragment)
+
+    def test_regular_inventory_may_use_a_real_subscription_host(self) -> None:
+        self.all_vars["subscription_public_host"] = "subscribe.vpn.invalid"
+        self.assertEqual(self.errors("staging"), [])
+
+    def test_example_node_api_port_must_not_reuse_upstream_default(self) -> None:
+        self.all_vars["node_api_port"] = 2222
+        self.assertInvalid("must not reuse the upstream example 2222")
+        self.all_vars["node_api_port"] = 2223
+        self.assertEqual(self.errors(), [])
+
     def test_main_reports_errors_and_exits_1(self) -> None:
         self.all_vars["xhttp_path"] = "xhttp"
         path = self.write()

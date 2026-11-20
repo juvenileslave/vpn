@@ -29,17 +29,19 @@ cd ansible
 ```
 
 Роль подключается по пути (`{{ playbook_dir }}/../roles/cp_proxy`), потому что
-общий `ansible.cfg` не задаёт `roles_path`. Переменные роли задаются в рабочем
-inventory (`host_vars`) или через `-e`; example inventory их не содержит,
-поэтому запуск на нём останавливается на проверке переменных.
+общий `ansible.cfg` не задаёт `roles_path`. `subscription_public_host/path`
+задаются в рабочем inventory; example задаёт их, но не содержит сертификата,
+поэтому запуск на нём останавливается на проверке режима сертификата. Отдельные
+`cp_proxy_server_name`, `cp_proxy_path_prefix` и `cp_proxy_upstream` в inventory
+не объявляются: они выводятся из authority и panel bind/port.
 
 ## Переменные
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
-| `cp_proxy_server_name` | — (обязательна) | DNS-имя vhost: строчные буквы, минимум одна точка; без wildcard, IP, порта и завершающей точки. |
-| `cp_proxy_upstream` | — (обязательна) | `127.x.y.z:port` или `[::1]:port` — `panel_bind:panel_port` панели. |
-| `cp_proxy_path_prefix` | `/sub/` | Публичный префикс; начинается и заканчивается `/`, без `.`/`..`; не может начинаться с `/api/`, `/admin/`, `/.well-known/`. |
+| `cp_proxy_server_name` | = `subscription_public_host` | DNS-имя vhost: строчные буквы, минимум одна точка; без wildcard, IP, порта и завершающей точки. Отдельное объявление в inventory отвергается валидатором (DEPLOYMENT.md). |
+| `cp_proxy_upstream` | `panel_bind:panel_port` (`127.0.0.1:3000` / `[::1]:3000`) | `127.x.y.z:port` или `[::1]:port` — контракт loopback-панели. |
+| `cp_proxy_path_prefix` | = `subscription_public_path` (`/sub/`, если authority не задана) | Публичный префикс; начинается и заканчивается `/`, без `.`/`..`; не может начинаться с `/api/`, `/admin/`, `/.well-known/`. |
 | `cp_proxy_upstream_path` | = `cp_proxy_path_prefix` | Путь на upstream, в который отображается префикс (например, `/api/sub/`). |
 | `cp_proxy_acme` | `false` | Режим сертификата (см. ниже). |
 | `cp_proxy_certificate_path`, `cp_proxy_key_path` | `""` | Абсолютные пути к готовым сертификату (fullchain) и ключу; только при `cp_proxy_acme: false`. |

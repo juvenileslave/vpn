@@ -215,7 +215,7 @@ base_firewall_source_ports:
     port: 8443                  # transit: объявленные relay egress
     source_cidrs: ["198.51.100.2/32", "2001:db8:20::2/128"]
   - proto: tcp
-    port: 2222                  # пример private management-сети
+    port: 2223                  # пример private management-сети
     source_cidrs: ["192.0.2.0/24", "2001:db8:10::/64"]
 ```
 

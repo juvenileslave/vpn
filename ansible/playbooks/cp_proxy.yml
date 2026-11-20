@@ -2,7 +2,7 @@
 # Subscription-page reverse proxy (architecture task 2.2). The role is resolved
 # by path because ansible.cfg does not set roles_path.
 - name: Subscription-page nginx proxy
-  hosts: cp
+  hosts: "{{ cp_proxy_hosts | default('exit' if cp_placement | default('dedicated') == 'exit' else 'cp') }}"
   become: true
   gather_facts: false
   roles:

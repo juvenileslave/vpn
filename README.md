@@ -18,6 +18,8 @@
   способы проверки.
 - [Ansible: контракт inventory](docs/ANSIBLE.md) — синтетическая топология и её
   проверка (`make -C ansible validate`); развёртывание не реализовано.
+- [Воспроизводимое развёртывание](docs/DEPLOYMENT.md) — единый `site.yml`,
+  authority подписки, drift detection и точная граница runtime acceptance.
 - [Bootstrap до приватной панели](docs/BOOTSTRAP.md) — один guarded запуск
   root-доступ → Linux-администратор → hardening → Docker → loopback-панель;
   не создаёт учётную запись Remnawave, подписки или публичный HTTPS.
