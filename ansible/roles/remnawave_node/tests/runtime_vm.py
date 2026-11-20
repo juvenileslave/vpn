@@ -24,12 +24,23 @@ import yaml
 SAFE_TASKS = {
     'Validate node inputs before host mutation',
     'Validate candidate PKI compose and active base ACL',
+    'Stage executable transaction and authenticated health probe',
+    'Stage the candidate compose model',
+    'Stage secret inputs without logs or diffs',
     'Roll out with authenticated health gate and credential-safe restoration',
+    'Verify intended CP path with current credentials',
+    'Commit only after the intended control-plane path succeeds',
+    'Allocate management probe on the actual control-plane host',
+    'Stage the public API client on the CP',
+    'Stage transient CP credentials',
     'Perform genuine mTLS and JWT health operation from the CP source',
+    'Erase CP probe credentials',
     'Restore checked deployment without undoing credential revocation',
     'Fail closed when restored local or control-plane health is unavailable',
     'Reject restoration after stopping only the transaction-owned node',
     'Stop rollout after a failed gate even when restoration succeeded',
+    'Remove transaction credentials',
+    'Remove private transaction files',
     'Render owned nftables table', 'Verify owned table is loaded',
 }
 
