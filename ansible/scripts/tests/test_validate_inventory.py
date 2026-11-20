@@ -275,10 +275,15 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertTrue(self.errors())
 
     def test_management_origin_and_public_conflicts(self) -> None:
-        for value in (True, "8445", 22, 2222, 8443):
+        # The conflict must follow the declared API port; the example no longer
+        # reuses the upstream 2222 value.
+        api_port = self.all_vars["node_api_port"]
+        for value in (True, "8445", 22, api_port, 8443):
             with self.subTest(value=value):
                 self.group_vars["exit"]["cover_tls_port"] = value
                 self.assertTrue(self.errors())
+        self.group_vars["exit"]["cover_tls_port"] = api_port
+        self.assertInvalid("listener/SSH/API/origin/HTTP01 ports collide")
 
     def test_fixed_self_steal_options_rejected_by_inventory(self) -> None:
         original = copy.deepcopy(self.all_vars)
@@ -420,6 +425,54 @@ class ValidateInventoryTest(unittest.TestCase):
                 if item["port"] == self.all_vars["node_api_port"]
             )
             rule["source_cidrs"] = ["203.0.113.30/32", "2001:db8:30::30/128"]
+        self.assertEqual(self.errors(), [])
+
+    def test_subscription_publication_has_one_authority(self) -> None:
+        for key, value, fragment in (
+            ("cp_proxy_server_name", "sub.example.com", "subscription_public_host"),
+            ("cp_proxy_path_prefix", "/sub/", "subscription_public_host"),
+            ("cp_proxy_upstream", "127.0.0.1:3000", "panel_bind:panel_port"),
+            ("remnawave_panel_sub_public_domain", "sub.example.com/sub",
+             "subscription_public_host"),
+        ):
+            with self.subTest(key=key):
+                self.all_vars[key] = value
+                self.assertInvalid(f"must be derived from {fragment}")
+
+    def test_subscription_publication_requires_declared_authority(self) -> None:
+        for key in ("subscription_public_host", "subscription_public_path"):
+            with self.subTest(key=key):
+                original = self.all_vars.pop(key)
+                self.assertInvalid("is required for the panel host")
+                self.all_vars[key] = original
+        self.assertEqual(self.errors(), [])
+
+    def test_subscription_publication_values(self) -> None:
+        cases = (
+            ("subscription_public_host", "sub", "lowercase DNS name"),
+            ("subscription_public_host", "Sub.Example.com", "lowercase DNS name"),
+            ("subscription_public_host", "sub.example.org", ".example.com"),
+            ("subscription_public_host", "192.0.2.5", "lowercase DNS name"),
+            ("subscription_public_path", "sub/", "must look like /sub/"),
+            ("subscription_public_path", "/sub", "must look like /sub/"),
+            ("subscription_public_path", "/sub/../x/", "dot segments"),
+            ("subscription_public_path", "/api/", "must not expose"),
+            ("subscription_public_path", "/admin/", "must not expose"),
+            ("subscription_public_path", "/.well-known/", "must not expose"),
+        )
+        for key, value, fragment in cases:
+            with self.subTest(key=key, value=value):
+                self.all_vars[key] = value
+                self.assertInvalid(fragment)
+
+    def test_regular_inventory_may_use_a_real_subscription_host(self) -> None:
+        self.all_vars["subscription_public_host"] = "subscribe.vpn.invalid"
+        self.assertEqual(self.errors("staging"), [])
+
+    def test_example_node_api_port_must_not_reuse_upstream_default(self) -> None:
+        self.all_vars["node_api_port"] = 2222
+        self.assertInvalid("must not reuse the upstream example 2222")
+        self.all_vars["node_api_port"] = 2223
         self.assertEqual(self.errors(), [])
 
     def test_main_reports_errors_and_exits_1(self) -> None:

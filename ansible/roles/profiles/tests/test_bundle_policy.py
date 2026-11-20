@@ -22,7 +22,7 @@ class BundlePolicyTest(unittest.TestCase):
     def test_transit_source_agreement_and_non_public_management(self):
         self.rejected(lambda t, s: t["relay"].update(relay_egress_ipv4="198.51.100.99"))
         self.rejected(lambda t, s: t["exit"]["base_firewall_source_ports"][0].update(source_cidrs=["198.51.100.0/24", "2001:db8:20::20/128"]))
-        self.rejected(lambda t, s: t["exit"]["base_firewall_vpn_ports"].append({"proto": "tcp", "port": 2222}))
+        self.rejected(lambda t, s: t["exit"]["base_firewall_vpn_ports"].append({"proto": "tcp", "port": t["exit"]["node_api_port"]}))
         self.rejected(lambda t, s: t["exit"]["base_firewall_vpn_ports"].append({"proto": "tcp", "port": 8444}))
         self.rejected(lambda t, s: t["exit"]["base_firewall_source_ports"].append({"proto": "tcp", "port": t["exit"]["cover_tls_port"], "source_cidrs": ["192.0.2.1/32"]}))
         self.rejected(lambda t, s: t["exit"]["base_firewall_source_ports"][0].update(port=True))

@@ -23,15 +23,24 @@ panel-пинов/доменов и источника секретов.
 ```text
 ansible/
   ansible.cfg
-  playbooks/{base,bootstrap,cover_site,remnawave_node,profiles}.yml
+  playbooks/
+    site.yml, bootstrap.yml, base.yml, cover_site.yml, cp_proxy.yml,
+    panel_proxy.yml, remnawave_node.yml, remnawave_panel.yml, profiles.yml
   inventories/example/
     hosts.yml
     group_vars/{all,exit,relay,cp}.yml
     host_vars/{exit,relay,cp}-example.yml
-  roles/{base,bootstrap,cover_site,remnawave_node,profiles}/
+  roles/{base,bootstrap,cover_site,cp_proxy,panel_proxy,
+         remnawave_node,remnawave_panel,profiles}/
   scripts/validate_inventory.py
-  scripts/tests/{test_validate_inventory,test_render_profiles}.py
+  scripts/tests/{test_validate_inventory,test_deployment_state,test_render_profiles}.py
 ```
+
+`playbooks/site.yml` — единственный упорядоченный entrypoint принятого набора:
+`bootstrap` → `remnawave_node` → `cover_site` → `cp_proxy` → `panel_proxy` →
+`profiles`. Он только импортирует существующие playbook'и; порядок, переменные
+и граница «воспроизводимо / runtime acceptance» описаны в
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 > Примечание: помимо перечисленного, каталог содержит playbook'и и роли
 > (`playbooks/`, `roles/`) принятых компонентов; их контракты описаны в
@@ -113,8 +122,9 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
   subnets и не выводит transit sources самостоятельно.
 - `node_api_port`: обязательный явный порт. Неявного fallback `2222` нет;
   source TCP rule должен в точности совпадать с `node_port_allow`, а публичное
-  объявление этого порта запрещено. Удалённый (`dedicated`) CP не может иметь
-  loopback-only `node_port_allow`.
+  объявление этого порта запрещено. Example объявляет другой явный порт:
+  `2222` — только upstream-пример, и example-validator его отвергает. Удалённый
+  (`dedicated`) CP не может иметь loopback-only `node_port_allow`.
 - `node_port_allow`: safe CIDRs; допустимы также только exact management
   loopback `127.0.0.1/32`, `::1/128`. SSH trust policy этим не ослабляется.
   Пустой список, `0.0.0.0/0`, `::/0` и `any` отвергаются. Для colocated panel —
@@ -137,6 +147,37 @@ management probe использует mTLS/TLS1.3 + RS256 JWT. Секреты н
 `probe.example.com` в example не является работающим сервисом. Offline schema
 не подтверждает DNS, ACME issuance, SAN/chain/expiry, H2, namespace или client
 transfer: это отдельные real runtime gates.
+
+## Публикация подписки и drift
+
+`subscription_public_host` и `subscription_public_path` — одна authority
+публичного subscription endpoint. Из неё выводятся `SUB_PUBLIC_DOMAIN` панели и
+`server_name`/`path_prefix` vhost `cp_proxy`; upstream выводится из
+`panel_bind:panel_port`. Отдельные `remnawave_panel_sub_public_domain`,
+`cp_proxy_server_name`, `cp_proxy_path_prefix` и `cp_proxy_upstream` в inventory
+отвергаются как второй источник. Детали — [DEPLOYMENT.md](DEPLOYMENT.md).
+
+Drift использует тот же валидатор и не рендерит второй конфиг:
+
+```sh
+make -C ansible state STATE_INVENTORY=/abs/outside-checkout/hosts.yml
+make -C ansible drift STATE_INVENTORY=/abs/outside-checkout/hosts.yml \
+  STATE=/abs/outside-checkout/observed.json
+```
+
+`STATE_INVENTORY` обязателен; без него рецепт завершается кодом `64`, а make
+возвращает `2`.
+
+`state` пишет канонический expected state из inventory; `drift` сравнивает его с
+observed snapshot (`schema: 1`) и печатает только пути `missing`/`extra`/
+`mismatch` без значений. Exit codes прямого вызова
+`scripts/validate_inventory.py`: `0` — чисто, `1` — drift или неверный
+inventory, `2` — неверный snapshot, `64` — не задан обязательный
+`STATE_INVENTORY`/`STATE`. **Через make** любой провал рецепта схлопывается в
+`2`: `1`/`64` наблюдаемы только при прямом вызове валидатора, `0`/`2`
+совпадают с успехом/провалом make.
+Сбор живого snapshot и сквозная проверка остаются runtime acceptance, а не
+статическим доказательством.
 
 ## Синтетический пример и приватный inventory
 

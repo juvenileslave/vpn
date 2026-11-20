@@ -37,8 +37,11 @@
   -e cp_backup_recipients_file=/путь/вне/git/recipients.txt
 ```
 
-По умолчанию плейбук применяется к группе `cp`; другую группу или хост задаёт
-`-e cp_backup_hosts=<шаблон>` (например, exit при `cp_placement: exit`).
+По умолчанию плейбук выбирает panel-хост по inventory-группам: single cp при
+`cp_placement: dedicated` или exit при `cp_placement: exit`. Другую группу или
+хост задаёт `-e cp_backup_hosts=<шаблон>`. Без override несоответствие
+`cp_placement` останавливает запуск до ролей; при явном override guard
+пропускается, и согласованность выбранного хоста проверяет оператор.
 Роль устанавливает:
 
 - `/usr/local/sbin/cp-backup` — скрипт резервного копирования;

@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import ipaddress
+import json
+from functools import lru_cache
 from pathlib import Path
 import re
 import sys
@@ -39,6 +41,10 @@ AUTHORITY_KEYS = (
     "node_api_port", "node_port_allow", "base_firewall_enabled",
     "base_firewall_bootstrap_exception", "base_firewall_vpn_ports",
     "base_firewall_source_ports",
+    # One publication authority and no separately declared duplicates.
+    "subscription_public_host", "subscription_public_path",
+    "cp_proxy_server_name", "cp_proxy_path_prefix", "cp_proxy_upstream",
+    "remnawave_panel_sub_public_domain",
 )
 BOOTSTRAP_EXCEPTION_FIELDS = {"temporary", "source_cidrs"}
 DOCUMENTATION_NETWORKS = tuple(
@@ -54,9 +60,27 @@ EXAMPLE_SNI_SUFFIX = ".example.com"
 YAML_SUFFIXES = (".yml", ".yaml")
 HOST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 DNS_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
+# Same contract as the cp_proxy role: lowercase DNS name, no wildcard/IP/port.
+SUBSCRIPTION_HOST = re.compile(
+    r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+)
+SUBSCRIPTION_PATH = re.compile(r"^/([A-Za-z0-9._~-]+/)+$")
+SUBSCRIPTION_RESERVED = ("/api/", "/admin/", "/.well-known/")
+# Managed-state snapshot schema used by --state/--write-expected.
+STATE_SCHEMA = 1
 
 # A layered variable keeps the location it came from for error messages.
 Located = tuple[Any, str]
+
+
+@lru_cache(maxsize=1)
+def profile_contract() -> Any:
+    """The accepted offline profile contract; one source for its defaults."""
+    module_path = Path(__file__).resolve().parents[1] / "roles/profiles/module_utils/profile_bundle.py"
+    spec = importlib.util.spec_from_file_location("vpn_profile_contract", module_path)
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    return contract
 
 
 class Inventory:
@@ -69,6 +93,7 @@ class Inventory:
         self.group_inline: dict[str, dict[str, Located]] = {}
         self.group_files: dict[str, dict[str, Located]] = {}
         self.host_files: dict[str, dict[str, Located]] = {}
+        self.placement: Any = None
 
     def error(self, message: str) -> None:
         if message not in self.errors:
@@ -246,6 +271,7 @@ class Inventory:
                     if isinstance(placement, str):
                         placements.add(placement)
         self.validate_topology(placements)
+        self.validate_publication()
         self.validate_profiles()
 
     def placement_value(self, located: Located) -> Any:
@@ -334,6 +360,65 @@ class Inventory:
                 self.error(f"{name}: cp host must be distinct from the exit host")
         elif placement == "exit" and cps:
             self.error(f"{name}: cp_placement exit requires an empty cp group; the control plane runs on exit")
+        self.placement = placement
+
+    def panel_layer(self) -> tuple[str, str] | None:
+        """The single host that owns the panel and the subscription vhost."""
+        if self.placement == "dedicated":
+            hosts = list(self.groups.get("cp", {}))
+            return ("cp", hosts[0]) if len(hosts) == 1 else None
+        if self.placement == "exit":
+            hosts = list(self.groups.get("exit", {}))
+            return ("exit", hosts[0]) if len(hosts) == 1 else None
+        return None
+
+    def validate_publication(self) -> None:
+        """One declared authority for the public subscription endpoint."""
+        layer = self.panel_layer()
+        if layer is None:
+            return
+        group, host = layer
+        values = self.effective(group, host)
+        where = f"host {host}"
+
+        located = values.get("subscription_public_host")
+        if located is None:
+            self.error(f"{where}: subscription_public_host is required for the panel host")
+        else:
+            value, origin = located
+            if not isinstance(value, str) or not SUBSCRIPTION_HOST.fullmatch(value):
+                self.error(f"{origin}: must be a lowercase DNS name with a dot; no wildcard, IP or port")
+            elif len(value) > 253:
+                self.error(f"{origin}: must be at most 253 characters")
+            elif self.example and not value.endswith(EXAMPLE_SNI_SUFFIX):
+                self.error(f"{origin}: example subscription host must end with {EXAMPLE_SNI_SUFFIX}")
+
+        located = values.get("subscription_public_path")
+        if located is None:
+            self.error(f"{where}: subscription_public_path is required for the panel host")
+        else:
+            value, origin = located
+            if not isinstance(value, str) or not SUBSCRIPTION_PATH.fullmatch(value):
+                self.error(f"{origin}: must look like /sub/ (starts and ends with '/', no whitespace)")
+            elif any(segment in (".", "..") for segment in value.strip("/").split("/")):
+                self.error(f"{origin}: dot segments are not allowed")
+            elif any(reserved in value.lower() for reserved in SUBSCRIPTION_RESERVED):
+                self.error(f"{origin}: must not expose /api/, /admin/ or /.well-known/")
+
+        # The role defaults derive these values. A separate declaration would
+        # become a second, undetected source of publication drift.
+        derived_from = {
+            "cp_proxy_upstream": "panel_bind:panel_port",
+        }
+        for key in ("cp_proxy_server_name", "cp_proxy_path_prefix",
+                    "cp_proxy_upstream", "remnawave_panel_sub_public_domain"):
+            located = values.get(key)
+            if located is not None:
+                source = derived_from.get(
+                    key, "subscription_public_host/subscription_public_path"
+                )
+                self.error(f"{located[1]}: must be derived from {source}; "
+                           "remove the duplicate declaration")
 
     def validate_management(self, group: str, host: str, values: dict[str, Located]) -> None:
         where = f"host {host}"
@@ -367,6 +452,9 @@ class Inventory:
                 self.error(f"{origin}: must be an integer port 1-65535")
             else:
                 api_port = value
+                if self.example and api_port == 2222:
+                    self.error(f"{origin}: must not reuse the upstream example 2222; "
+                               "declare the deployment's explicit management port")
         ssh = values.get("base_ssh_port")
         if api_port is not None and ssh is not None and type(ssh[0]) is int and api_port == ssh[0]:
             self.error(f"{api[1]}: node API port must differ from base_ssh_port")
@@ -509,10 +597,7 @@ class Inventory:
 
     def validate_profiles(self) -> None:
         """Static cross-role gates; DNS/certificate/runtime remain separate."""
-        module_path = Path(__file__).resolve().parents[1] / "roles/profiles/module_utils/profile_bundle.py"
-        spec = importlib.util.spec_from_file_location("vpn_profile_contract", module_path)
-        contract = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(contract)
+        contract = profile_contract()
         nodes = {}
         for group in ("exit", "relay"):
             if len(self.groups[group]) != 1:
@@ -549,6 +634,113 @@ class Inventory:
         hosts = "; ".join(f"{group}: {', '.join(hosts) or '-'}" for group, hosts in self.groups.items())
         mode = "example" if self.example else "regular"
         return f"Inventory OK: {self.label(self.path)} ({mode}; {hosts})"
+
+
+def expected_state(inventory: Inventory) -> dict[str, Any]:
+    """Managed-state publication contract derived from a valid inventory.
+
+    The expected state is not a second renderer: it contains only the declared
+    inventory authority (subscription endpoint, node API exposure, cover
+    identity). Role-owned defaults stay in the roles.
+    """
+    layer = inventory.panel_layer()
+    if layer is None:
+        raise ValueError("inventory has no single panel host")
+    group, panel_host = layer
+    values = inventory.effective(group, panel_host)
+    subscription_host = values["subscription_public_host"][0]
+    subscription_path = values["subscription_public_path"][0]
+    state: dict[str, Any] = {
+        "schema": STATE_SCHEMA,
+        "panel_host": panel_host,
+        "subscription": {
+            "host": subscription_host,
+            "path": subscription_path,
+            "server_name": subscription_host,
+            "path_prefix": subscription_path,
+            "sub_public_domain": subscription_host + subscription_path.rstrip("/"),
+        },
+        "nodes": {},
+    }
+    for node_group in NODE_GROUPS:
+        node_host = next(iter(inventory.groups[node_group]))
+        node_values = inventory.effective(node_group, node_host)
+        state["nodes"][node_host] = {
+            "api_port": node_values["node_api_port"][0],
+            "node_port_allow": sorted(
+                str(ipaddress.ip_network(item, strict=True))
+                for item in node_values["node_port_allow"][0]
+            ),
+            "base_firewall_vpn_ports": sorted(
+                f"{item['proto']}/{item['port']}"
+                for item in node_values["base_firewall_vpn_ports"][0]
+            ),
+            # Role/contract default for an omitted value, from the shared
+            # profile contract; an explicit value is preserved.
+            "cover_tls_port": node_values.get(
+                "cover_tls_port", (profile_contract().DEFAULT_COVER_TLS_PORT,)
+            )[0],
+            "reality_sni": node_values["reality_sni"][0],
+        }
+    return state
+
+
+def write_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def load_state(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"cannot read snapshot: {exc.strerror}"
+    try:
+        data = json.loads(text) if path.suffix == ".json" else yaml.safe_load(text)
+    except (ValueError, yaml.YAMLError):
+        return None, "snapshot is not valid JSON/YAML"
+    if not isinstance(data, dict):
+        return None, "snapshot must be a mapping"
+    if type(data.get("schema")) is not int or data.get("schema") != STATE_SCHEMA:
+        return None, f"snapshot schema must be {STATE_SCHEMA}"
+    for section in ("subscription", "nodes"):
+        if section in data and not isinstance(data[section], dict):
+            return None, f"snapshot section '{section}' must be a mapping"
+    if "panel_host" in data and not isinstance(data["panel_host"], str):
+        return None, "snapshot panel_host must be a string"
+    return data, None
+
+
+def _scalar_key(value: Any) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def state_drift(expected: Any, observed: Any, path: str = "") -> list[str]:
+    """Deterministic missing/extra/mismatch paths; values are never included."""
+    problems: list[str] = []
+    if isinstance(expected, dict):
+        if not isinstance(observed, dict):
+            return [f"{path or '<root>'}: mismatch"]
+        for key in sorted(set(expected) | set(observed), key=str):
+            child = f"{path}.{key}" if path else str(key)
+            if key not in observed:
+                problems.append(f"{child}: missing")
+            elif key not in expected:
+                problems.append(f"{child}: extra")
+            else:
+                problems.extend(state_drift(expected[key], observed[key], child))
+        return problems
+    if isinstance(expected, list):
+        if not isinstance(observed, list):
+            return [f"{path}: mismatch"]
+        if sorted(map(_scalar_key, expected)) != sorted(map(_scalar_key, observed)):
+            problems.append(f"{path}: mismatch")
+        return problems
+    if type(expected) is not type(observed) or expected != observed:
+        problems.append(f"{path}: mismatch")
+    return problems
 
 
 def in_networks(item: Any, networks: tuple[Any, ...]) -> bool:
@@ -604,6 +796,16 @@ def validate(path: Path, example: bool | None = None) -> Inventory:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--inventory", required=True, type=Path, help="path to hosts.yml")
+    parser.add_argument(
+        "--state",
+        type=Path,
+        help="observed managed-state snapshot; report drift and exit 1",
+    )
+    parser.add_argument(
+        "--write-expected",
+        type=Path,
+        help="write the canonical expected state derived from the inventory",
+    )
     args = parser.parse_args(argv)
     inventory = validate(args.inventory)
     if inventory.errors:
@@ -612,6 +814,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {message}", file=sys.stderr)
         return 1
     print(inventory.summary())
+    state = expected_state(inventory)
+    if args.write_expected:
+        write_state(args.write_expected, state)
+        print(f"Expected state written: {args.write_expected}")
+    if args.state:
+        observed, problem = load_state(args.state)
+        if problem:
+            print(f"Invalid state snapshot: {problem}", file=sys.stderr)
+            return 2
+        drift = state_drift(state, observed)
+        if drift:
+            print(f"State drift: {len(drift)} difference(s)", file=sys.stderr)
+            for path in drift:
+                print(f"  - {path}", file=sys.stderr)
+            return 1
+        print(f"State OK: {args.state}")
     return 0
 
 

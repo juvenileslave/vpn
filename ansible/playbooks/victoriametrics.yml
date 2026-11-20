@@ -1,12 +1,17 @@
 ---
 # Pinned single-node VictoriaMetrics (architecture task 10.1). See docs/METRICS_ROLE.md.
 # Example: ansible-playbook -i <inventory> playbooks/victoriametrics.yml
-# Default target is the CP group; with cp_placement: exit run with
-# -e victoriametrics_hosts=exit.
+# Default target follows cp_placement via inventory groups: the single cp host
+# (dedicated) or the exit host (exit placement); victoriametrics_hosts overrides.
 - name: Install pinned single-node VictoriaMetrics
-  hosts: "{{ victoriametrics_hosts | default('cp') }}"
+  hosts: "{{ victoriametrics_hosts | default(groups.get('cp', []) if groups.get('cp', []) | length else groups.get('exit', [])) }}"
   become: true
   gather_facts: true
+  pre_tasks:
+    - name: Require a consistent panel host selection
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/require_panel_host.yml"
+      vars:
+        panel_hosts_override: "{{ victoriametrics_hosts | default('') }}"
   roles:
     # Project-local path relative to this playbook; no ANSIBLE_ROLES_PATH needed.
     - role: ../roles/victoriametrics

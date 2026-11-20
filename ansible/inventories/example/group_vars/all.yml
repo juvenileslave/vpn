@@ -9,8 +9,17 @@ node_port_allow:
   - ::1/128
   - 203.0.113.30/32
   - 2001:db8:30::30/128
-node_api_port: 2222
+# Explicit private management port. 2222 is only the upstream example and is
+# not part of the accepted example contract (see docs/DEPLOYMENT.md).
+node_api_port: 2223
 base_ssh_port: 22
+# One authority for the public subscription endpoint. The panel
+# SUB_PUBLIC_DOMAIN, the cp_proxy vhost server_name/path prefix and the proxy
+# upstream (panel_bind:panel_port) are derived from these two values. Do not
+# declare remnawave_panel_sub_public_domain, cp_proxy_server_name or
+# cp_proxy_path_prefix separately: the inventory validator refuses duplicates.
+subscription_public_host: sub.example.com
+subscription_public_path: /sub/
 # The accepted production-like contract enables the base firewall; the
 # administrator bootstrap is the only explicitly scoped temporary exception.
 base_firewall_enabled: true
