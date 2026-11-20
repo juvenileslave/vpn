@@ -22,10 +22,10 @@ runtime = load('node_runtime', ROLE / 'tests/runtime_vm.py')
 
 
 class NodeInputTests(unittest.TestCase):
-    def allowed(self, sources=None, rules=None, port=2222, public=None, placement='exit', source='127.0.0.1', address='127.0.0.1'):
+    def allowed(self, sources=None, rules=None, port=2222, public=None, placement='exit', source='127.0.0.1', address='127.0.0.1', firewall=True, exception=None):
         sources = ['127.0.0.1/32', '::1/128'] if sources is None else sources
         rules = [{'proto': 'tcp', 'port': port, 'source_cidrs': sources}] if rules is None else rules
-        return acl.acl_valid(sources, rules, port, public or [], 22, placement, source, address)
+        return acl.acl_valid(sources, rules, port, public or [], 22, placement, source, address, firewall, exception)
 
     def test_exact_loopback_colocated(self):
         self.assertTrue(self.allowed())
@@ -55,6 +55,20 @@ class NodeInputTests(unittest.TestCase):
         self.assertFalse(self.allowed(['10.203.46.2/32'], placement='dedicated', source='10.203.46.3', address='10.203.46.1'))
         self.assertFalse(self.allowed(['10.203.46.2/32'], placement='dedicated', source='10.203.46.2', address='8.8.8.8'))
         self.assertTrue(self.allowed(['172.18.0.2/32'], source='172.18.0.2', address='172.18.0.1'))
+
+    def test_preflight_requires_enabled_firewall_and_no_temporary_exception(self):
+        self.assertTrue(self.allowed())
+        for firewall in (False, 'true', 1, None):
+            with self.subTest(firewall=firewall):
+                self.assertFalse(self.allowed(firewall=firewall))
+        self.assertFalse(self.allowed(exception={'temporary': True, 'source_cidrs': ['127.0.0.1/32']}))
+        self.assertFalse(self.allowed(exception={}))
+
+    def test_remote_cp_rejects_loopback_only_management(self):
+        self.assertFalse(self.allowed(['127.0.0.1/32'], placement='dedicated',
+                                      source='10.203.46.2', address='10.203.46.1'))
+        self.assertFalse(self.allowed(['0.0.0.0/0'], placement='dedicated',
+                                      source='10.203.46.2', address='10.203.46.1'))
 
     def test_payload_is_encoded_pki_not_random_password(self):
         for secret in ['password', '', base64.b64encode(b'{}').decode(), base64.b64encode(b'[]').decode()]:

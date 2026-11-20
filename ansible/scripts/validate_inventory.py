@@ -33,6 +33,14 @@ COMMON_KEYS = (
     "xhttp_path", "xhttp_mode", "image_tags",
 )
 ADDRESS_KEYS = ("public_ipv4", "public_ipv6")
+NODE_GROUPS = ("exit", "relay")
+# Exactly one inventory layer owns each management/firewall decision.
+AUTHORITY_KEYS = (
+    "node_api_port", "node_port_allow", "base_firewall_enabled",
+    "base_firewall_bootstrap_exception", "base_firewall_vpn_ports",
+    "base_firewall_source_ports",
+)
+BOOTSTRAP_EXCEPTION_FIELDS = {"temporary", "source_cidrs"}
 DOCUMENTATION_NETWORKS = tuple(
     ipaddress.ip_network(net)
     for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
@@ -199,6 +207,7 @@ class Inventory:
             if key in file_vars and file_vars[key][0] != value:
                 self.error(f"{file_vars[key][1]}: conflicts with {origin}")
         merged: dict[str, Located] = {}
+        authority: dict[str, str] = {}
         for layer in (
             self.group_inline.get("all", {}),
             self.group_inline.get(group, {}),
@@ -207,6 +216,14 @@ class Inventory:
             inline,
             file_vars,
         ):
+            for key, (_value, origin) in layer.items():
+                if key in AUTHORITY_KEYS:
+                    if key in authority:
+                        self.error(
+                            f"{origin}: {key} must have one authority; also defined in {authority[key]}"
+                        )
+                    else:
+                        authority[key] = origin
             merged.update(layer)
         return merged
 
@@ -223,6 +240,7 @@ class Inventory:
                 values = self.effective(group, host)
                 self.validate_host(group, host, values, addresses)
                 self.validate_common(host, values)
+                self.validate_management(group, host, values)
                 if "cp_placement" in values:
                     placement = self.placement_value(values["cp_placement"])
                     if isinstance(placement, str):
@@ -317,22 +335,169 @@ class Inventory:
         elif placement == "exit" and cps:
             self.error(f"{name}: cp_placement exit requires an empty cp group; the control plane runs on exit")
 
+    def validate_management(self, group: str, host: str, values: dict[str, Located]) -> None:
+        where = f"host {host}"
+        enabled = values.get("base_firewall_enabled")
+        exception = values.get("base_firewall_bootstrap_exception")
+        if enabled is None:
+            self.error(f"{where}: base_firewall_enabled is required; declare true or an explicit "
+                       "temporary base_firewall_bootstrap_exception")
+        else:
+            value, origin = enabled
+            if not isinstance(value, bool):
+                self.error(f"{origin}: must be true or false")
+            elif value:
+                if exception is not None:
+                    self.error(f"{exception[1]}: must be absent when base_firewall_enabled is true")
+            elif exception is None:
+                self.error(f"{origin}: base_firewall_enabled=false is refused outside an explicit "
+                           "temporary base_firewall_bootstrap_exception")
+            else:
+                self.validate_bootstrap_exception(values, exception)
+        if group not in NODE_GROUPS:
+            return
+
+        api = values.get("node_api_port")
+        api_port: int | None = None
+        if api is None:
+            self.error(f"{where}: node_api_port is required; there is no implicit 2222 fallback")
+        else:
+            value, origin = api
+            if type(value) is not int or not 1 <= value <= 65535:
+                self.error(f"{origin}: must be an integer port 1-65535")
+            else:
+                api_port = value
+        ssh = values.get("base_ssh_port")
+        if api_port is not None and ssh is not None and type(ssh[0]) is int and api_port == ssh[0]:
+            self.error(f"{api[1]}: node API port must differ from base_ssh_port")
+
+        allow_networks: set[Any] | None = None
+        allow = values.get("node_port_allow")
+        if allow is None:
+            self.error(f"{where}: node_port_allow is required")
+        else:
+            value, origin = allow
+            if not isinstance(value, list):
+                self.error(f"{origin}: must be a list of CIDRs")
+            elif not value:
+                self.error(f"{origin}: must not be empty")
+            else:
+                parsed = set()
+                for item in value:
+                    try:
+                        parsed.add(ipaddress.ip_network(item, strict=True))
+                    except (TypeError, ValueError):
+                        pass
+                if len(parsed) == len(value):
+                    allow_networks = parsed
+        placement = values.get("cp_placement")
+        if (placement is not None and placement[0] == "dedicated"
+                and allow_networks and all(network.is_loopback for network in allow_networks)):
+            self.error(f"{allow[1]}: dedicated remote CP cannot use loopback-only management sources")
+
+        public = values.get("base_firewall_vpn_ports")
+        if api_port is not None:
+            if public is None:
+                self.error(f"{where}: base_firewall_vpn_ports is required")
+            else:
+                public_value, public_origin = public
+                if not isinstance(public_value, list):
+                    self.error(f"{public_origin}: must be a list")
+                elif any(isinstance(item, dict) and item.get("port") == api_port
+                         for item in public_value):
+                    self.error(f"{where}: node_api_port must not be declared as a public "
+                               "base_firewall_vpn_ports listener")
+
+        rules = values.get("base_firewall_source_ports")
+        if api_port is None:
+            return
+        if rules is None:
+            self.error(f"{where}: base_firewall_source_ports is required")
+            return
+        rules_value, rules_origin = rules
+        if not isinstance(rules_value, list):
+            self.error(f"{rules_origin}: must be a list")
+            return
+        matches = [item for item in rules_value
+                   if isinstance(item, dict) and item.get("port") == api_port]
+        if len(matches) != 1:
+            self.error(f"{where}: node_api_port requires exactly one base_firewall_source_ports "
+                       f"rule, found {len(matches)}")
+            return
+        rule = matches[0]
+        if rule.get("proto") != "tcp":
+            self.error(f"{where}: node API base_firewall_source_ports rule must be tcp")
+        sources = rule.get("source_cidrs")
+        if not isinstance(sources, list) or not sources:
+            self.error(f"{where}: node API source rule requires a nonempty source_cidrs list")
+            return
+        if allow_networks is not None:
+            normalized = set()
+            for item in sources:
+                try:
+                    normalized.add(ipaddress.ip_network(item, strict=True))
+                except (TypeError, ValueError):
+                    return
+            if normalized != allow_networks:
+                self.error(f"{where}: node API source_cidrs must equal node_port_allow")
+
+    def validate_bootstrap_exception(self, values: dict[str, Located], located: Located) -> None:
+        value, origin = located
+        if not isinstance(value, dict) or set(value) != BOOTSTRAP_EXCEPTION_FIELDS:
+            self.error(f"{origin}: expected a mapping with temporary and source_cidrs")
+            return
+        if value.get("temporary") is not True:
+            self.error(f"{origin}.temporary: must be true; the exception is temporary")
+        sources = value.get("source_cidrs")
+        if not isinstance(sources, list) or not sources:
+            self.error(f"{origin}.source_cidrs: expected a nonempty list of CIDRs")
+            return
+        networks = set()
+        for index, item in enumerate(sources):
+            problem = self.management_cidr_error(item)
+            if problem:
+                self.error(f"{origin}.source_cidrs[{index}]: {problem}")
+            else:
+                networks.add(ipaddress.ip_network(item, strict=True))
+        allow = values.get("node_port_allow")
+        if allow is None or not isinstance(allow[0], list) or not allow[0]:
+            return
+        try:
+            allowed = {ipaddress.ip_network(item, strict=True) for item in allow[0]}
+        except (TypeError, ValueError):
+            return
+        if networks and networks != allowed:
+            self.error(f"{origin}.source_cidrs: must equal node_port_allow; the exception is ACL-scoped")
+
+    def management_cidr_error(self, item: Any) -> str | None:
+        if not isinstance(item, str) or "/" not in item:
+            return "must be a CIDR such as 192.0.2.0/24"
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError:
+            return f"invalid CIDR {item!r}"
+        if network.is_loopback and str(network) not in ("127.0.0.1/32", "::1/128"):
+            return "only exact standard loopback management is allowed"
+        if network.is_multicast or network.is_unspecified or network.prefixlen < (8 if network.version == 4 else 32):
+            return "unsafe or wide management CIDR"
+        if self.example and str(network) not in ("127.0.0.1/32", "::1/128") and not in_networks(network, DOCUMENTATION_NETWORKS + PRIVATE_NETWORKS):
+            return "example CIDR must be in documentation or private ranges"
+        return None
+
     def check_node_port_allow(self, value: Any) -> str | None:
         if not isinstance(value, list):
             return "must be a list of CIDRs"
+        if not value:
+            return "must not be empty"
+        seen = set()
         for index, item in enumerate(value):
-            if not isinstance(item, str) or "/" not in item:
-                return f"item {index}: must be a CIDR such as 192.0.2.0/24"
-            try:
-                network = ipaddress.ip_network(item, strict=True)
-            except ValueError:
-                return f"item {index}: invalid CIDR {item!r}"
-            if network.is_loopback and str(network) not in ("127.0.0.1/32", "::1/128"):
-                return f"item {index}: only exact standard loopback management is allowed"
-            if network.is_multicast or network.is_unspecified or network.prefixlen < (8 if network.version == 4 else 32):
-                return f"item {index}: unsafe or wide management CIDR"
-            if self.example and str(network) not in ("127.0.0.1/32", "::1/128") and not in_networks(network, DOCUMENTATION_NETWORKS + PRIVATE_NETWORKS):
-                return f"item {index}: example CIDR must be in documentation or private ranges"
+            problem = self.management_cidr_error(item)
+            if problem:
+                return f"item {index}: {problem}"
+            network = str(ipaddress.ip_network(item, strict=True))
+            if network in seen:
+                return f"item {index}: duplicate CIDR"
+            seen.add(network)
         return None
 
     def check_reality_sni(self, value: Any) -> str | None:

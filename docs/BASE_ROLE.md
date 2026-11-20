@@ -56,9 +56,10 @@ Ubuntu 22.04 в рантайме не проверялись.
 | `base_ssh_port` | `22` | Порт, который sshd **уже** слушает; роль его не меняет, а сверяет с `sshd -T`. |
 | `base_ssh_permit_root_login` | `"no"` | `no` или `prohibit-password`. |
 | `base_ssh_trusted_cidrs` | `[]` | Сети, из которых firewall пропускает SSH. |
-| `base_firewall_enabled` | `false` | Управление таблицей `inet vpn_base`. |
-| `base_firewall_vpn_ports` | `[]` | Публичные порты `{proto: tcp\|udp, port: N}`. |
-| `base_firewall_source_ports` | `[]` | Непубличные порты `{proto: tcp\|udp, port: N, source_cidrs: [CIDR, …]}`. Только явно заданные источники; список сам не включает firewall. |
+| `base_firewall_enabled` | `false` | Управление таблицей `inet vpn_base`. В production-like inventory обязателен `true`; `false` допустим только с явным временным `base_firewall_bootstrap_exception`. |
+| `base_firewall_bootstrap_exception` | не задан | Только для первичного bootstrap администратора: `{temporary: true, source_cidrs: […]}`; список обязан совпадать с `node_port_allow`. Не даёт права запускать `remnawave_node`. |
+| `base_firewall_vpn_ports` | `[]` | Публичные порты `{proto: tcp\|udp, port: N}`. Для `exit`/`relay` обязателен к явному объявлению в inventory. |
+| `base_firewall_source_ports` | `[]` | Непубличные порты `{proto: tcp\|udp, port: N, source_cidrs: [CIDR, …]}`. Только явно заданные источники; список сам не включает firewall. Для `exit`/`relay` обязателен к явному объявлению. |
 | `base_firewall_allow_icmp_echo` | `true` | Ping v4/v6 (с ограничением частоты). |
 | `base_firewall_allow_dhcpv6_client` | `true` | Ответы DHCPv6 с link-local сервера. |
 | `base_firewall_acknowledged_closed_ports` | `[]` | Слушающие порты (`tcp/N`, `udp/N`), закрытие которых оператор подтверждает. |
@@ -97,6 +98,41 @@ Ubuntu 22.04 в рантайме не проверялись.
   пара и не конфликтует. Само разрешение DHCPv6 роль не удаляет по source-списку.
 - `base_ssh_enabled` без администратора с `sudo` и ключом;
   `base_firewall_enabled` без `base_ssh_trusted_cidrs`.
+
+### Единая authority и временный bootstrap exception
+
+`ansible/scripts/validate_inventory.py` принимает ровно одно объявление на хост
+для `node_api_port`, `node_port_allow`, `base_firewall_enabled`,
+`base_firewall_bootstrap_exception`, `base_firewall_vpn_ports` и
+`base_firewall_source_ports`. Повтор в `group_vars`/`host_vars` — ошибка, а не
+молчаливый precedence: иначе группа и хост могли бы разойтись в пользу
+непроверенного значения. В production-like inventory `base_firewall_enabled`
+обязателен и должен быть `true`.
+
+Для `exit`/`relay` списки `base_firewall_vpn_ports` и
+`base_firewall_source_ports` обязательны к явному объявлению в inventory: role
+default `[]` — только безопасное значение роли, а не разрешение не объявлять
+политику. `base_firewall_enabled: true` обеспечивают inventory validator и
+preflight `remnawave_node`; role default остаётся `false` для совместимости с
+bootstrap-фазами.
+
+`base_firewall_enabled: false` разрешён только с явным
+`base_firewall_bootstrap_exception`:
+
+```yaml
+base_firewall_enabled: false
+base_firewall_bootstrap_exception:
+  temporary: true                 # иначе валидатор отказывает
+  source_cidrs: ["192.0.2.0/24"]  # обязано совпадать с node_port_allow
+```
+
+Это исключение только для первичного `base`-запуска, создающего
+администратора; оно не открывает порты (firewall не управляется), не является
+разрешением на node/panel rollout и должно быть удалено до него. Роль
+`remnawave_node` независимо требует `base_firewall_enabled: true` и отказывает
+при наличии exception. Для проверки готовности используйте `--check --diff`:
+он рендерит и проверяет кандидат, но не меняет live policy; для реального
+применения нужен установленный `nft`.
 
 ## Компоненты
 

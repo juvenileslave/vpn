@@ -29,6 +29,10 @@ class BundlePolicyTest(unittest.TestCase):
         self.rejected(lambda t, s: t["exit"].update(node_port_allow=["0.0.0.0/0"]))
         self.rejected(lambda t, s: t["exit"].update(node_port_allow=["127.0.0.0/8"]))
 
+    def test_node_api_port_has_no_implicit_fallback(self):
+        self.rejected(lambda t, s: t["exit"].pop("node_api_port"))
+        self.rejected(lambda t, s: t["relay"].pop("node_api_port"))
+
     def test_credentials_time_window_and_fixed_profile(self):
         self.rejected(lambda t, s: s["profiles_credentials"]["exit"].update(short_ids=["abcd"]))
         self.rejected(lambda t, s: s["profiles_credentials"]["exit"].update(short_ids=["a" * 16, "a" * 16]))

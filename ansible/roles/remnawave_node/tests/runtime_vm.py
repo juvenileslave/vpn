@@ -24,12 +24,23 @@ import yaml
 SAFE_TASKS = {
     'Validate node inputs before host mutation',
     'Validate candidate PKI compose and active base ACL',
+    'Stage executable transaction and authenticated health probe',
+    'Stage the candidate compose model',
+    'Stage secret inputs without logs or diffs',
     'Roll out with authenticated health gate and credential-safe restoration',
+    'Verify intended CP path with current credentials',
+    'Commit only after the intended control-plane path succeeds',
+    'Allocate management probe on the actual control-plane host',
+    'Stage the public API client on the CP',
+    'Stage transient CP credentials',
     'Perform genuine mTLS and JWT health operation from the CP source',
+    'Erase CP probe credentials',
     'Restore checked deployment without undoing credential revocation',
     'Fail closed when restored local or control-plane health is unavailable',
     'Reject restoration after stopping only the transaction-owned node',
     'Stop rollout after a failed gate even when restoration succeeded',
+    'Remove transaction credentials',
+    'Remove private transaction files',
     'Render owned nftables table', 'Verify owned table is loaded',
 }
 
@@ -135,7 +146,7 @@ def main(root):
         bad_wrapper.chmod(0o700)
         inventory.write_text(yaml.safe_dump({'all': {'hosts': {'node': {'ansible_connection': 'local', 'ansible_python_interpreter': '/usr/bin/python3'}, 'cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(wrapper)}, 'bridge_cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(bridge_wrapper)}, 'bad_cp': {'ansible_connection': 'local', 'ansible_python_interpreter': str(bad_wrapper)}}}}))
         allowed = ['10.203.48.2/32', 'fd46:205::2/128']
-        settings = {'docker_allow_version_change': True, 'cp_placement': 'exit', 'node_api_port': 2222, 'node_port_allow': allowed, 'base_ssh_port': 22, 'base_ssh_trusted_cidrs': ['192.0.2.10/32'], 'base_firewall_vpn_ports': [], 'base_firewall_source_ports': [{'proto': 'tcp', 'port': port, 'source_cidrs': allowed} for port in [2222, 2224]], 'remnawave_node_dir': str(deployment), 'remnawave_node_secret_key_file': str(td / 'pki/secret'), 'remnawave_node_management_credentials_file': str(td / 'pki/credentials.json'), 'remnawave_node_management_delegate': 'bridge_cp', 'remnawave_node_management_address': '10.203.48.1', 'remnawave_node_management_source': '10.203.48.2', 'remnawave_node_timeout': 30, 'remnawave_node_xray_config': config(19146)}
+        settings = {'docker_allow_version_change': True, 'base_firewall_enabled': True, 'cp_placement': 'exit', 'node_api_port': 2222, 'node_port_allow': allowed, 'base_ssh_port': 22, 'base_ssh_trusted_cidrs': ['192.0.2.10/32'], 'base_firewall_vpn_ports': [], 'base_firewall_source_ports': [{'proto': 'tcp', 'port': port, 'source_cidrs': allowed} for port in [2222, 2224]], 'remnawave_node_dir': str(deployment), 'remnawave_node_secret_key_file': str(td / 'pki/secret'), 'remnawave_node_management_credentials_file': str(td / 'pki/credentials.json'), 'remnawave_node_management_delegate': 'bridge_cp', 'remnawave_node_management_address': '10.203.48.1', 'remnawave_node_management_source': '10.203.48.2', 'remnawave_node_timeout': 30, 'remnawave_node_xray_config': config(19146)}
 
         def play(path, values=None, expected=0, check=False):
             write_json(variables, settings if values is None else values)
@@ -298,9 +309,13 @@ def main(root):
             for address, source in [('10.203.48.1', '10.203.48.2'), ('fd46:205::1', 'fd46:205::2')]:
                 for failure in ['bad_jwt', 'no_cert']:
                     command([*bridge_args(bridge_cp), 'python3', '-c', rejection, role / 'files/lifecycle.py', negative, address, source, failure], expected=1)
-            for mutate in ['wide', 'empty', 'conflict', 'bad-secret', 'wrong-key', 'bad-config']:
+            for mutate in ['firewall-off', 'bootstrap-exception', 'wide', 'empty', 'conflict', 'bad-secret', 'wrong-key', 'bad-config']:
                 bad = copy.deepcopy(settings)
-                if mutate == 'wide':
+                if mutate == 'firewall-off':
+                    bad['base_firewall_enabled'] = False
+                elif mutate == 'bootstrap-exception':
+                    bad['base_firewall_bootstrap_exception'] = {'temporary': True, 'source_cidrs': allowed}
+                elif mutate == 'wide':
                     bad['node_port_allow'] = ['0.0.0.0/0']
                 elif mutate == 'empty':
                     bad['node_port_allow'] = []

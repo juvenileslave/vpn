@@ -90,6 +90,14 @@ connection-переменные inventory (`ansible_ssh_private_key_file` или
 администраторов нет пароля, а gate проверяет `sudo -n`. `base_admin_shell` по
 умолчанию `/bin/bash`; gate использует обычную неинтерактивную команду.
 
+`base_firewall_enabled` в production-like inventory всегда `true`. Явные
+play-переменные `base_firewall_enabled: false` в фазах первоначального root-
+доступа и создания администратора — единственное исключение из валидатора
+inventory: они ограничены этими фазами, не запускают `remnawave_node` и не
+открывают порты. После gate hardening/firewall применяется уже с объявленным
+`base_firewall_enabled: true`; `base_firewall_bootstrap_exception` остаётся
+явным временным ACL-scoped маркером и должен быть удалён до node rollout.
+
 `base_chrony_enabled` по умолчанию `true`; на стоковом Ubuntu с
 `systemd-timesyncd` роль `base` **откажется** удалять чужую службу времени.
 Разрешите конфликт вручную либо явно задайте `base_chrony_enabled: false`

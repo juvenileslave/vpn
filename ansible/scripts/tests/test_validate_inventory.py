@@ -300,6 +300,128 @@ class ValidateInventoryTest(unittest.TestCase):
         self.all_vars["image_tags"] = ["xray:1.0"]
         self.assertInvalid("image_tags: must be a mapping")
 
+    def test_base_firewall_false_requires_explicit_temporary_exception(self) -> None:
+        self.all_vars["base_firewall_enabled"] = False
+        self.assertInvalid("outside an explicit temporary base_firewall_bootstrap_exception")
+
+    def test_missing_base_firewall_authority_is_refused(self) -> None:
+        del self.all_vars["base_firewall_enabled"]
+        self.assertInvalid("base_firewall_enabled is required")
+
+    def test_base_firewall_authority_must_be_boolean(self) -> None:
+        for value in ("true", 1, None):
+            with self.subTest(value=value):
+                self.all_vars["base_firewall_enabled"] = value
+                self.assertInvalid("must be true or false")
+
+    def test_temporary_bootstrap_exception_is_acl_scoped(self) -> None:
+        self.all_vars["base_firewall_enabled"] = False
+        self.all_vars["base_firewall_bootstrap_exception"] = {
+            "temporary": True,
+            "source_cidrs": copy.deepcopy(self.all_vars["node_port_allow"]),
+        }
+        self.assertEqual(self.errors(), [])
+
+    def test_bootstrap_exception_must_be_temporary_and_match_node_acl(self) -> None:
+        self.all_vars["base_firewall_enabled"] = False
+        original = copy.deepcopy(self.all_vars["node_port_allow"])
+        for exception, fragment in (
+            ({"temporary": False, "source_cidrs": original}, "must be true"),
+            ({"temporary": True, "source_cidrs": []}, "nonempty list of CIDRs"),
+            ({"temporary": True, "source_cidrs": ["0.0.0.0/0"]}, "unsafe or wide"),
+            ({"temporary": True, "source_cidrs": ["203.0.113.99/32"]}, "must equal node_port_allow"),
+            ({"temporary": True, "source_cidrs": original, "extra": True}, "expected a mapping"),
+        ):
+            with self.subTest(exception=exception):
+                self.all_vars["base_firewall_bootstrap_exception"] = exception
+                self.assertInvalid(fragment)
+
+    def test_stale_bootstrap_exception_is_refused(self) -> None:
+        self.all_vars["base_firewall_bootstrap_exception"] = {
+            "temporary": True,
+            "source_cidrs": copy.deepcopy(self.all_vars["node_port_allow"]),
+        }
+        self.assertInvalid("must be absent when base_firewall_enabled is true")
+
+    def test_management_authority_cannot_be_redeclared_in_host_vars(self) -> None:
+        self.host_vars = {"exit-a": {"node_api_port": self.all_vars["node_api_port"]}}
+        self.assertInvalid("must have one authority")
+
+    def test_node_api_port_is_required_without_fallback(self) -> None:
+        del self.all_vars["node_api_port"]
+        self.assertInvalid("node_api_port is required; there is no implicit 2222 fallback")
+
+    def test_node_api_port_must_be_covered_by_the_declared_acl(self) -> None:
+        self.group_vars["exit"]["base_firewall_source_ports"] = [
+            rule for rule in self.group_vars["exit"]["base_firewall_source_ports"]
+            if rule["port"] != self.all_vars["node_api_port"]
+        ]
+        self.assertInvalid("exactly one base_firewall_source_ports rule, found 0")
+
+    def test_node_api_acl_must_equal_node_port_allow(self) -> None:
+        rule = next(
+            item for item in self.group_vars["exit"]["base_firewall_source_ports"]
+            if item["port"] == self.all_vars["node_api_port"]
+        )
+        rule["source_cidrs"] = ["203.0.113.99/32"]
+        self.assertInvalid("node API source_cidrs must equal node_port_allow")
+
+    def test_node_api_port_cannot_be_public(self) -> None:
+        self.group_vars["exit"]["base_firewall_vpn_ports"].append(
+            {"proto": "tcp", "port": self.all_vars["node_api_port"]}
+        )
+        self.assertInvalid("must not be declared as a public")
+
+    def test_node_port_allow_rejects_missing_wide_and_any(self) -> None:
+        cases = (
+            ([], "must not be empty"),
+            (["0.0.0.0/0"], "unsafe or wide management CIDR"),
+            (["::/0"], "unsafe or wide management CIDR"),
+            (["any"], "must be a CIDR such as"),
+            (["192.0.2.1/24"], "invalid CIDR"),
+            (["127.0.0.1/32", "127.0.0.1/32"], "duplicate CIDR"),
+        )
+        for value, fragment in cases:
+            with self.subTest(value=value):
+                self.all_vars["node_port_allow"] = value
+                self.assertInvalid(fragment)
+
+    def test_duplicate_matching_api_source_rules_are_refused(self) -> None:
+        rules = self.group_vars["exit"]["base_firewall_source_ports"]
+        rule = next(item for item in rules if item["port"] == self.all_vars["node_api_port"])
+        rules.append(copy.deepcopy(rule))
+        self.assertInvalid("found 2")
+
+    def test_node_api_port_must_differ_from_ssh(self) -> None:
+        self.all_vars["node_api_port"] = self.all_vars["base_ssh_port"]
+        self.assertInvalid("must differ from base_ssh_port")
+
+    def test_management_authority_cannot_be_redeclared_in_group_vars(self) -> None:
+        self.group_vars["exit"]["node_api_port"] = self.all_vars["node_api_port"]
+        self.assertInvalid("must have one authority")
+
+    def test_dedicated_remote_cp_rejects_loopback_only_management(self) -> None:
+        self.all_vars["cp_placement"] = "dedicated"
+        self.all_vars["node_port_allow"] = ["127.0.0.1/32", "::1/128"]
+        for group in ("exit", "relay"):
+            rule = next(
+                item for item in self.group_vars[group]["base_firewall_source_ports"]
+                if item["port"] == self.all_vars["node_api_port"]
+            )
+            rule["source_cidrs"] = ["127.0.0.1/32", "::1/128"]
+        self.assertInvalid("dedicated remote CP cannot use loopback-only")
+
+    def test_valid_dedicated_management_path(self) -> None:
+        self.all_vars["cp_placement"] = "dedicated"
+        self.all_vars["node_port_allow"] = ["203.0.113.30/32", "2001:db8:30::30/128"]
+        for group in ("exit", "relay"):
+            rule = next(
+                item for item in self.group_vars[group]["base_firewall_source_ports"]
+                if item["port"] == self.all_vars["node_api_port"]
+            )
+            rule["source_cidrs"] = ["203.0.113.30/32", "2001:db8:30::30/128"]
+        self.assertEqual(self.errors(), [])
+
     def test_main_reports_errors_and_exits_1(self) -> None:
         self.all_vars["xhttp_path"] = "xhttp"
         path = self.write()

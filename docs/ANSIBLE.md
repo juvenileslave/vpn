@@ -90,8 +90,19 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
 сопоставляет exact transit source `/32`/`/128`. Ограничение documentation ranges
 остаётся отдельным example-only правилом, не вторым вариантом валидатора.
 
-Единственные firewall authority:
+Единственные firewall authority (ровно одно объявление на хост; повтор в
+`group_vars`/`host_vars` — ошибка, а не молчаливый precedence):
 
+Для `exit`/`relay` `base_firewall_vpn_ports` и `base_firewall_source_ports`
+обязательны к явному объявлению: role default `[]` не разрешает оставить
+политику пустой. `base_firewall_enabled: true` проверяют validator и preflight
+`remnawave_node`; role default `false` сохранён для bootstrap-совместимости.
+
+- `base_firewall_enabled`: для production-like inventory обязателен `true`.
+  `false` допустим только с явным временным
+  `base_firewall_bootstrap_exception: {temporary: true, source_cidrs: […]}`,
+  где список совпадает с `node_port_allow`; node-роль такое исключение
+  отвергает.
 - `base_firewall_vpn_ports`: список `{proto: tcp|udp, port: integer}` публичных
   ports; direct и relay TCP listeners обязательны. Не transit/API/private origin.
 - `base_firewall_source_ports`: список строгих mappings
@@ -100,13 +111,16 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
 - Для transit TCP source list **в точности** relay egress `/32` и `/128`.
   Semantics проверяет profiles/inventory; generic base разрешает safe management
   subnets и не выводит transit sources самостоятельно.
-- `node_api_port`: официальный default **2222**. Роль Node потребляет этот порт;
-  source TCP rule должен в точности совпадать с `node_port_allow`.
+- `node_api_port`: обязательный явный порт. Неявного fallback `2222` нет;
+  source TCP rule должен в точности совпадать с `node_port_allow`, а публичное
+  объявление этого порта запрещено. Удалённый (`dedicated`) CP не может иметь
+  loopback-only `node_port_allow`.
 - `node_port_allow`: safe CIDRs; допустимы также только exact management
   loopback `127.0.0.1/32`, `::1/128`. SSH trust policy этим не ослабляется.
-  Для colocated panel — реальный bridge → private host-gateway путь с явно
-  разрешённой подсетью. Dedicated CP — реально объявленный source/path;
-  локальный служебный probe дополнительно требует явного loopback разрешения.
+  Пустой список, `0.0.0.0/0`, `::/0` и `any` отвергаются. Для colocated panel —
+  реальный bridge → private host-gateway путь с явно разрешённой подсетью.
+  Dedicated CP — реально объявленный source/path; локальный служебный probe
+  дополнительно требует явного loopback разрешения.
 - SSH, API, direct/transit/relay и cover listener ports не пересекаются. Origin
   host-loopback не имеет ни public, ни source-exposed alternate port.
 
