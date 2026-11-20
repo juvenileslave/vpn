@@ -2,7 +2,7 @@
 # Loopback-only Remnawave panel stack (architecture task 2.1). See docs/PANEL.md.
 # cp_placement chooses the default target; remnawave_panel_hosts overrides it.
 - name: Remnawave panel
-  hosts: "{{ remnawave_panel_hosts | default(groups['cp'] if groups['cp'] | length else groups['exit']) }}"
+  hosts: "{{ remnawave_panel_hosts | default(groups.get('cp', []) if groups.get('cp', []) | length else groups.get('exit', [])) }}"
   gather_facts: false
   become: true
   pre_tasks:

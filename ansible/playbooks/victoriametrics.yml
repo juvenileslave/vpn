@@ -4,7 +4,7 @@
 # Default target follows cp_placement via inventory groups: the single cp host
 # (dedicated) or the exit host (exit placement); victoriametrics_hosts overrides.
 - name: Install pinned single-node VictoriaMetrics
-  hosts: "{{ victoriametrics_hosts | default(groups['cp'] if groups['cp'] | length else groups['exit']) }}"
+  hosts: "{{ victoriametrics_hosts | default(groups.get('cp', []) if groups.get('cp', []) | length else groups.get('exit', [])) }}"
   become: true
   gather_facts: true
   pre_tasks:

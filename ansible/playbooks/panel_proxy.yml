@@ -4,7 +4,7 @@
 # operator reaches it through `ssh -L`. The role is resolved by path because
 # ansible.cfg does not set roles_path.
 - name: Loopback nginx endpoint for the panel
-  hosts: "{{ panel_proxy_hosts | default(groups['cp'] if groups['cp'] | length else groups['exit']) }}"
+  hosts: "{{ panel_proxy_hosts | default(groups.get('cp', []) if groups.get('cp', []) | length else groups.get('exit', [])) }}"
   become: true
   gather_facts: false
   pre_tasks:

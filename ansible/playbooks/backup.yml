@@ -5,7 +5,7 @@
 #   ansible-playbook -i <inventory> playbooks/backup.yml \
 #     -e cp_backup_recipients_file=/path/outside/git/recipients.txt
 - name: Install encrypted panel backups
-  hosts: "{{ cp_backup_hosts | default(groups['cp'] if groups['cp'] | length else groups['exit']) }}"
+  hosts: "{{ cp_backup_hosts | default(groups.get('cp', []) if groups.get('cp', []) | length else groups.get('exit', [])) }}"
   become: true
   gather_facts: true
   pre_tasks:

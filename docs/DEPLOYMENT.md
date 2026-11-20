@@ -75,7 +75,7 @@ Play-level `hosts` вычисляется до применения `group_vars`
 выбирают inventory-visible группу:
 
 ```yaml
-hosts: "{{ cp_proxy_hosts | default(groups['cp'] if groups['cp'] | length else groups['exit']) }}"
+hosts: "{{ cp_proxy_hosts | default(groups.get('cp', []) if groups.get('cp', []) | length else groups.get('exit', [])) }}"
 ```
 
 `cp_proxy_hosts`/`panel_proxy_hosts`/`remnawave_panel_hosts` (и аналогичные)
