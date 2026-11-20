@@ -187,10 +187,10 @@ acceptance ниже.
 
 ## Проверки
 
-На ревизии до этого review-fix фактически выполнено: `make -C ansible test` —
-83 scripts-теста, node — 17, profiles — 32; pre-commit — all Passed;
-`playbooks/site.yml --syntax-check` — OK. После review-fix интегратор
-перепроверяет полный набор.
+На `785decc`: 83 scripts-теста (1 падение), исправлено в `606b85b`. На
+`947388a`: 86 scripts-тестов, node — 17, profiles — 32; pre-commit — all
+Passed; `playbooks/site.yml --syntax-check` — OK. После `8de834d`/`c35808e`
+добавлены три guard-теста; полный набор перепроверяет интегратор.
 
 ## Что остаётся runtime acceptance
 
