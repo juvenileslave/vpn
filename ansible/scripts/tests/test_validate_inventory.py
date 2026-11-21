@@ -21,11 +21,14 @@ EXAMPLE = SCRIPTS.parent / "inventories" / "example" / "hosts.yml"
 
 HOSTS = {
     "exit-a": {"ansible_host": "192.0.2.10", "public_ipv4": "192.0.2.10",
-               "public_ipv6": "2001:db8:10::10", "node_role": "exit"},
+               "public_ipv6": "2001:db8:10::10", "node_role": "exit",
+               "overlay_ipv6": "fd00:db8:1::10/128", "overlay_ipv4": "10.250.0.10/32"},
     "relay-a": {"ansible_host": "198.51.100.20", "public_ipv4": "198.51.100.20",
-                "public_ipv6": "2001:db8:20::20", "node_role": "relay"},
+                "public_ipv6": "2001:db8:20::20", "node_role": "relay",
+                "overlay_ipv6": "fd00:db8:1::20/128", "overlay_ipv4": "10.250.0.20/32"},
     "cp-a": {"ansible_host": "203.0.113.30", "public_ipv4": "203.0.113.30",
-             "public_ipv6": "2001:db8:30::30", "node_role": "control_plane"},
+             "public_ipv6": "2001:db8:30::30", "node_role": "control_plane",
+             "overlay_ipv6": "fd00:db8:1::30/128", "overlay_ipv4": "10.250.0.30/32"},
 }
 ALL_VARS = yaml.safe_load((EXAMPLE.parent / "group_vars/all.yml").read_text())
 GROUP_VARS = {
@@ -35,9 +38,10 @@ GROUP_VARS = {
 }
 GROUP_VARS["exit"].update(yaml.safe_load((EXAMPLE.parent / "host_vars/exit-example.yml").read_text()))
 GROUP_VARS["relay"].update(yaml.safe_load((EXAMPLE.parent / "host_vars/relay-example.yml").read_text()))
+GROUP_VARS["cp"].update(yaml.safe_load((EXAMPLE.parent / "host_vars/cp-example.yml").read_text()))
 # Test host identities remain in HOSTS, not in group defaults.
 for variables in GROUP_VARS.values():
-    for key in ("ansible_host", "public_ipv4", "public_ipv6"):
+    for key in ("ansible_host", "public_ipv4", "public_ipv6", "overlay_ipv6", "overlay_ipv4"):
         variables.pop(key, None)
 
 
@@ -418,13 +422,13 @@ class ValidateInventoryTest(unittest.TestCase):
 
     def test_valid_dedicated_management_path(self) -> None:
         self.all_vars["cp_placement"] = "dedicated"
-        self.all_vars["node_port_allow"] = ["203.0.113.30/32", "2001:db8:30::30/128"]
+        self.all_vars["node_port_allow"] = ["10.250.0.30/32", "fd00:db8:1::30/128"]
         for group in ("exit", "relay"):
             rule = next(
                 item for item in self.group_vars[group]["base_firewall_source_ports"]
                 if item["port"] == self.all_vars["node_api_port"]
             )
-            rule["source_cidrs"] = ["203.0.113.30/32", "2001:db8:30::30/128"]
+            rule["source_cidrs"] = ["10.250.0.30/32", "fd00:db8:1::30/128"]
         self.assertEqual(self.errors(), [])
 
     def test_subscription_publication_has_one_authority(self) -> None:
@@ -474,6 +478,204 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertInvalid("must not reuse the upstream example 2222")
         self.all_vars["node_api_port"] = 2223
         self.assertEqual(self.errors(), [])
+
+    def test_valid_overlay_ipv6_only_without_fallback(self) -> None:
+        self.all_vars["overlay_ipv4_fallback"] = False
+        del self.all_vars["overlay_ipv4_prefix"]
+        for host in self.hosts.values():
+            host.pop("overlay_ipv4", None)
+        for group in ("exit", "relay", "cp"):
+            self.group_vars[group]["overlay_allowed_ips"] = [
+                cidr for cidr in self.group_vars[group]["overlay_allowed_ips"] if ":" in cidr
+            ]
+        self.all_vars["node_port_allow"] = ["127.0.0.1/32", "::1/128", "fd00:db8:1::30/128"]
+        for group in ("exit", "relay"):
+            rule = next(
+                item for item in self.group_vars[group]["base_firewall_source_ports"]
+                if item["port"] == self.all_vars["node_api_port"]
+            )
+            rule["source_cidrs"] = ["127.0.0.1/32", "::1/128", "fd00:db8:1::30/128"]
+        self.assertEqual(self.errors(), [])
+
+    def test_overlay_default_routes_are_forbidden(self) -> None:
+        for route in ("0.0.0.0/0", "::/0"):
+            with self.subTest(route=route):
+                self.group_vars["exit"]["overlay_allowed_ips"] = [
+                    "fd00:db8:1::10/128", "10.250.0.10/32", route
+                ]
+                self.assertInvalid("default route is forbidden in overlay_allowed_ips")
+
+    def test_overlay_allowed_ips_rejects_public_wide_and_overlapping_routes(self) -> None:
+        cases = (
+            (["fd00:db8:1::10/128", "10.250.0.10/32", "2001:db8:10::/64"], "must be inside ULA fc00::/7"),
+            (["fd00:db8:1::10/128", "10.250.0.10/32", "192.0.2.0/24"], "must be inside RFC 1918"),
+            (["fd00:db8:1::10/128", "10.250.0.10/32", "fd00:db8::/48"], "prefix is too wide"),
+            (["fd00:db8:1::10/128", "10.250.0.10/32", "10.250.0.0/16"], "prefix is too wide"),
+            (["fd00:db8:1::10/128", "10.250.0.10/32", "fd00:db8:1::20/128"], "overlaps peer"),
+        )
+        for routes, fragment in cases:
+            with self.subTest(routes=routes):
+                self.group_vars["exit"]["overlay_allowed_ips"] = routes
+                self.assertInvalid(fragment)
+
+    def test_overlay_address_outside_prefix_or_non_host_cidr(self) -> None:
+        self.hosts["exit-a"]["overlay_ipv6"] = "fd00:db8:2::10/128"
+        self.assertInvalid("must be inside overlay_ipv6_prefix")
+        self.hosts["exit-a"]["overlay_ipv6"] = "fd00:db8:1::/64"
+        self.assertInvalid("must be a /128 host address")
+        self.hosts["exit-a"]["overlay_ipv6"] = "fd00:db8:1::10/128"
+
+        self.hosts["relay-a"]["overlay_ipv4"] = "10.251.0.20/32"
+        self.assertInvalid("must be inside overlay_ipv4_prefix")
+        self.hosts["relay-a"]["overlay_ipv4"] = "10.250.0.0/32"
+        self.assertInvalid("usable host address inside overlay_ipv4_prefix")
+        self.hosts["relay-a"]["overlay_ipv4"] = "10.250.0.255/32"
+        self.assertInvalid("usable host address inside overlay_ipv4_prefix")
+
+    def test_overlay_duplicate_addresses_are_rejected(self) -> None:
+        self.hosts["cp-a"]["overlay_ipv6"] = "fd00:0db8:0001::10/128"
+        self.assertInvalid("duplicates the overlay address")
+        self.hosts["cp-a"]["overlay_ipv6"] = "fd00:db8:1::30/128"
+
+        self.hosts["cp-a"]["overlay_ipv4"] = "10.250.0.20/32"
+        self.assertInvalid("duplicates the overlay address")
+
+    def test_overlay_partial_ipv4_fallback_is_rejected(self) -> None:
+        del self.hosts["cp-a"]["overlay_ipv4"]
+        self.assertInvalid("overlay_ipv4 is required when overlay_ipv4_fallback is true")
+
+        self.hosts["cp-a"]["overlay_ipv4"] = "10.250.0.30/32"
+        self.all_vars["overlay_ipv4_fallback"] = False
+        del self.all_vars["overlay_ipv4_prefix"]
+        del self.hosts["exit-a"]["overlay_ipv4"]
+        del self.hosts["relay-a"]["overlay_ipv4"]
+        self.assertInvalid("overlay_ipv4 must not be set when overlay_ipv4_fallback is false")
+
+    def test_overlay_udp_port_must_be_declared_publicly_once(self) -> None:
+        self.group_vars["exit"]["base_firewall_vpn_ports"] = [
+            item for item in self.group_vars["exit"]["base_firewall_vpn_ports"]
+            if item["port"] != self.all_vars["overlay_port"]
+        ]
+        self.assertInvalid("overlay_port requires exactly one udp entry")
+
+        self.group_vars["exit"]["base_firewall_vpn_ports"].append(
+            {"proto": "tcp", "port": self.all_vars["overlay_port"]}
+        )
+        self.assertInvalid("must be declared as udp only")
+
+        self.group_vars["cp"]["base_firewall_vpn_ports"] = []
+        self.assertInvalid("host cp-a: overlay_port requires exactly one udp entry")
+
+    def test_dedicated_cp_node_port_allow_requires_overlay_and_rejects_public_ip(self) -> None:
+        def set_allow(cidrs: list[str]) -> None:
+            self.all_vars["node_port_allow"] = list(cidrs)
+            for group in ("exit", "relay"):
+                rule = next(
+                    item for item in self.group_vars[group]["base_firewall_source_ports"]
+                    if item["port"] == self.all_vars["node_api_port"]
+                )
+                rule["source_cidrs"] = list(cidrs)
+
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.30/32"])
+        self.assertInvalid("must include CP overlay IPv6 address")
+
+        set_allow(["127.0.0.1/32", "::1/128", "fd00:db8:1::30/128"])
+        self.assertInvalid("must include CP overlay IPv4 fallback address")
+
+        set_allow(["10.250.0.30/32", "fd00:db8:1::30/128", "203.0.113.30/32"])
+        self.assertInvalid("must use CP overlay addresses, not CP public IP")
+
+        set_allow(["10.250.0.30/32", "fd00:db8:1::30/128", "2001:db8:30::30/128"])
+        self.assertInvalid("must use CP overlay addresses, not CP public IP")
+
+    def test_overlay_key_material_and_in_checkout_key_paths_are_rejected(self) -> None:
+        for key in ("overlay_private_key", "overlay_preshared_key"):
+            with self.subTest(key=key):
+                self.host_vars = {"exit-a": {key: "placeholder-refused-by-validator"}}
+                self.assertInvalid("overlay private key material must not be stored in inventory")
+
+        self.host_vars = {"exit-a": {"overlay_public_key": "placeholder-public-key"}}
+        self.assertInvalid("overlay key material is forbidden in the example inventory")
+
+        repo_key = str(validate_inventory.REPO_ROOT / "ansible" / "wg-exit.key")
+        for bad_path, fragment in (
+            ("keys/wg-exit.key", "absolute controller-side path"),
+            ("/etc/vpn/../wg-exit.key", "'..' path traversal"),
+            (repo_key, "outside the repository checkout"),
+        ):
+            with self.subTest(path=bad_path):
+                self.host_vars = {"exit-a": {"overlay_private_key_file": bad_path}}
+                self.assertInvalid(fragment)
+
+        self.host_vars = {"exit-a": {"overlay_private_key_file": "/etc/vpn-secrets/wg-exit.key"}}
+        self.assertEqual(self.errors("staging"), [])
+
+    def test_overlay_port_collisions_are_rejected(self) -> None:
+        cases = (
+            (22, "must differ from base_ssh_port"),
+            (2223, "must differ from node_api_port"),
+            (9443, "collides with cover_tls_port"),
+            (8443, "collides with exit_direct_port"),
+            (8444, "collides with transit_port"),
+            (10443, "collides with relay_slot_ports"),
+            (80, "collides with HTTP-01 port 80"),
+        )
+        for port, fragment in cases:
+            with self.subTest(port=port):
+                self.all_vars["overlay_port"] = port
+                for group in ("exit", "relay", "cp"):
+                    self.group_vars[group]["base_firewall_vpn_ports"] = [
+                        item for item in self.group_vars[group]["base_firewall_vpn_ports"]
+                        if item["proto"] != "udp"
+                    ] + [{"proto": "udp", "port": port}]
+                self.assertInvalid(fragment)
+
+    def test_overlay_wrong_address_families_are_rejected(self) -> None:
+        self.all_vars["overlay_ipv6_prefix"] = "10.250.0.0/24"
+        self.assertInvalid("must be an IPv6 CIDR prefix")
+        self.all_vars["overlay_ipv6_prefix"] = "2001:db8:1::/64"
+        self.assertInvalid("must be inside ULA fc00::/7")
+        self.all_vars["overlay_ipv6_prefix"] = "fd00:db8:1::/64"
+
+        self.all_vars["overlay_ipv4_prefix"] = "fd00:db8:1::/64"
+        self.assertInvalid("must be an IPv4 CIDR prefix")
+        self.all_vars["overlay_ipv4_prefix"] = "192.0.2.0/24"
+        self.assertInvalid("must be inside RFC 1918")
+        self.all_vars["overlay_ipv4_prefix"] = "10.250.0.0/24"
+
+        self.hosts["exit-a"]["overlay_ipv6"] = "10.250.0.10/32"
+        self.assertInvalid("must be an IPv6 /128 host CIDR")
+        self.hosts["exit-a"]["overlay_ipv6"] = "::ffff:10.250.0.10/128"
+        self.assertInvalid("unusable IPv6 overlay host address")
+        self.hosts["exit-a"]["overlay_ipv6"] = "fd00:db8:1::10/128"
+
+        self.hosts["exit-a"]["overlay_ipv4"] = "fd00:db8:1::10/128"
+        self.assertInvalid("must be an IPv4 /32 host CIDR")
+
+    def test_break_glass_ssh_must_be_nonempty_and_independent_of_overlay(self) -> None:
+        self.all_vars["base_ssh_trusted_cidrs"] = []
+        self.assertInvalid("non-empty list of break-glass CIDRs")
+
+        self.all_vars["base_ssh_trusted_cidrs"] = ["fd00:db8:1::/64"]
+        self.assertInvalid("must not overlap or be derived from overlay prefixes")
+
+        self.all_vars["base_ssh_trusted_cidrs"] = ["10.250.0.0/24"]
+        self.assertInvalid("must not overlap or be derived from overlay prefixes")
+
+    def test_overlay_authority_cannot_be_redeclared_outside_all(self) -> None:
+        self.host_vars = {"exit-a": {"overlay_port": 51820}}
+        self.assertInvalid("must have one authority")
+        self.assertInvalid("overlay_port must be set only in group_vars/all")
+
+    def test_overlay_backend_and_interface_validation(self) -> None:
+        self.all_vars["overlay_backend"] = "ipsec"
+        self.assertInvalid("must be one of wireguard")
+        self.all_vars["overlay_backend"] = "wireguard"
+
+        for iface in ("lo", "0wg", "interface_name_too_long"):
+            with self.subTest(iface=iface):
+                self.all_vars["overlay_interface"] = iface
+                self.assertInvalid("valid Linux interface name")
 
     def test_main_reports_errors_and_exits_1(self) -> None:
         self.all_vars["xhttp_path"] = "xhttp"

@@ -40,12 +40,35 @@ NODE_GROUPS = ("exit", "relay")
 AUTHORITY_KEYS = (
     "node_api_port", "node_port_allow", "base_firewall_enabled",
     "base_firewall_bootstrap_exception", "base_firewall_vpn_ports",
-    "base_firewall_source_ports",
+    "base_firewall_source_ports", "base_ssh_trusted_cidrs",
     # One publication authority and no separately declared duplicates.
     "subscription_public_host", "subscription_public_path",
     "cp_proxy_server_name", "cp_proxy_path_prefix", "cp_proxy_upstream",
     "remnawave_panel_sub_public_domain",
+    # One private overlay authority per layer/host.
+    "overlay_backend", "overlay_interface", "overlay_port",
+    "overlay_ipv6_prefix", "overlay_ipv4_fallback", "overlay_ipv4_prefix",
+    "overlay_allowed_ips", "overlay_private_key_file",
+    "overlay_private_key", "overlay_preshared_key",
+    "wireguard_private_key", "wireguard_preshared_key",
 )
+OVERLAY_BACKENDS = ("wireguard",)
+OVERLAY_INTERFACE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,14}$")
+OVERLAY_ALL_KEYS = (
+    "overlay_backend",
+    "overlay_interface",
+    "overlay_port",
+    "overlay_ipv6_prefix",
+    "overlay_ipv4_fallback",
+    "overlay_ipv4_prefix",
+)
+OVERLAY_FORBIDDEN_SECRET_KEYS = (
+    "overlay_private_key",
+    "overlay_preshared_key",
+    "wireguard_private_key",
+    "wireguard_preshared_key",
+)
+WIREGUARD_KEY = re.compile(r"^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$")
 BOOTSTRAP_EXCEPTION_FIELDS = {"temporary", "source_cidrs"}
 DOCUMENTATION_NETWORKS = tuple(
     ipaddress.ip_network(net)
@@ -55,6 +78,12 @@ PRIVATE_NETWORKS = tuple(
     ipaddress.ip_network(net)
     for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
 )
+ULA_NETWORK = ipaddress.IPv6Network("fc00::/7")
+RFC1918_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 EGRESS_SLOTS_RANGE = range(1, 7)
 EXAMPLE_SNI_SUFFIX = ".example.com"
 YAML_SUFFIXES = (".yml", ".yaml")
@@ -271,13 +300,17 @@ class Inventory:
                     if isinstance(placement, str):
                         placements.add(placement)
         self.validate_topology(placements)
+        self.validate_overlay()
         self.validate_publication()
         self.validate_profiles()
 
+    def is_all_origin(self, origin: str) -> bool:
+        all_files = (self.label(self.root / "group_vars" / f"all{suffix}") for suffix in YAML_SUFFIXES)
+        return origin.startswith(tuple(f"{name}:" for name in all_files)) or ": all.vars." in origin
+
     def placement_value(self, located: Located) -> Any:
         value, origin = located
-        all_files = (self.label(self.root / "group_vars" / f"all{suffix}") for suffix in YAML_SUFFIXES)
-        if not origin.startswith(tuple(f"{name}:" for name in all_files)) and ": all.vars." not in origin:
+        if not self.is_all_origin(origin):
             self.error(f"{origin}: cp_placement must be set only in group_vars/all")
         return value
 
@@ -630,6 +663,396 @@ class Inventory:
         if not isinstance(ports, list) or len(ports) != exit_host.get("egress_slots"):
             self.error("relay: relay_slot_ports must contain one port per fixed slot")
 
+    def validate_overlay(self) -> None:
+        """Strict static contract for the private L3 WireGuard overlay (ADR-0001)."""
+        peers: list[tuple[str, str, dict[str, Located]]] = []
+        for group in ROLE_GROUPS:
+            for host in self.groups[group]:
+                peers.append((group, host, self.effective(group, host)))
+        if not peers:
+            return
+
+        name = self.label(self.path)
+        for _group, _host, values in peers:
+            for key in OVERLAY_ALL_KEYS:
+                if key in values and not self.is_all_origin(values[key][1]):
+                    self.error(f"{values[key][1]}: {key} must be set only in group_vars/all")
+
+        all_values: dict[str, Located] = {}
+        all_values.update(self.group_inline.get("all", {}))
+        all_values.update(self.group_files.get("all", {}))
+
+        backend_located = all_values.get("overlay_backend")
+        if backend_located is None:
+            self.error(f"{name}: overlay_backend is required")
+        else:
+            backend, origin = backend_located
+            if not isinstance(backend, str) or backend not in OVERLAY_BACKENDS:
+                self.error(f"{origin}: must be one of {', '.join(OVERLAY_BACKENDS)}, got {backend!r}")
+
+        iface_located = all_values.get("overlay_interface")
+        if iface_located is None:
+            self.error(f"{name}: overlay_interface is required")
+        else:
+            iface, origin = iface_located
+            if not isinstance(iface, str) or not OVERLAY_INTERFACE.fullmatch(iface) or iface == "lo":
+                self.error(f"{origin}: must be a valid Linux interface name (max 15 chars, not 'lo')")
+
+        overlay_port: int | None = None
+        port_located = all_values.get("overlay_port")
+        if port_located is None:
+            self.error(f"{name}: overlay_port is required")
+        else:
+            port_val, origin = port_located
+            if type(port_val) is not int or not 1 <= port_val <= 65535:
+                self.error(f"{origin}: must be an integer port 1-65535")
+            else:
+                overlay_port = port_val
+
+        v6_prefix: ipaddress.IPv6Network | None = None
+        v6_prefix_located = all_values.get("overlay_ipv6_prefix")
+        if v6_prefix_located is None:
+            self.error(f"{name}: overlay_ipv6_prefix is required")
+        else:
+            raw, origin = v6_prefix_located
+            net, problem = parse_overlay_prefix(raw, version=6)
+            if problem:
+                self.error(f"{origin}: {problem}")
+            else:
+                v6_prefix = net  # type: ignore[assignment]
+
+        fallback: bool | None = None
+        fallback_located = all_values.get("overlay_ipv4_fallback")
+        if fallback_located is None:
+            self.error(f"{name}: overlay_ipv4_fallback is required (true or false)")
+        else:
+            fb_val, origin = fallback_located
+            if type(fb_val) is not bool:
+                self.error(f"{origin}: must be true or false")
+            else:
+                fallback = fb_val
+
+        v4_prefix: ipaddress.IPv4Network | None = None
+        v4_prefix_located = all_values.get("overlay_ipv4_prefix")
+        if fallback is True:
+            if v4_prefix_located is None:
+                self.error(f"{name}: overlay_ipv4_prefix is required when overlay_ipv4_fallback is true")
+            else:
+                raw, origin = v4_prefix_located
+                net, problem = parse_overlay_prefix(raw, version=4)
+                if problem:
+                    self.error(f"{origin}: {problem}")
+                else:
+                    v4_prefix = net  # type: ignore[assignment]
+        elif fallback is False and v4_prefix_located is not None:
+            self.error(f"{v4_prefix_located[1]}: must be absent when overlay_ipv4_fallback is false")
+
+        overlay_v6_seen: dict[ipaddress.IPv6Network, str] = {}
+        overlay_v4_seen: dict[ipaddress.IPv4Network, str] = {}
+        peer_overlay_v6: dict[str, ipaddress.IPv6Network] = {}
+        peer_overlay_v4: dict[str, ipaddress.IPv4Network] = {}
+        peer_allowed: dict[str, list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str]]] = {}
+        overlay_prefixes = [prefix for prefix in (v6_prefix, v4_prefix) if prefix is not None]
+
+        for group, host, values in peers:
+            where = f"host {host}"
+            for secret_key in OVERLAY_FORBIDDEN_SECRET_KEYS:
+                if secret_key in values:
+                    self.error(
+                        f"{values[secret_key][1]}: overlay private key material must not be "
+                        "stored in inventory; use SOPS/extra-vars or overlay_private_key_file "
+                        "outside the checkout"
+                    )
+            if "overlay_public_key" in values:
+                pub_val, pub_origin = values["overlay_public_key"]
+                if self.example:
+                    self.error(f"{pub_origin}: overlay key material is forbidden in the example inventory")
+                elif not isinstance(pub_val, str) or not WIREGUARD_KEY.fullmatch(pub_val):
+                    self.error(f"{pub_origin}: must be a 44-character base64 WireGuard public key")
+            if "overlay_private_key_file" in values:
+                key_val, key_origin = values["overlay_private_key_file"]
+                problem = check_overlay_key_file(key_val, self.root)
+                if problem:
+                    self.error(f"{key_origin}: {problem}")
+
+            if "overlay_ipv6" not in values:
+                self.error(f"{where}: overlay_ipv6 is required")
+            else:
+                raw, origin = values["overlay_ipv6"]
+                net6, problem = parse_overlay_host_cidr(raw, version=6)
+                if problem:
+                    self.error(f"{origin}: {problem}")
+                else:
+                    assert isinstance(net6, ipaddress.IPv6Network)
+                    if v6_prefix is not None:
+                        if not net6.subnet_of(v6_prefix):
+                            self.error(f"{origin}: must be inside overlay_ipv6_prefix")
+                        elif net6.network_address == v6_prefix.network_address:
+                            self.error(f"{origin}: must not be the overlay_ipv6_prefix network address")
+                    pub6 = ip_or_none(values["public_ipv6"][0]) if "public_ipv6" in values and isinstance(values["public_ipv6"][0], str) else None
+                    if pub6 is not None and net6.network_address == pub6:
+                        self.error(f"{origin}: overlay_ipv6 must not equal public_ipv6")
+                    if net6 in overlay_v6_seen:
+                        self.error(f"{origin}: duplicates the overlay address in {overlay_v6_seen[net6]}")
+                    else:
+                        overlay_v6_seen[net6] = origin
+                        peer_overlay_v6[host] = net6
+
+            if fallback is True:
+                if "overlay_ipv4" not in values:
+                    self.error(f"{where}: overlay_ipv4 is required when overlay_ipv4_fallback is true")
+                else:
+                    raw, origin = values["overlay_ipv4"]
+                    net4, problem = parse_overlay_host_cidr(raw, version=4)
+                    if problem:
+                        self.error(f"{origin}: {problem}")
+                    else:
+                        assert isinstance(net4, ipaddress.IPv4Network)
+                        if v4_prefix is not None:
+                            if not net4.subnet_of(v4_prefix):
+                                self.error(f"{origin}: must be inside overlay_ipv4_prefix")
+                            elif net4.network_address in (v4_prefix.network_address, v4_prefix.broadcast_address):
+                                self.error(f"{origin}: must be a usable host address inside overlay_ipv4_prefix")
+                        pub4 = ip_or_none(values["public_ipv4"][0]) if "public_ipv4" in values and isinstance(values["public_ipv4"][0], str) else None
+                        if pub4 is not None and net4.network_address == pub4:
+                            self.error(f"{origin}: overlay_ipv4 must not equal public_ipv4")
+                        if net4 in overlay_v4_seen:
+                            self.error(f"{origin}: duplicates the overlay address in {overlay_v4_seen[net4]}")
+                        else:
+                            overlay_v4_seen[net4] = origin
+                            peer_overlay_v4[host] = net4
+            elif fallback is False and "overlay_ipv4" in values:
+                self.error(f"{values['overlay_ipv4'][1]}: overlay_ipv4 must not be set when overlay_ipv4_fallback is false")
+
+            if v4_prefix is not None and "public_ipv4" in values and isinstance(values["public_ipv4"][0], str):
+                pub4 = ip_or_none(values["public_ipv4"][0])
+                if isinstance(pub4, ipaddress.IPv4Address) and pub4 in v4_prefix:
+                    self.error(f"{values['public_ipv4'][1]}: public_ipv4 must not fall inside overlay_ipv4_prefix")
+
+            self.validate_overlay_allowed_ips(
+                host, values, fallback, peer_overlay_v6.get(host), peer_overlay_v4.get(host), peer_allowed
+            )
+            self.validate_overlay_ports(group, host, values, overlay_port)
+            self.validate_break_glass_ssh(host, values, overlay_prefixes)
+
+        peer_names = list(peer_allowed)
+        for idx, host_a in enumerate(peer_names):
+            for host_b in peer_names[idx + 1:]:
+                for net_a, origin_a in peer_allowed[host_a]:
+                    for net_b, _origin_b in peer_allowed[host_b]:
+                        if net_a.version == net_b.version and net_a.overlaps(net_b):
+                            self.error(f"{origin_a}: overlay_allowed_ips overlaps peer {host_b}")
+
+        if self.placement == "dedicated" and len(self.groups["cp"]) == 1:
+            cp_host = next(iter(self.groups["cp"]))
+            cp_values = self.effective("cp", cp_host)
+            cp_ov6 = peer_overlay_v6.get(cp_host)
+            cp_ov4 = peer_overlay_v4.get(cp_host) if fallback is True else None
+            cp_pub4 = ip_or_none(cp_values["public_ipv4"][0]) if "public_ipv4" in cp_values and isinstance(cp_values["public_ipv4"][0], str) else None
+            cp_pub6 = ip_or_none(cp_values["public_ipv6"][0]) if "public_ipv6" in cp_values and isinstance(cp_values["public_ipv6"][0], str) else None
+            for node_group in NODE_GROUPS:
+                for node_host in self.groups[node_group]:
+                    node_values = self.effective(node_group, node_host)
+                    allow = node_values.get("node_port_allow")
+                    if allow is None or not isinstance(allow[0], list) or not allow[0]:
+                        continue
+                    allow_nets = []
+                    for item in allow[0]:
+                        try:
+                            allow_nets.append(ipaddress.ip_network(item, strict=True))
+                        except (TypeError, ValueError):
+                            allow_nets = []
+                            break
+                    if not allow_nets:
+                        continue
+                    if cp_ov6 is not None and cp_ov6 not in allow_nets:
+                        self.error(f"{allow[1]}: dedicated CP node_port_allow must include CP overlay IPv6 address")
+                    if fallback is True and cp_ov4 is not None and cp_ov4 not in allow_nets:
+                        self.error(f"{allow[1]}: dedicated CP node_port_allow must include CP overlay IPv4 fallback address")
+                    if cp_pub4 is not None and any(net.version == 4 and cp_pub4 in net for net in allow_nets):
+                        self.error(f"{allow[1]}: dedicated CP node_port_allow must use CP overlay addresses, not CP public IP")
+                    if cp_pub6 is not None and any(net.version == 6 and cp_pub6 in net for net in allow_nets):
+                        self.error(f"{allow[1]}: dedicated CP node_port_allow must use CP overlay addresses, not CP public IP")
+
+    def validate_overlay_allowed_ips(
+        self,
+        host: str,
+        values: dict[str, Located],
+        fallback: bool | None,
+        own_v6: ipaddress.IPv6Network | None,
+        own_v4: ipaddress.IPv4Network | None,
+        peer_allowed: dict[str, list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str]]],
+    ) -> None:
+        located = values.get("overlay_allowed_ips")
+        if located is None:
+            entries: list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str]] = []
+            if own_v6 is not None:
+                entries.append((own_v6, f"host {host}"))
+            if own_v4 is not None:
+                entries.append((own_v4, f"host {host}"))
+            peer_allowed[host] = entries
+            return
+
+        raw_list, origin = located
+        if not isinstance(raw_list, list) or not raw_list:
+            self.error(f"{origin}: must be a non-empty list of CIDRs")
+            return
+        parsed: list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str]] = []
+        seen: set[ipaddress.IPv4Network | ipaddress.IPv6Network] = set()
+        for index, item in enumerate(raw_list):
+            if not isinstance(item, str) or "/" not in item:
+                self.error(f"{origin}: item {index}: must be a strict CIDR")
+                continue
+            try:
+                net = ipaddress.ip_network(item, strict=True)
+            except ValueError:
+                self.error(f"{origin}: item {index}: invalid CIDR")
+                continue
+            if net.prefixlen == 0:
+                self.error(f"{origin}: item {index}: default route is forbidden in overlay_allowed_ips")
+                continue
+            if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+                self.error(f"{origin}: item {index}: unsafe CIDR in overlay_allowed_ips")
+                continue
+            if net.version == 6:
+                if not net.subnet_of(ULA_NETWORK):
+                    self.error(f"{origin}: item {index}: IPv6 overlay_allowed_ips must be inside ULA fc00::/7")
+                    continue
+                if net.prefixlen < 64:
+                    self.error(f"{origin}: item {index}: IPv6 overlay_allowed_ips prefix is too wide (minimum /64)")
+                    continue
+            else:
+                if fallback is False:
+                    self.error(f"{origin}: item {index}: IPv4 CIDR in overlay_allowed_ips requires overlay_ipv4_fallback: true")
+                    continue
+                if not in_networks(net, RFC1918_NETWORKS):
+                    self.error(f"{origin}: item {index}: IPv4 overlay_allowed_ips must be inside RFC 1918 private ranges")
+                    continue
+                if net.prefixlen < 24:
+                    self.error(f"{origin}: item {index}: IPv4 overlay_allowed_ips prefix is too wide (minimum /24)")
+                    continue
+            if net in seen:
+                self.error(f"{origin}: item {index}: duplicate CIDR in overlay_allowed_ips")
+                continue
+            seen.add(net)
+            parsed.append((net, origin))
+
+        if own_v6 is not None and own_v6 not in seen:
+            self.error(f"{origin}: must include the host's own overlay_ipv6 address")
+        if fallback is True and own_v4 is not None and own_v4 not in seen:
+            self.error(f"{origin}: must include the host's own overlay_ipv4 address")
+        peer_allowed[host] = parsed
+
+    def validate_overlay_ports(
+        self, group: str, host: str, values: dict[str, Located], overlay_port: int | None
+    ) -> None:
+        if overlay_port is None:
+            return
+        where = f"host {host}"
+        vpn_ports = values.get("base_firewall_vpn_ports")
+        if vpn_ports is None:
+            self.error(f"{where}: base_firewall_vpn_ports is required and must declare overlay_port as udp")
+        elif not isinstance(vpn_ports[0], list):
+            self.error(f"{vpn_ports[1]}: must be a list")
+        else:
+            udp_matches = [
+                item for item in vpn_ports[0]
+                if isinstance(item, dict)
+                and item.get("proto") == "udp"
+                and type(item.get("port")) is int
+                and item.get("port") == overlay_port
+            ]
+            non_udp_matches = [
+                item for item in vpn_ports[0]
+                if isinstance(item, dict)
+                and item.get("proto") != "udp"
+                and type(item.get("port")) is int
+                and item.get("port") == overlay_port
+            ]
+            if len(udp_matches) != 1:
+                self.error(
+                    f"{where}: overlay_port requires exactly one udp entry in "
+                    f"base_firewall_vpn_ports, found {len(udp_matches)}"
+                )
+            if non_udp_matches:
+                self.error(f"{where}: overlay_port must be declared as udp only in base_firewall_vpn_ports")
+
+        source_ports = values.get("base_firewall_source_ports")
+        if source_ports is not None and isinstance(source_ports[0], list):
+            if any(
+                isinstance(item, dict) and type(item.get("port")) is int and item.get("port") == overlay_port
+                for item in source_ports[0]
+            ):
+                self.error(f"{where}: overlay_port must not collide with base_firewall_source_ports")
+
+        ssh = values.get("base_ssh_port")
+        ssh_port = ssh[0] if ssh is not None and type(ssh[0]) is int else 22
+        if overlay_port == ssh_port:
+            self.error(f"{where}: overlay_port must differ from base_ssh_port")
+
+        api = values.get("node_api_port")
+        if api is not None and type(api[0]) is int and overlay_port == api[0]:
+            self.error(f"{where}: overlay_port must differ from node_api_port")
+
+        panel = values.get("panel_port")
+        if panel is not None and type(panel[0]) is int and overlay_port == panel[0]:
+            self.error(f"{where}: overlay_port collides with panel_port")
+
+        if group in NODE_GROUPS:
+            cover = values.get("cover_tls_port")
+            cover_port = (
+                profile_contract().DEFAULT_COVER_TLS_PORT
+                if cover is None
+                else (cover[0] if type(cover[0]) is int else None)
+            )
+            if cover_port is not None and overlay_port == cover_port:
+                self.error(f"{where}: overlay_port collides with cover_tls_port")
+            if overlay_port == 80:
+                self.error(f"{where}: overlay_port collides with HTTP-01 port 80")
+            for key in ("exit_direct_port", "transit_port"):
+                located = values.get(key)
+                if located is not None and type(located[0]) is int and overlay_port == located[0]:
+                    self.error(f"{where}: overlay_port collides with {key}")
+            slot_ports = values.get("relay_slot_ports")
+            if slot_ports is not None and isinstance(slot_ports[0], list):
+                if any(type(p) is int and p == overlay_port for p in slot_ports[0]):
+                    self.error(f"{where}: overlay_port collides with relay_slot_ports")
+
+    def validate_break_glass_ssh(
+        self,
+        host: str,
+        values: dict[str, Located],
+        overlay_prefixes: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+    ) -> None:
+        located = values.get("base_ssh_trusted_cidrs")
+        if located is None:
+            self.error(f"host {host}: base_ssh_trusted_cidrs is required for break-glass SSH")
+            return
+        raw_list, origin = located
+        if not isinstance(raw_list, list) or not raw_list:
+            self.error(f"{origin}: must be a non-empty list of break-glass CIDRs")
+            return
+        for index, item in enumerate(raw_list):
+            if not isinstance(item, str) or "/" not in item:
+                self.error(f"{origin}: item {index}: must be a strict CIDR")
+                continue
+            try:
+                net = ipaddress.ip_network(item, strict=True)
+            except ValueError:
+                self.error(f"{origin}: item {index}: invalid CIDR")
+                continue
+            if net.prefixlen == 0 or net.is_multicast or net.is_unspecified or net.is_loopback:
+                self.error(f"{origin}: item {index}: unsafe break-glass SSH CIDR")
+                continue
+            if any(
+                net.version == prefix.version and (net.subnet_of(prefix) or prefix.subnet_of(net))
+                for prefix in overlay_prefixes
+            ):
+                self.error(
+                    f"{origin}: item {index}: break-glass base_ssh_trusted_cidrs must not "
+                    "overlap or be derived from overlay prefixes"
+                )
+
     def summary(self) -> str:
         hosts = "; ".join(f"{group}: {', '.join(hosts) or '-'}" for group, hosts in self.groups.items())
         mode = "example" if self.example else "regular"
@@ -754,6 +1177,73 @@ def ip_or_none(value: str) -> Any:
         return ipaddress.ip_address(value)
     except ValueError:
         return None
+
+
+def parse_overlay_prefix(
+    value: Any, version: int
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network | None, str | None]:
+    if not isinstance(value, str) or "/" not in value:
+        return None, f"must be an IPv{version} CIDR prefix"
+    try:
+        network = ipaddress.ip_network(value, strict=True)
+    except ValueError:
+        return None, f"invalid IPv{version} CIDR prefix"
+    if network.version != version:
+        return None, f"must be an IPv{version} CIDR prefix"
+    if network.is_loopback or network.is_link_local or network.is_multicast or network.is_unspecified:
+        return None, f"unusable IPv{version} overlay prefix"
+    if version == 6:
+        if not network.subnet_of(ULA_NETWORK):
+            return None, "IPv6 overlay prefix must be inside ULA fc00::/7"
+        if not 48 <= network.prefixlen <= 120:
+            return None, "IPv6 overlay prefix length must be between /48 and /120"
+    else:
+        if not in_networks(network, RFC1918_NETWORKS):
+            return None, "IPv4 overlay fallback prefix must be inside RFC 1918 private ranges"
+        if not 16 <= network.prefixlen <= 29:
+            return None, "IPv4 overlay fallback prefix length must be between /16 and /29"
+    return network, None
+
+
+def parse_overlay_host_cidr(
+    value: Any, version: int
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network | None, str | None]:
+    host_len = 32 if version == 4 else 128
+    if not isinstance(value, str) or "/" not in value:
+        return None, f"must be an IPv{version} /{host_len} host CIDR"
+    try:
+        network = ipaddress.ip_network(value, strict=True)
+    except ValueError:
+        return None, f"invalid IPv{version} /{host_len} host CIDR"
+    if network.version != version:
+        return None, f"must be an IPv{version} /{host_len} host CIDR"
+    if network.prefixlen != host_len:
+        return None, f"must be a /{host_len} host address"
+    address = network.network_address
+    if (
+        address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+        or (version == 6 and address.ipv4_mapped is not None)
+    ):
+        return None, f"unusable IPv{version} overlay host address"
+    return network, None
+
+
+def check_overlay_key_file(value: Any, inv_root: Path) -> str | None:
+    if not isinstance(value, str) or not value or any(c.isspace() for c in value):
+        return "must be an absolute file path without whitespace"
+    if not value.startswith("/"):
+        return "must be an absolute controller-side path outside the repository checkout"
+    path = Path(value)
+    if ".." in path.parts:
+        return "must not contain '..' path traversal segments"
+    resolved = path.resolve(strict=False)
+    for forbidden in (REPO_ROOT.resolve(), inv_root.resolve()):
+        if resolved == forbidden or forbidden in resolved.parents:
+            return "must be outside the repository checkout and inventory directory"
+    return None
 
 
 def is_dns_name(value: Any, min_labels: int = 1) -> bool:

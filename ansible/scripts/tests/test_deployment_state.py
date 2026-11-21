@@ -153,6 +153,9 @@ class ManagedStateDriftTest(unittest.TestCase):
             "cp": {"cp-test": {
                 "ansible_host": "203.0.113.30", "public_ipv4": "203.0.113.30",
                 "public_ipv6": "2001:db8:30::30", "node_role": "control_plane",
+                "overlay_ipv6": "fd00:db8:1::30/128", "overlay_ipv4": "10.250.0.30/32",
+                "overlay_allowed_ips": ["fd00:db8:1::30/128", "10.250.0.30/32"],
+                "base_firewall_vpn_ports": [{"proto": "udp", "port": common["overlay_port"]}],
             }},
         }
         (root / "hosts.yml").write_text(
