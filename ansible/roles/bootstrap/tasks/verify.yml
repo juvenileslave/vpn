@@ -1,9 +1,61 @@
 ---
 # A new, independent SSH process. It offers exactly the declared administrator
 # key (IdentitiesOnly, -F /dev/null, no agent/config identities), keeps host-key
-# checking on, and proves the UID and NOPASSWD sudo. A local authorized_keys,
-# the old root session or a successful become are not evidence.
-- name: Probe a new key-only administrator SSH connection
+# checking on, and proves the UID and NOPASSWD sudo. First it always proves the
+# direct break-glass path (proxy options stripped and explicitly disabled); if
+# the inventory configures a proxy, the proxied path is proved separately. A
+# local authorized_keys, the old root session or a successful become are not
+# evidence.
+- name: Probe a new direct key-only administrator SSH connection
+  vars:
+    _bootstrap_probe_command: >-
+      set -e; printf 'user=%s\n' "$(id -un)"; printf 'uid=%s\n' "$(id -u)";
+      sudo -n true; printf 'sudo=ok\n'
+  ansible.builtin.command:
+    argv: "{{ ['ssh', '-F', '/dev/null',
+               '-o', 'ConnectTimeout=15', '-o', 'ConnectionAttempts=1',
+               '-o', 'ProxyJump=none', '-o', 'ProxyCommand=none']
+              + (bootstrap_key_only_ssh_args | bootstrap_direct_ssh_args)
+              + ['-i', (bootstrap_admin_private_key_file | expanduser),
+                 '-p', ((ansible_port | default(22)) | string),
+                 (bootstrap_admin_selected ~ '@'
+                  ~ (ansible_host | default(inventory_hostname))),
+                 _bootstrap_probe_command] }}"
+  register: bootstrap_admin_direct_probe
+  changed_when: false
+  check_mode: false
+  become: false
+  failed_when: false
+
+- name: Require a successful direct administrator connection
+  ansible.builtin.assert:
+    that: bootstrap_admin_direct_probe.rc == 0
+    fail_msg: >-
+      Новый прямой (break-glass, без прокси) SSH-вход ключом администратора
+      {{ bootstrap_admin_selected }} не удался
+      (rc={{ bootstrap_admin_direct_probe.rc }}). Первоначальный root-доступ
+      не закрывается, hardening и панель не применяются.
+      {{ bootstrap_admin_direct_probe.stderr | default('') | trim }}
+    quiet: true
+
+- name: Require the expected account, UID and working sudo on the direct path
+  vars:
+    _bootstrap_direct_lines: "{{ bootstrap_admin_direct_probe.stdout_lines | default([]) }}"
+    _bootstrap_direct_uid: >-
+      {{ (_bootstrap_direct_lines | select('match', '^uid=[0-9]+$')
+          | map('regex_replace', '^uid=', '') | first | default('-1')) | int }}
+  ansible.builtin.assert:
+    that:
+      - _bootstrap_direct_lines | select('equalto', 'user=' ~ bootstrap_admin_selected) | list | length == 1
+      - _bootstrap_direct_uid >= 1000
+      - _bootstrap_direct_uid != 0
+      - _bootstrap_direct_lines | select('equalto', 'sudo=ok') | list | length == 1
+    fail_msg: >-
+      Новое прямое SSH-подключение прошло, но UID/sudo администратора не
+      подтверждены; hardening не применяется.
+    quiet: true
+
+- name: Probe a new proxied key-only administrator SSH connection
   vars:
     _bootstrap_probe_command: >-
       set -e; printf 'user=%s\n' "$(id -un)"; printf 'uid=%s\n' "$(id -u)";
@@ -22,8 +74,11 @@
   check_mode: false
   become: false
   failed_when: false
+  when: >-
+    (bootstrap_key_only_ssh_args | bootstrap_direct_ssh_args)
+    != (bootstrap_key_only_ssh_args | bootstrap_ssh_args)
 
-- name: Require a successful new administrator connection
+- name: Require a successful proxied administrator connection
   ansible.builtin.assert:
     that: bootstrap_admin_probe.rc == 0
     fail_msg: >-
@@ -32,8 +87,9 @@
       не закрывается, hardening и панель не применяются.
       {{ bootstrap_admin_probe.stderr | default('') | trim }}
     quiet: true
+  when: bootstrap_admin_probe is not skipped
 
-- name: Require the expected account, UID and working sudo
+- name: Require the expected account, UID and working sudo on the proxied path
   vars:
     _bootstrap_probe_lines: "{{ bootstrap_admin_probe.stdout_lines | default([]) }}"
     _bootstrap_probe_uid: >-
@@ -49,3 +105,4 @@
       Новое SSH-подключение прошло, но UID/sudo администратора не подтверждены;
       hardening не применяется.
     quiet: true
+  when: bootstrap_admin_probe is not skipped
