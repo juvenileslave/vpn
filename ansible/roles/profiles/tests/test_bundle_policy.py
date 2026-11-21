@@ -29,6 +29,24 @@ class BundlePolicyTest(unittest.TestCase):
         self.rejected(lambda t, s: t["exit"].update(node_port_allow=["0.0.0.0/0"]))
         self.rejected(lambda t, s: t["exit"].update(node_port_allow=["127.0.0.0/8"]))
 
+    def test_exit_transit_port_cannot_be_public(self):
+        _, files = bundle.render(self.topology, self.secret)
+        self.assertIn("exit.json", files)
+        for remove_source_rule in (False, True):
+            with self.subTest(remove_source_rule=remove_source_rule):
+                topology = copy.deepcopy(self.topology)
+                transit = topology["exit"]["transit_port"]
+                if remove_source_rule:
+                    topology["exit"]["base_firewall_source_ports"] = [
+                        rule for rule in topology["exit"]["base_firewall_source_ports"]
+                        if rule["port"] != transit
+                    ]
+                topology["exit"]["base_firewall_vpn_ports"].append({"proto": "tcp", "port": transit})
+                with self.assertRaisesRegex(bundle.Invalid, "transit_port"):
+                    bundle.validate_host(copy.deepcopy(topology["exit"]), "exit")
+                with self.assertRaisesRegex(bundle.Invalid, "transit_port"):
+                    bundle.render(topology, copy.deepcopy(self.secret))
+
     def test_node_api_port_has_no_implicit_fallback(self):
         self.rejected(lambda t, s: t["exit"].pop("node_api_port"))
         self.rejected(lambda t, s: t["relay"].pop("node_api_port"))
@@ -62,6 +80,59 @@ class BundlePolicyTest(unittest.TestCase):
         self.rejected(lambda t, s: s.update(profiles_upstreams={"1": {"protocol": "freedom", "settings": {}}}))
         self.rejected(lambda t, s: s["profiles_upstreams"]["1"]["settings"]["servers"][0].update(port=True))
         self.rejected(lambda t, s: s.update(profiles_upstreams={"1": {"protocol": "vless", "settings": {"vnext": [{"address": "192.0.2.99", "port": 443, "users": [{"id": "invalid"}]}]}}}))
+
+    def test_relay_targets_exit_transit_without_relay_freedom_fallback(self):
+        self.secret["profiles_user_slots"] = [0, 1, 2]
+        _, files = bundle.render(self.topology, self.secret)
+        exit_config = json.loads(files["exit.json"])
+        relay = json.loads(files["relay.json"])
+        slots = self.topology["egress_slots"]
+
+        relay_outbounds = {item["tag"]: item for item in relay["outbounds"]}
+        expected_slot_tags = {f"slot-{slot}-v{version}" for slot in range(slots) for version in (6, 4)}
+        self.assertEqual(set(relay_outbounds), {"block"} | expected_slot_tags)
+        self.assertEqual([item for item in relay["outbounds"] if item["protocol"] == "freedom"], [])
+        self.assertEqual(relay_outbounds["block"]["protocol"], "blackhole")
+
+        relay_addresses = {
+            self.topology["relay"]["public_ipv4"],
+            self.topology["relay"]["public_ipv6"],
+            self.topology["relay"]["relay_egress_ipv4"],
+            self.topology["relay"]["relay_egress_ipv6"],
+        }
+        for slot in range(slots):
+            for version in (6, 4):
+                outbound = relay_outbounds[f"slot-{slot}-v{version}"]
+                self.assertEqual(outbound["protocol"], "vless")
+                vnext = outbound["settings"]["vnext"]
+                self.assertEqual(len(vnext), 1)
+                self.assertEqual(vnext[0]["address"], self.topology["exit"][f"public_ipv{version}"])
+                self.assertNotIn(vnext[0]["address"], relay_addresses)
+                self.assertEqual(vnext[0]["port"], self.topology["exit"]["transit_port"])
+                self.assertEqual(vnext[0]["users"][0]["id"], self.secret["transit_client_ids"][slot])
+
+        balancers = {item["tag"]: item for item in relay["routing"]["balancers"]}
+        self.assertEqual(set(balancers), {f"slot-{slot}" for slot in range(slots)})
+        for slot in range(slots):
+            self.assertEqual(balancers[f"slot-{slot}"]["selector"], [f"slot-{slot}-v6"])
+            self.assertEqual(balancers[f"slot-{slot}"]["fallbackTag"], f"slot-{slot}-v4")
+
+        relay_rules = relay["routing"]["rules"]
+        self.assertEqual(relay_rules[-1], {"type": "field", "network": "tcp,udp", "outboundTag": "block"})
+        for rule in relay_rules[:-1]:
+            self.assertNotIn("outboundTag", rule)
+            self.assertIn(rule.get("balancerTag"), balancers)
+
+        exit_outbounds = {item["tag"]: item for item in exit_config["outbounds"]}
+        self.assertEqual([item["tag"] for item in exit_config["outbounds"] if item["protocol"] == "freedom"], ["egress-0"])
+        direct_rules = [rule for rule in exit_config["routing"]["rules"] if "inboundTag" in rule]
+        self.assertEqual(direct_rules, [{"type": "field", "inboundTag": ["direct-v4", "direct-v6"], "outboundTag": "egress-0"}])
+        exit_user_rules = {rule["user"][0]: rule["outboundTag"] for rule in exit_config["routing"]["rules"] if "user" in rule}
+        self.assertEqual(exit_user_rules["egress-0"], "egress-0")
+        for slot in range(1, slots):
+            self.assertEqual(exit_user_rules[f"egress-{slot}"], "block")
+            self.assertNotIn(f"egress-{slot}", exit_outbounds)
+        self.assertEqual(exit_config["routing"]["rules"][-1], {"type": "field", "network": "tcp,udp", "outboundTag": "block"})
 
     def test_loopback_upstreams_rejected_before_writes(self):
         for protocol, field in (("socks", "servers"), ("http", "servers"), ("vless", "vnext")):

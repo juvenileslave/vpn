@@ -214,6 +214,9 @@ Passed; `playbooks/site.yml --syntax-check` — OK. После `8de834d`/`c35808
    firewall; Git revert не возвращает хосты.
 6. Публикация профилей/Host в панель остаётся заблокированной (#53); её
    acceptance нельзя объявлять по offline bundle.
+7. Сквозная маршрутизация relay → exit (issue #72, [EXIT_NODE.md](EXIT_NODE.md)):
+   видимость адреса exit вместо relay, переход IPv6 → IPv4, отсутствие
+   relay freedom и fail-closed пустых слотов — runtime acceptance не выполнялся.
 
 ## Откат
 
