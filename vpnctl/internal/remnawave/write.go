@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -71,9 +72,13 @@ type InboundRef struct {
 
 func (r InboundRef) String() string   { return "remnawave.InboundRef{redacted}" }
 func (r InboundRef) GoString() string { return r.String() }
+func (r InboundRef) MarshalJSON() ([]byte, error) {
+	return []byte(`{"redacted":true}`), nil
+}
 
-// WriteHost holds the fields for POST /api/hosts. Omitted optional pointer
-// fields are not serialized.
+// WriteHost holds the fields for POST /api/hosts. Nil optional pointer fields
+// are omitted; non-nil pointers (including empty strings) are serialized
+// explicitly.
 type WriteHost struct {
 	HostName               string
 	Address                string
@@ -90,9 +95,13 @@ type WriteHost struct {
 
 func (h WriteHost) String() string   { return "remnawave.WriteHost{redacted}" }
 func (h WriteHost) GoString() string { return h.String() }
+func (h WriteHost) MarshalJSON() ([]byte, error) {
+	return []byte(`{"redacted":true}`), nil
+}
 
-// UpdateHostInput holds the fields for PATCH /api/hosts. Omitted optional
-// pointer fields are not serialized so panel-side settings are preserved.
+// UpdateHostInput holds the fields for PATCH /api/hosts. Nil optional pointer
+// fields are omitted so panel-side settings are preserved; non-nil pointers
+// (including empty strings) are serialized explicitly and overwrite the field.
 type UpdateHostInput struct {
 	UUID                   string
 	HostName               *string
@@ -110,6 +119,9 @@ type UpdateHostInput struct {
 
 func (h UpdateHostInput) String() string   { return "remnawave.UpdateHostInput{redacted}" }
 func (h UpdateHostInput) GoString() string { return h.String() }
+func (h UpdateHostInput) MarshalJSON() ([]byte, error) {
+	return []byte(`{"redacted":true}`), nil
+}
 
 type createConfigProfileRequest struct {
 	Name   string          `json:"name"`
@@ -184,14 +196,14 @@ func (c *Client) CreateConfigProfile(ctx context.Context, in CreateConfigProfile
 	}
 	raw, err := planningEnvelope(body)
 	if err != nil {
-		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	profile, err := decodeConfigProfile(raw)
 	if err == nil && profile.Name != in.Name {
 		err = malformed("profile: requested name does not match response")
 	}
 	if err != nil {
-		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	return profile, nil
 }
@@ -227,7 +239,7 @@ func (c *Client) UpdateConfigProfile(ctx context.Context, in UpdateConfigProfile
 	}
 	raw, err := planningEnvelope(body)
 	if err != nil {
-		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	profile, err := decodeConfigProfile(raw)
 	if err == nil && !sameUUID(profile.UUID, in.UUID) {
@@ -237,7 +249,7 @@ func (c *Client) UpdateConfigProfile(ctx context.Context, in UpdateConfigProfile
 		err = malformed("profile: requested name does not match response")
 	}
 	if err != nil {
-		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return ConfigProfile{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	return profile, nil
 }
@@ -281,7 +293,7 @@ func (c *Client) writeSnippet(ctx context.Context, op, method string, expectedSt
 	}
 	snippets, err := decodeSnippets(body)
 	if err != nil {
-		return nil, fmt.Errorf("remnawave: %s: %w", op, err)
+		return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	matches := 0
 	for _, item := range snippets {
@@ -290,7 +302,7 @@ func (c *Client) writeSnippet(ctx context.Context, op, method string, expectedSt
 		}
 	}
 	if matches != 1 {
-		return nil, fmt.Errorf("remnawave: %s: %w", op, malformed("snippet: requested identity missing from response"))
+		return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: malformed("snippet: requested identity missing from response")})
 	}
 	return snippets, nil
 }
@@ -356,7 +368,7 @@ func (c *Client) CreateHost(ctx context.Context, in WriteHost) (Host, error) {
 	}
 	raw, err := planningEnvelope(body)
 	if err != nil {
-		return Host{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return Host{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	host, err := decodeHost(raw)
 	if err == nil && host.Remark != in.HostName {
@@ -367,7 +379,7 @@ func (c *Client) CreateHost(ctx context.Context, in WriteHost) (Host, error) {
 		err = malformed("host: requested inbound does not match response")
 	}
 	if err != nil {
-		return Host{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return Host{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	return host, nil
 }
@@ -428,7 +440,7 @@ func (c *Client) UpdateHost(ctx context.Context, in UpdateHostInput) (Host, erro
 	}
 	raw, err := planningEnvelope(body)
 	if err != nil {
-		return Host{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return Host{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	host, err := decodeHost(raw)
 	if err == nil && !sameUUID(host.UUID, in.UUID) {
@@ -443,7 +455,7 @@ func (c *Client) UpdateHost(ctx context.Context, in UpdateHostInput) (Host, erro
 		err = malformed("host: requested inbound does not match response")
 	}
 	if err != nil {
-		return Host{}, fmt.Errorf("remnawave: %s: %w", op, err)
+		return Host{}, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: err})
 	}
 	return host, nil
 }
@@ -532,7 +544,8 @@ func (c *Client) doJSON(ctx context.Context, op, method string, expectedStatus i
 	}
 	if expectedStatus == http.StatusNoContent || expectedStatus == http.StatusAccepted {
 		if resp.ContentLength > 0 {
-			return nil, fmt.Errorf("remnawave: %s: %w: expected empty body", op, ErrMalformedResponse)
+			cause := fmt.Errorf("%w: expected empty body", ErrMalformedResponse)
+			return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: cause})
 		}
 		extra, err := io.ReadAll(io.LimitReader(resp.Body, 1))
 		if err != nil {
@@ -543,15 +556,18 @@ func (c *Client) doJSON(ctx context.Context, op, method string, expectedStatus i
 			return nil, fmt.Errorf("remnawave: %s: read body: %w", op, &WriteOutcomeUnknownError{cause: cause})
 		}
 		if len(extra) != 0 {
-			return nil, fmt.Errorf("remnawave: %s: %w: expected empty body", op, ErrMalformedResponse)
+			cause := fmt.Errorf("%w: expected empty body", ErrMalformedResponse)
+			return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: cause})
 		}
 		return nil, nil
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		return nil, fmt.Errorf("remnawave: %s: %w: content type is not application/json", op, ErrMalformedResponse)
+		cause := fmt.Errorf("%w: content type is not application/json", ErrMalformedResponse)
+		return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: cause})
 	}
 	if resp.ContentLength > c.maxBytes {
-		return nil, fmt.Errorf("remnawave: %s: %w (limit %d bytes)", op, ErrResponseTooLarge, c.maxBytes)
+		cause := fmt.Errorf("%w (limit %d bytes)", ErrResponseTooLarge, c.maxBytes)
+		return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: cause})
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBytes+1))
 	if err != nil {
@@ -562,7 +578,8 @@ func (c *Client) doJSON(ctx context.Context, op, method string, expectedStatus i
 		return nil, fmt.Errorf("remnawave: %s: read body: %w", op, &WriteOutcomeUnknownError{cause: cause})
 	}
 	if int64(len(body)) > c.maxBytes {
-		return nil, fmt.Errorf("remnawave: %s: %w (limit %d bytes)", op, ErrResponseTooLarge, c.maxBytes)
+		cause := fmt.Errorf("%w (limit %d bytes)", ErrResponseTooLarge, c.maxBytes)
+		return nil, fmt.Errorf("remnawave: %s: %w", op, &WriteOutcomeUnknownError{cause: cause})
 	}
 	return body, nil
 }
@@ -603,15 +620,46 @@ func validHostRemark(s string) bool {
 }
 
 func validHostAddress(s string) bool {
-	if !utf8.ValidString(s) || s == "" {
+	if s == "" || len(s) > 253 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if s[i] <= ' ' || s[i] == 0x7f {
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.Zone() == ""
+	}
+	return validHostname(s)
+}
+
+func validHostname(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	for idx, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if !isASCIIAlphaNum(label[0]) || !isASCIIAlphaNum(label[len(label)-1]) {
+			return false
+		}
+		allDigits := true
+		for i := 0; i < len(label); i++ {
+			b := label[i]
+			if !isASCIIAlphaNum(b) && b != '-' {
+				return false
+			}
+			if b < '0' || b > '9' {
+				allDigits = false
+			}
+		}
+		if idx == len(labels)-1 && allDigits {
 			return false
 		}
 	}
 	return true
+}
+
+func isASCIIAlphaNum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 func validOptionalHostString(s *string) bool {

@@ -1,10 +1,16 @@
 # Планирование публикации bundle в Remnawave
 
-Read-only часть [issue #53](https://github.com/juvenileslave/vpn/issues/53).
-**Write adapter, apply и rollback не реализованы:** владелец выбрал строгую
-защиту от независимого конкурентного writer. Закреплённый Remnawave 3.4.10
-такую защиту не предоставляет. `apply --apply` возвращает отказ **до любого I/O**.
-Эксклюзивного режима, фиктивного `If-Match`, replay POST и обхода защиты нет.
+Read-only CLI и библиотечный write-транспорт для
+[issue #53](https://github.com/juvenileslave/vpn/issues/53).
+В `vpnctl/internal/remnawave` реализован **только библиотечный транспортный срез**
+(явные методы записи для config profiles, snippets и hosts, лимит тела запроса
+16 МиБ и `ErrAmbiguousWrite`/`WriteOutcomeUnknownError`); ни одна CLI-команда его
+не вызывает. **`panel.Apply`, `Rollback`, CLI `apply`/`rollback` и SQLite-журнал
+операций не реализованы:** владелец выбрал строгую защиту от независимого
+конкурентного writer, которую закреплённый Remnawave 3.4.10 не предоставляет.
+`vpnctl panel apply --apply` по-прежнему возвращает отказ **до любого I/O**.
+Эксклюзивного режима, фиктивного `If-Match`/CAS, повторов, replay POST,
+автоматического sync и обхода защиты нет.
 Issue #53 этим срезом не закрывается; VPN не развёрнут.
 
 ## Реальные факты закреплённой панели
@@ -170,16 +176,21 @@ make vpnctl-test
 make check
 ```
 
-HTTP tests — локальные TLS fake servers с временными credentials: exact GET
-method/path/query/headers/body, envelopes, unknown fields, duplicates, redirects,
-response limits, malformed JSON, 401/403/404/409/429/5xx, timeout/cancel и redaction.
+HTTP tests — локальные TLS fake servers с временными credentials: для read и
+библиотечного write-транспорта проверяются exact method/path/query/headers/body,
+отсутствие `If-Match` и повторов, envelopes, unknown fields, duplicates, redirects,
+request/response limits, malformed JSON, 401/403/404/409/429/5xx, timeout/cancel,
+`ErrAmbiguousWrite` и redaction.
 Consumer tests проверяют canonical diff, ownership/shared snippets/hosts,
 immutable bundle tampering, lossy refusal и pre-I/O apply refusal.
 
-Node к этому одноразовому panel probe **не подключался**. Sync acceptance не
-доказывает node restart, user injection, работу relay или доступность VPN.
-Write idempotency, ambiguous write resolution, SQLite apply records, rollback
-с текущим revocation overlay и end-to-end публикация bundle остаются **заблокированы**.
+Node к одноразовому panel probe **не подключался**, а новый write-транспорт
+проверен **только** на локальных fake TLS servers без вызовов реальной панели.
+Sync acceptance не доказывает node restart, user injection, работу relay или
+доступность VPN. Оркестрация `panel.Apply`/`Rollback`, write idempotency,
+разрешение `ErrAmbiguousWrite` через read-back, SQLite-записи `panel_operations`,
+rollback с текущим revocation overlay и end-to-end публикация bundle остаются
+**не реализованы и заблокированы**.
 Пользовательские credentials/CRUD, renderer и inventory здесь не меняются.
 
 Интеграционный smoke выполнен с собранным `vpnctl` и результатом **настоящего**

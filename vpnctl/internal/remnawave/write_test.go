@@ -373,7 +373,7 @@ func TestWriteMethodsRequestsEnvelopesAndRedaction(t *testing.T) {
 			})
 			if tc.inputValue != nil {
 				formatted := fmt.Sprintf("%v %+v %#v", tc.inputValue, tc.inputValue, tc.inputValue)
-				for _, marker := range []string{secret, "temporary-profile", "temporary-host", "routing/direct-v4", "192.0.2.1"} {
+				for _, marker := range []string{secret, "temporary-profile", "temporary-host", "routing/direct-v4", "192.0.2.1", "192.0.2.2", "edge.example.test"} {
 					if strings.Contains(formatted, marker) {
 						t.Errorf("input formatting leaks %q", marker)
 					}
@@ -385,6 +385,14 @@ func TestWriteMethodsRequestsEnvelopesAndRedaction(t *testing.T) {
 					assertSecretInputJSONRedacted(t, v, &v, secret, "temporary-profile", v.UUID)
 				case WriteSnippetInput:
 					assertSecretInputJSONRedacted(t, v, &v, secret, "routing/direct-v4")
+				case WriteHost:
+					assertSecretInputJSONRedacted(t, v, &v, "temporary-host", "192.0.2.1", "edge.example.test", v.Inbound.ConfigProfileUUID, v.Inbound.ConfigProfileInboundUUID)
+					assertSecretInputJSONRedacted(t, v.Inbound, &v.Inbound, v.Inbound.ConfigProfileUUID, v.Inbound.ConfigProfileInboundUUID)
+				case UpdateHostInput:
+					assertSecretInputJSONRedacted(t, v, &v, v.UUID, "temporary-host", "192.0.2.2")
+					if v.Inbound != nil {
+						assertSecretInputJSONRedacted(t, *v.Inbound, v.Inbound, v.Inbound.ConfigProfileUUID, v.Inbound.ConfigProfileInboundUUID)
+					}
 				}
 			}
 			got, err := tc.call(c, context.Background())
@@ -535,6 +543,13 @@ func TestWriteValidationRejectsBeforeIO(t *testing.T) {
 		{HostName: "bad\nremark", Address: "192.0.2.1", Port: 443, Inbound: validRef},
 		{HostName: "ok", Address: "", Port: 443, Inbound: validRef},
 		{HostName: "ok", Address: "192.0.2.1 bad", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: "https://edge.example.test", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: "192.0.2.1:443", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: "edge.example.test/path", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: "fe80::1%eth0", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: "999.999.999.999", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: "edge.example.test\u00a0", Port: 443, Inbound: validRef},
+		{HostName: "ok", Address: strings.Repeat("a", 64) + ".test", Port: 443, Inbound: validRef},
 		{HostName: "ok", Address: "192.0.2.1", Port: 0, Inbound: validRef},
 		{HostName: "ok", Address: "192.0.2.1", Port: -1, Inbound: validRef},
 		{HostName: "ok", Address: "192.0.2.1", Port: 65536, Inbound: validRef},
@@ -549,6 +564,7 @@ func TestWriteValidationRejectsBeforeIO(t *testing.T) {
 		{UUID: validID},
 		{UUID: validID, HostName: ptr("")},
 		{UUID: validID, Address: ptr("bad addr")},
+		{UUID: validID, Address: ptr("https://edge.example.test")},
 		{UUID: validID, Port: ptr(0)},
 		{UUID: validID, Port: ptr(70000)},
 		{UUID: validID, Inbound: &InboundRef{ConfigProfileUUID: validID}},
@@ -556,6 +572,11 @@ func TestWriteValidationRejectsBeforeIO(t *testing.T) {
 	} {
 		if _, err := c.UpdateHost(context.Background(), badUpdate); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("UpdateHost invalid input: %v", err)
+		}
+	}
+	for _, okAddr := range []string{"192.0.2.1", "2001:db8::1", "edge.example.test"} {
+		if !validHostAddress(okAddr) {
+			t.Errorf("validHostAddress(%q) = false, want true", okAddr)
 		}
 	}
 
@@ -604,7 +625,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 						_, _ = io.WriteString(w, secret)
 					})
 					_, err := tc.call(c, context.Background())
-					if !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+					if !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 						t.Fatalf("non-empty 202 body: %v", err)
 					}
 					assertPlanningRedacted(t, err, token, secret)
@@ -616,7 +637,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 						t.Fatal(err)
 					}
 					_, err = tc.call(customClient, context.Background())
-					if !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+					if !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 						t.Fatalf("non-empty 204 body: %v", err)
 					}
 					assertPlanningRedacted(t, err, token, secret)
@@ -651,7 +672,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 				_, _ = io.WriteString(w, secret)
 			})
 			_, err = tc.call(c, context.Background())
-			if !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+			if !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 				t.Fatalf("wrong content type: %v", err)
 			}
 			assertPlanningRedacted(t, err, token, secret)
@@ -675,7 +696,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					body.Store(malformedBody)
 					_, err := tc.call(c, context.Background())
-					if !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+					if !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 						t.Fatalf("%s: %v", name, err)
 					}
 					assertPlanningRedacted(t, err, token, secret)
@@ -696,7 +717,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 		})
 		if _, err := c.CreateConfigProfile(context.Background(), CreateConfigProfileInput{
 			Name: "temporary-profile", Config: json.RawMessage(`{"inbounds":[]}`),
-		}); !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -708,7 +729,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 		})
 		if _, err := c.UpdateConfigProfile(context.Background(), UpdateConfigProfileInput{
 			UUID: profileUUID, Name: ptr("temporary-profile"),
-		}); !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -721,7 +742,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 		})
 		if _, err := c.UpdateConfigProfile(context.Background(), UpdateConfigProfileInput{
 			UUID: profileUUID, Name: ptr("temporary-profile"),
-		}); !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -739,7 +760,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 			})
 			if _, err := c.CreateSnippet(context.Background(), WriteSnippetInput{
 				Name: "wanted", Snippet: json.RawMessage(`[{"k":"v"}]`),
-			}); !errors.Is(err, ErrMalformedResponse) || errors.Is(err, ErrAmbiguousWrite) {
+			}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 				t.Fatalf("err = %v", err)
 			}
 		}
@@ -754,7 +775,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 		if _, err := c.CreateHost(context.Background(), WriteHost{
 			HostName: "temporary-host", Address: "192.0.2.1", Port: 443,
 			Inbound: InboundRef{ConfigProfileUUID: profileUUID, ConfigProfileInboundUUID: inboundUUID},
-		}); !errors.Is(err, ErrMalformedResponse) {
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 			t.Fatalf("create host remark mismatch: %v", err)
 		}
 
@@ -765,7 +786,7 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 		if _, err := c.CreateHost(context.Background(), WriteHost{
 			HostName: "temporary-host", Address: "192.0.2.1", Port: 443,
 			Inbound: InboundRef{ConfigProfileUUID: profileUUID, ConfigProfileInboundUUID: inboundUUID},
-		}); !errors.Is(err, ErrMalformedResponse) {
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 			t.Fatalf("create host inbound mismatch: %v", err)
 		}
 
@@ -775,8 +796,37 @@ func TestWriteMalformedResponsesAndIdentityMismatch(t *testing.T) {
 		})
 		if _, err := c.UpdateHost(context.Background(), UpdateHostInput{
 			UUID: hostUUID, Port: ptr(8443),
-		}); !errors.Is(err, ErrMalformedResponse) {
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
 			t.Fatalf("update host uuid mismatch: %v", err)
+		}
+
+		hWrongInboundID := planningHost(hostUUID, profileUUID, otherUUID, secret)
+		c, _ = writeServer(t, token, http.MethodPost, "/api/hosts", true, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			writeJSON(w, http.StatusCreated, planningJSON(t, map[string]any{"response": hWrongInboundID}))
+		})
+		if _, err := c.CreateHost(context.Background(), WriteHost{
+			HostName: "temporary-host", Address: "192.0.2.1", Port: 443,
+			Inbound: InboundRef{ConfigProfileUUID: profileUUID, ConfigProfileInboundUUID: inboundUUID},
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
+			t.Fatalf("create host inbound uuid mismatch: %v", err)
+		}
+
+		c, _ = writeServer(t, token, http.MethodPatch, "/api/hosts", true, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			writeJSON(w, http.StatusOK, planningJSON(t, map[string]any{"response": hWrongRemark}))
+		})
+		if _, err := c.UpdateHost(context.Background(), UpdateHostInput{
+			UUID: hostUUID, HostName: ptr("temporary-host"),
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
+			t.Fatalf("update host remark mismatch: %v", err)
+		}
+
+		c, _ = writeServer(t, token, http.MethodPatch, "/api/hosts", true, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			writeJSON(w, http.StatusOK, planningJSON(t, map[string]any{"response": hWrongInbound}))
+		})
+		if _, err := c.UpdateHost(context.Background(), UpdateHostInput{
+			UUID: hostUUID, Inbound: &InboundRef{ConfigProfileUUID: profileUUID, ConfigProfileInboundUUID: inboundUUID},
+		}); !errors.Is(err, ErrMalformedResponse) || !errors.Is(err, ErrAmbiguousWrite) {
+			t.Fatalf("update host inbound mismatch: %v", err)
 		}
 	})
 }
@@ -868,8 +918,26 @@ func TestWriteHTTPFailuresAndResponseLimits(t *testing.T) {
 							}
 						}
 					}, WithMaxResponseBytes(1024))
-					if _, err := tc.call(c, context.Background()); !errors.Is(err, ErrResponseTooLarge) || errors.Is(err, ErrAmbiguousWrite) {
+					if _, err := tc.call(c, context.Background()); !errors.Is(err, ErrResponseTooLarge) || !errors.Is(err, ErrAmbiguousWrite) {
 						t.Fatalf("oversized response chunked=%t: %v", chunked, err)
+					}
+				}
+				u, err := url.Parse("https://panel.example.test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, declared := range []int64{10, 10000} {
+					body := tc.respBody
+					if declared < 1024 {
+						body = tc.respBody + strings.Repeat(" ", 4096)
+					}
+					rt := writeLyingLengthTransport{status: tc.status, body: body, declaredLength: declared}
+					lyingClient, err := New(u, token, &http.Client{Transport: rt}, WithMaxResponseBytes(1024))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := tc.call(lyingClient, context.Background()); !errors.Is(err, ErrResponseTooLarge) || !errors.Is(err, ErrAmbiguousWrite) {
+						t.Fatalf("lying Content-Length=%d: %v", declared, err)
 					}
 				}
 			}
@@ -987,6 +1055,27 @@ func TestWriteCancellationTimeoutsAndTransportFailures(t *testing.T) {
 			}
 		}
 	})
+
+	// Mutating requests must never expose req.GetBody to transport replay.
+	t.Run("write requests disable GetBody replay", func(t *testing.T) {
+		u, err := url.Parse("https://panel.example.test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range writeCases(t, secret) {
+			rt := &writeInspectGetBodyTransport{status: tc.status, respBody: tc.respBody}
+			c, err := New(u, token, &http.Client{Transport: rt})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := tc.call(c, context.Background()); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if rt.sawGetBody.Load() {
+				t.Fatalf("%s: req.GetBody was non-nil", tc.name)
+			}
+		}
+	})
 }
 
 type writeStatusTransport struct {
@@ -1018,5 +1107,44 @@ func (t writeFailBodyTransport) RoundTrip(*http.Request) (*http.Response, error)
 		Header:        header,
 		Body:          planningFailBody{cause: t.cause},
 		ContentLength: -1,
+	}, nil
+}
+
+type writeLyingLengthTransport struct {
+	status         int
+	body           string
+	declaredLength int64
+}
+
+func (t writeLyingLengthTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	return &http.Response{
+		StatusCode:    t.status,
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(t.body)),
+		ContentLength: t.declaredLength,
+	}, nil
+}
+
+type writeInspectGetBodyTransport struct {
+	sawGetBody atomic.Bool
+	status     int
+	respBody   string
+}
+
+func (t *writeInspectGetBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.GetBody != nil {
+		t.sawGetBody.Store(true)
+	}
+	header := http.Header{}
+	if t.respBody != "" {
+		header.Set("Content-Type", "application/json")
+	}
+	return &http.Response{
+		StatusCode:    t.status,
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(t.respBody)),
+		ContentLength: int64(len(t.respBody)),
 	}, nil
 }
