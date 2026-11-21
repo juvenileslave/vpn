@@ -5,7 +5,8 @@
 автоматические обновления безопасности, BBR, необязательный swap и собственная
 таблица nftables. **Роль ни к одному серверу не применялась.** Её наличие не
 означает, что VPN развёрнут; запуск на рабочих узлах требует отдельного явного
-разрешения владельца (см. [AGENTS.md](../AGENTS.md)).
+разрешения владельца (см. [AGENTS.md](../AGENTS.md)). Процедура прямого
+аварийного SSH-доступа, ротации ключей и отката описана в [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md).
 
 ## Состав
 
@@ -54,8 +55,10 @@ Ubuntu 22.04 в рантайме не проверялись.
 | `base_admin_sudo_nopasswd` | `true` | `NOPASSWD` в `/etc/sudoers.d/vpn-base` (пароля у новых пользователей нет). |
 | `base_ssh_enabled` | `false` | Управление политикой SSH. |
 | `base_ssh_port` | `22` | Порт, который sshd **уже** слушает; роль его не меняет, а сверяет с `sshd -T`. |
-| `base_ssh_permit_root_login` | `"no"` | `no` или `prohibit-password`. |
-| `base_ssh_trusted_cidrs` | `[]` | Сети, из которых firewall пропускает SSH. |
+| `base_ssh_permit_root_login` | `"no"` | Допустимо только `"no"` (прямой break-glass идёт не-root администратором). |
+| `base_ssh_max_auth_tries` | `4` | Предел попыток аутентификации sshd (`1–6`). |
+| `base_ssh_login_grace_time` | `30` | Таймаут аутентификации sshd в секундах (`10–60`). |
+| `base_ssh_trusted_cidrs` | `[]` | Явные узкие сети администратора для прямого SSH (не шире `/24` IPv4 и `/64` IPv6; обязательны при `base_ssh_enabled` или `base_firewall_enabled`). |
 | `base_firewall_enabled` | `false` | Управление таблицей `inet vpn_base`. В production-like inventory обязателен `true`; `false` допустим только с явным временным `base_firewall_bootstrap_exception`. |
 | `base_firewall_bootstrap_exception` | не задан | Только для первичного bootstrap администратора: `{temporary: true, source_cidrs: […]}`; список обязан совпадать с `node_port_allow`. Не даёт права запускать `remnawave_node`. |
 | `base_firewall_vpn_ports` | `[]` | Публичные порты `{proto: tcp\|udp, port: N}`. Для `exit`/`relay` обязателен к явному объявлению в inventory. |
@@ -82,21 +85,28 @@ Ubuntu 22.04 в рантайме не проверялись.
 - Ключи: не одна строка, опции `authorized_keys`, приватный ключ, неверный
   base64 или несовпадение типа, DSA, RSA короче 3072 бит.
 - CIDR без префикса, с битами хоста, `/0`, шире `/8` (IPv4) или `/32` (IPv6),
-  loopback/multicast/IPv4-mapped.
+  loopback/multicast/IPv4-mapped. Для `base_ssh_trusted_cidrs` действуют более
+  строгие пределы прямого break-glass: не шире `/24` (IPv4) и `/64` (IPv6), без
+  повторов после нормализации и без loopback-исключения.
 - Порт вне 1–65535 (включая строку и bool), неизвестные поля, повтор одной пары
   `proto/port`, пересечение публичного и ограниченного списка, TCP SSH-порт в
   любом из этих списков. TCP и UDP с одинаковым номером — разные пары.
 - Пустые/невалидные `source_cidrs`, повтор CIDR после нормализации. Для source ACL
-  действуют те же ограничения сетей, что для SSH; единственное исключение —
-  точные `127.0.0.1/32` и `::1/128` для colocated management. SSH это исключение
-  не получает; более широкие loopback-сети и IPv4-mapped по-прежнему отклоняются.
+  действуют базовые ограничения сетей (`/8` IPv4, `/32` IPv6); единственное
+  исключение — точные `127.0.0.1/32` и `::1/128` для colocated management. SSH
+  это исключение не получает; более широкие loopback-сети и IPv4-mapped
+  по-прежнему отклоняются.
+- `base_ssh_permit_root_login`, отличный от `"no"`; `base_ssh_max_auth_tries`
+  вне `1–6`; `base_ssh_login_grace_time` вне `10–60` (включая `0`, строку и
+  bool).
 - Ограниченный `udp/546` при `base_firewall_allow_dhcpv6_client: true`: прежнее
   разрешение ответов с link-local `udp/547` действует до source ACL и открыло бы
   IPv6 даже при объявлении только IPv4. Это конфликт ввода для любой семьи
   источников, в том числе при пока выключенном управлении firewall. Для
   ограниченного `udp/546` явно выключите DHCPv6 allowance; `tcp/546` — отдельная
   пара и не конфликтует. Само разрешение DHCPv6 роль не удаляет по source-списку.
-- `base_ssh_enabled` без администратора с `sudo` и ключом;
+- `base_ssh_enabled` без администратора с `sudo` и ключом или без непустого
+  `base_ssh_trusted_cidrs`;
   `base_firewall_enabled` без `base_ssh_trusted_cidrs`.
 
 ### Единая authority и временный bootstrap exception
@@ -141,15 +151,24 @@ base_firewall_bootstrap_exception:
 к `0600`. Sudoers проверяется `visudo -cf` до установки.
 
 **SSH.** Файл `/etc/ssh/sshd_config.d/00-vpn-base.conf` задаёт
-`PubkeyAuthentication yes`, `PasswordAuthentication no`,
-`KbdInteractiveAuthentication no`, `PermitEmptyPasswords no`, `PermitRootLogin`.
+`PubkeyAuthentication yes`, `AuthenticationMethods publickey`,
+`PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+`PermitEmptyPasswords no`, `HostbasedAuthentication no`, `PermitRootLogin no`,
+`MaxAuthTries`, `LoginGraceTime`, `X11Forwarding no` и
+`PermitUserEnvironment no`. `AllowTcpForwarding` намеренно не выключается
+(нужен `ssh -L` к loopback-панели), а `AllowUsers`/`AllowGroups` не
+добавляются, чтобы не отрезать ранее существовавшие не-административные учётные
+записи.
 Порядок защиты от потери доступа:
 
 1. до изменений: `sshd_config` подключает `sshd_config.d/*.conf`; `AllowUsers`,
    `DenyUsers`, `AllowGroups` не блокируют администраторов; при
    `PermitRootLogin no` текущая SSH-сессия не под `root`;
+   действующие файлы `hostkey` из `sshd -T` существуют и не пусты (проверка
+   host key обязательна, см. [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md));
 2. кандидат проверяется `sshd -t -f`, затем вся конфигурация `sshd -T` сверяется
-   с политикой (конфликтующие более ранние файлы приводят к отказу без reload);
+   с полным набором параметров политики (конфликтующие более ранние файлы
+   приводят к отказу без reload);
 3. handler повторяет `sshd -t` и только затем выполняет
    `systemctl try-reload-or-restart ssh.service`.
 
@@ -280,11 +299,13 @@ Base валидирует безопасные source-сети для private ma
 
 2. Откройте **новую** SSH-сессию администратором и проверьте `sudo -n true`.
    Держите одну сессию открытой до конца всех шагов.
-3. Включите `base_ssh_enabled: true`, подключаясь администратором (не `root`),
-   повторите `--check --diff` и применение, затем снова новый вход.
+3. Задайте узкий `base_ssh_trusted_cidrs`, сохраните резервную копию текущего
+   drop-in (если есть) и включите `base_ssh_enabled: true`, подключаясь
+   администратором (не `root`); повторите `--check --diff` и применение, затем
+   проверьте **новый** прямой вход (см. [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md)).
 4. Перечислите публичные клиентские порты в `base_firewall_vpn_ports`, private
    management/transit — отдельно в `base_firewall_source_ports`; подтвердите
-   egress источников, задайте `base_ssh_trusted_cidrs`, сохраните предыдущий
+   egress источников, проверьте `base_ssh_trusted_cidrs`, сохраните предыдущий
    собственный файл/таблицу для ручного отката и включите
    `base_firewall_enabled: true`. При отказе из-за listener объявите его в
    правильном списке либо осознанно подтвердите закрытие. После применения —
@@ -300,7 +321,7 @@ Playbook обрабатывает хосты по одному и останав
 | Команда | Что проверяет |
 | --- | --- |
 | `cd ansible && ../.venv/bin/ansible-playbook -i inventories/example/hosts.yml playbooks/base.yml --syntax-check` | Синтаксис на синтетическом inventory. |
-| `.venv/bin/python -m unittest discover -s ansible/roles/base/tests -v` | Unit-тесты фильтров; реальный `ansible-playbook` на `localhost`: отказы для неверных администраторов, ключей, CIDR и переключателей без изменений хоста; отключённое управление и `--check` дают `changed=0`. Нужны Debian/Ubuntu и sudo без пароля. |
+| `.venv/bin/python -m unittest discover -s ansible/roles/base/tests -v` | Unit-тесты фильтров и статический рендер шаблонов `sshd`/`nftables`; реальный `ansible-playbook` на `localhost`: отказы для неверных администраторов, ключей, широких/неверных SSH CIDR, параметров `sshd` и переключателей без изменений хоста; отключённое управление и `--check` дают `changed=0`. Нужны Debian/Ubuntu и sudo без пароля. |
 | `sudo VPN_BASE_DISPOSABLE_GUEST=yes GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted bash ansible/roles/base/tests/runtime_vm.sh` | **Только явно выделенный одноразовый GitHub-hosted Linux guest.** Полный сценарий ниже; guard не является разрешением запускать на обычном хосте. |
 
 Сценарий VM запускается workflow [`base.yml`](../.github/workflows/base.yml) на

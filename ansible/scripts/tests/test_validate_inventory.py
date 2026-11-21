@@ -118,6 +118,7 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertInvalid("must be an IPv6 address")
 
     def test_regular_inventory_rejects_unusable_relay_sources(self) -> None:
+        self.all_vars["base_ssh_enabled"] = True
         original = copy.deepcopy(self.group_vars)
         for key, address in (("relay_egress_ipv4", "127.0.0.1"), ("relay_egress_ipv4", "169.254.1.1"), ("relay_egress_ipv4", "224.0.0.1"), ("relay_egress_ipv4", "0.0.0.0"), ("relay_egress_ipv6", "::1"), ("relay_egress_ipv6", "fe80::1"), ("relay_egress_ipv6", "ff02::1"), ("relay_egress_ipv6", "::"), ("relay_egress_ipv6", "::ffff:192.0.2.20"), ("relay_egress_ipv6", "192.0.2.20")):
             with self.subTest(key=key, address=address):
@@ -161,6 +162,7 @@ class ValidateInventoryTest(unittest.TestCase):
         self.hosts["exit-a"]["public_ipv4"] = "10.20.30.40"
         self.hosts["exit-a"]["ansible_host"] = "10.20.30.40"
         self.all_vars["reality_sni"] = "www.example.org"
+        self.all_vars["base_ssh_enabled"] = True
         self.assertEqual(self.errors("staging"), [])
 
     def test_ansible_host_must_match_public_ipv4(self) -> None:
@@ -263,6 +265,17 @@ class ValidateInventoryTest(unittest.TestCase):
     def test_source_acl_matches_explicit_egress_not_public_address(self) -> None:
         self.group_vars["relay"]["relay_egress_ipv4"] = "198.51.100.99"
         self.assertInvalid("transit source ACL")
+
+    def test_exit_transit_port_cannot_be_public(self) -> None:
+        transit = self.group_vars["exit"]["transit_port"]
+        self.group_vars["exit"]["base_firewall_source_ports"] = [
+            rule for rule in self.group_vars["exit"]["base_firewall_source_ports"]
+            if rule["port"] != transit
+        ]
+        self.group_vars["exit"]["base_firewall_vpn_ports"].append(
+            {"proto": "tcp", "port": transit}
+        )
+        self.assertInvalid("transit_port")
 
     def test_normalized_transit_ipv6_identity(self) -> None:
         self.group_vars["relay"]["relay_egress_ipv6"] = "2001:0db8:0020:0000:0000:0000:0000:0020"
@@ -467,6 +480,7 @@ class ValidateInventoryTest(unittest.TestCase):
 
     def test_regular_inventory_may_use_a_real_subscription_host(self) -> None:
         self.all_vars["subscription_public_host"] = "subscribe.vpn.invalid"
+        self.all_vars["base_ssh_enabled"] = True
         self.assertEqual(self.errors("staging"), [])
 
     def test_example_node_api_port_must_not_reuse_upstream_default(self) -> None:
@@ -474,6 +488,111 @@ class ValidateInventoryTest(unittest.TestCase):
         self.assertInvalid("must not reuse the upstream example 2222")
         self.all_vars["node_api_port"] = 2223
         self.assertEqual(self.errors(), [])
+
+    def test_valid_direct_ssh_contract_in_regular_inventory(self) -> None:
+        self.all_vars["base_ssh_enabled"] = True
+        self.all_vars["ansible_port"] = 22
+        self.all_vars["base_ssh_trusted_cidrs"] = ["192.0.2.10/32", "2001:db8:10::10/128"]
+        self.assertEqual(self.errors("staging"), [])
+
+    def test_regular_inventory_requires_base_ssh_enabled_true(self) -> None:
+        self.assertInvalid("base_ssh_enabled is required", "staging")
+        self.all_vars["base_ssh_enabled"] = False
+        self.assertInvalid("base_ssh_enabled must be true", "staging")
+        self.assertInvalid("base_ssh_enabled must be true", "example")
+        self.all_vars["base_ssh_enabled"] = "true"
+        self.assertInvalid("must be true or false", "staging")
+
+    def test_ssh_break_glass_requires_root_login_no(self) -> None:
+        del self.all_vars["base_ssh_permit_root_login"]
+        self.assertInvalid("base_ssh_permit_root_login is required")
+        for bad in ("prohibit-password", "yes", False, None):
+            with self.subTest(value=bad):
+                self.all_vars["base_ssh_permit_root_login"] = bad
+                self.assertInvalid("base_ssh_permit_root_login must be 'no'")
+
+    def test_ssh_break_glass_trusted_cidrs_contract_without_echo(self) -> None:
+        del self.all_vars["base_ssh_trusted_cidrs"]
+        self.assertInvalid("base_ssh_trusted_cidrs is required")
+        self.all_vars["base_ssh_trusted_cidrs"] = []
+        self.assertInvalid("must not be empty")
+        self.all_vars["base_ssh_trusted_cidrs"] = "192.0.2.0/24"
+        self.assertInvalid("must be a list of CIDRs")
+        cases = (
+            (["192.0.2.0/23"], "слишком широкая SSH-сеть"),
+            (["2001:db8::/48"], "слишком широкая SSH-сеть"),
+            (["0.0.0.0/0"], "слишком широкая сеть"),
+            (["127.0.0.1/32"], "loopback"),
+            (["::1/128"], "loopback"),
+            (["192.0.2.0/24", "192.0.2.0/24"], "duplicate CIDR"),
+            (["2001:db8:10::/64", "2001:0db8:0010::/64"], "duplicate CIDR"),
+        )
+        for cidrs, fragment in cases:
+            with self.subTest(cidrs=cidrs):
+                self.all_vars["base_ssh_trusted_cidrs"] = cidrs
+                errors = self.errors()
+                self.assertTrue(any(fragment in err for err in errors), errors)
+                for cidr in cidrs:
+                    self.assertFalse(any(cidr in err for err in errors), errors)
+
+    def test_ssh_port_and_ansible_port_contract(self) -> None:
+        self.all_vars["ansible_port"] = 22
+        self.assertEqual(self.errors(), [])
+        self.all_vars["ansible_port"] = 2222
+        self.assertInvalid("ansible_port must equal base_ssh_port")
+        self.all_vars["ansible_port"] = "22"
+        self.assertInvalid("must be an integer port 1-65535")
+        del self.all_vars["ansible_port"]
+        self.all_vars["base_ssh_port"] = 2222
+        self.assertInvalid("ansible_port is required and must equal base_ssh_port")
+        self.all_vars["ansible_port"] = 2222
+        self.assertEqual(self.errors(), [])
+        del self.all_vars["ansible_port"]
+        self.all_vars["base_ssh_port"] = 22
+        for bad_port in ("22", True, 0, 65536):
+            with self.subTest(port=bad_port):
+                self.all_vars["base_ssh_port"] = bad_port
+                self.assertInvalid("must be an integer port 1-65535")
+        del self.all_vars["base_ssh_port"]
+        self.assertInvalid("base_ssh_port is required")
+
+    def test_ssh_port_cannot_be_exposed_via_public_or_source_firewall_rules(self) -> None:
+        self.group_vars["exit"]["base_firewall_vpn_ports"].append({"proto": "tcp", "port": 22})
+        self.assertInvalid("base_ssh_port must not be declared as a public")
+        self.group_vars["exit"]["base_firewall_vpn_ports"].pop()
+        self.group_vars["exit"]["base_firewall_source_ports"].append(
+            {"proto": "tcp", "port": 22, "source_cidrs": ["192.0.2.0/24"]}
+        )
+        self.assertInvalid("governed only by base_ssh_trusted_cidrs")
+        self.group_vars["exit"]["base_firewall_source_ports"].pop()
+        self.host_vars = {"cp-a": {
+            "base_firewall_vpn_ports": [{"proto": "tcp", "port": 22}],
+        }}
+        self.assertInvalid("base_ssh_port must not be declared as a public")
+        self.host_vars = {"cp-a": {
+            "base_firewall_source_ports": [
+                {"proto": "tcp", "port": 22, "source_cidrs": ["192.0.2.0/24"]},
+            ],
+        }}
+        self.assertInvalid("governed only by base_ssh_trusted_cidrs")
+        for bad_rules, fragment in (
+            ([{"proto": "tcp", "port": "22"}], "must be an integer port 1-65535"),
+            (["tcp/22"], "expected a mapping with proto and port"),
+            ([{"proto": "TCP", "port": 22}], "must be 'tcp' or 'udp'"),
+            ("tcp/22", "must be a list"),
+        ):
+            with self.subTest(bad_rules=bad_rules):
+                self.host_vars = {"cp-a": {"base_firewall_vpn_ports": bad_rules}}
+                self.assertInvalid(fragment)
+                self.host_vars = {"cp-a": {"base_firewall_source_ports": bad_rules}}
+                self.assertInvalid(fragment)
+
+    def test_proxy_variables_do_not_satisfy_direct_ssh_contract(self) -> None:
+        self.all_vars["relay_proxy_command"] = "ssh -W %h:%p 198.51.100.20"
+        self.all_vars["ansible_ssh_common_args"] = "-o ProxyJump=ops@198.51.100.20"
+        self.assertInvalid("base_ssh_enabled is required", "staging")
+        del self.all_vars["base_ssh_trusted_cidrs"]
+        self.assertInvalid("base_ssh_trusted_cidrs is required")
 
     def test_main_reports_errors_and_exits_1(self) -> None:
         self.all_vars["xhttp_path"] = "xhttp"

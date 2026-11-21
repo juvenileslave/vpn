@@ -13,8 +13,12 @@ base_admin_sudo_nopasswd: true
 base_ssh_enabled: false
 # Must equal the port sshd already listens on; the role does not change it.
 base_ssh_port: 22
+# Direct break-glass contract permits only non-root login ("no").
 base_ssh_permit_root_login: "no"
-# Networks allowed to reach SSH when the firewall is enabled.
+# Bounded authentication attempts (1-6) and login grace period in seconds (10-60).
+base_ssh_max_auth_tries: 4
+base_ssh_login_grace_time: 30
+# Explicit narrow admin networks allowed to reach direct SSH (/24 IPv4, /64 IPv6 max).
 base_ssh_trusted_cidrs: []
 
 # Owned nftables table inet vpn_base; not created until explicitly enabled.

@@ -25,6 +25,10 @@
   не создаёт учётную запись Remnawave, подписки или публичный HTTPS.
 - [Source ACL в роли base](docs/BASE_ROLE.md) — публичные и source-restricted
   порты, SSH/IPv6 и транзакционная собственная таблица nftables.
+- [SSH break-glass](docs/SSH_BREAK_GLASS.md) — прямой аварийный SSH-доступ
+  администратора к каждому узлу независимо от entrance, overlay и control
+  plane, узкий source ACL, ротация ключей, восстановление и откат; VPN не
+  развёрнут.
 - [Приватный TLS cover-site](docs/COVER_SITE.md) — nginx на host-loopback,
   операторский контент и Certbot; не публичный альтернативный backend.
 - [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
@@ -37,6 +41,9 @@
   только на loopback или по source ACL; не алертинг и не production-стек.
 - [Exit/relay bundles](docs/PROFILES.md) — локальный рендер согласованных
   серверных и клиентских конфигураций; не публикация через панель.
+- [Маршрутизация через exit-узел](docs/EXIT_NODE.md) — топология relay → exit,
+  ожидаемый внешний адрес, source ACL, публикация и откат (issue #72; runtime
+  acceptance не выполнялся).
 - [vpnctl](vpnctl/README.md) — строгий контракт конфигурации и CLI на Go,
   read-only Telegram-бот ([TELEGRAM_BOT.md](docs/TELEGRAM_BOT.md)),
   [probe ladder / diagnose](docs/PROBES.md) и [panel plan/show](docs/PANEL_WRITE.md).
