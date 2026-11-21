@@ -35,6 +35,11 @@ const usage = `usage:
   vpnctl metrics run --config PATH --rules PATH
   vpnctl alerts list --config PATH [--format text|json]
   vpnctl alerts mute --config PATH --rule NAME [--until RFC3339]
+  vpnctl upstream list --sources PATH --store PATH [--format text|json]
+  vpnctl upstream versions --store PATH --slot N [--limit N] [--format text|json]
+  vpnctl upstream refresh|rollback ...   (refused before I/O)
+  vpnctl slot show --store PATH [--slot N] [--format text|json]
+  vpnctl slot set ...                    (refused before I/O)
 `
 
 // Exit codes returned by Run.
@@ -72,6 +77,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runPanel(args[1:], stdout, stderr)
 	case "metrics", "alerts":
 		return runMetricsCommand(args[0], args[1:], stdout, stderr)
+	case "upstream":
+		return runUpstream(args[1:], stdout, stderr)
+	case "slot":
+		return runSlot(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitOK

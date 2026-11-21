@@ -7,12 +7,15 @@
 ([PROBES.md](../docs/PROBES.md)), **stateful alert-воркер** `vpnctl metrics
 check|run` и `vpnctl alerts list|mute` ([METRICS_ALERTS.md](../docs/METRICS_ALERTS.md)),
 **read-only `panel plan/show`** для существующего renderer bundle
-([PANEL_WRITE.md](../docs/PANEL_WRITE.md)), а также офлайн-срез #74:
+([PANEL_WRITE.md](../docs/PANEL_WRITE.md)), **read-only срез upstream-слотов**
+`upstream list\|versions` и `slot show` ([UPSTREAM_PIPELINE.md](../docs/UPSTREAM_PIPELINE.md)),
+а также офлайн-срез #74:
 трёхзначный `entrance gate` и план ротации входа
 ([ENTRANCE_GATE.md](../docs/ENTRANCE_GATE.md)).
 Запись в панель и rollback заблокированы: закреплённый API не поддерживает
-атомарные write-preconditions. mTLS probe-агента и команд изменения
-инфраструктуры нет.
+атомарные write-preconditions. Upstream refresh/rollback тоже не подключены:
+реального Xray-пробера и публикатора слотов нет, CLI отказывает до I/O. mTLS
+probe-агента и команд изменения инфраструктуры нет.
 
 ## Чего утилита не делает
 
@@ -29,6 +32,9 @@ check|run` и `vpnctl alerts list|mute` ([METRICS_ALERTS.md](../docs/METRICS_ALE
 - `metrics run` только читает VictoriaMetrics и отправляет уведомления через
   принятый sink; `metrics check` не пишет состояние и ничего не отправляет.
   Ремедиации, ротации IP и paging-гарантий нет.
+- Не обновляет upstream-слоты и не публикует outbound: `upstream refresh`,
+  `upstream rollback` и `slot set` отказывают до чтения файлов/БД/сети;
+  доступны только чтение объявлений, версий и состояния слотов.
 - Не меняет production, DNS, firewall или сертификаты.
 
 `config validate` проверяет только сам файл: успешный результат не означает, что
@@ -54,9 +60,13 @@ check|run` и `vpnctl alerts list|mute` ([METRICS_ALERTS.md](../docs/METRICS_ALE
 | `panel`: stale UUID, ownership-конфликт, потенциально lossy update | Безопасный отказ; панель не меняется. | 3 |
 | `panel`: неверные inputs, token/TLS/HTTP/response ошибки | Значения и сырые diagnostics не выводятся. | 1 |
 | `vpnctl metrics check --config PATH --rules PATH [--format text|json]` | Один цикл вычислений: все правила проверяются до запроса, затем типизированные `ok`/`firing`/`unknown`; состояние не пишется. | 0 — все `ok`; 4 — есть `firing`; 5 — нет `firing`, есть `unknown` |
-| `vpnctl metrics run --config PATH --rules PATH` | Цикл по `metrics.interval` с jitter; состояние и outbox в SQLite версии 4, доставка через `notify.Sink`; `SIGINT`/`SIGTERM` — штатная остановка. | 0 — штатная остановка; 1 — ошибка |
+| `vpnctl metrics run --config PATH --rules PATH` | Цикл по `metrics.interval` с jitter; состояние и outbox в SQLite версии 5, доставка через `notify.Sink`; `SIGINT`/`SIGTERM` — штатная остановка. | 0 — штатная остановка; 1 — ошибка |
 | `vpnctl alerts list --config PATH [--format text|json]` | Состояния, активные mute, `pending`/`expired` outbox и до 20 открытых записей. | 0; 1 — ошибка конфигурации/базы |
 | `vpnctl alerts mute --config PATH --rule NAME [--until RFC3339]` | Окно mute (по умолчанию 24h); состояние продолжает записываться, уведомления подавлены. | 0; 1 — ошибка; 2 — неверные аргументы |
+| `vpnctl upstream list --sources PATH --store PATH [--format text|json]` | Объявленные источники и состояние слотов; без URL, путей и payload. | 0; 1 — ошибка; 2 — неверные аргументы |
+| `vpnctl upstream versions --store PATH --slot N [--limit N] [--format text|json]` | Версии слота новее первыми; без payload ref/SHA. | 0; 1 — ошибка; 2 — неверные аргументы |
+| `vpnctl slot show --store PATH [--slot N] [--format text|json]` | Режим, активная версия, неудачи, next run и последний код ошибки. | 0; 1 — ошибка/слот не найден; 2 — неверные аргументы |
+| `vpnctl upstream refresh\|rollback ...`, `vpnctl slot set ...` | Отказ до чтения файлов, БД, токена и сети: публикация не авторизована; локальный откат БД не является откатом панели. | 3 |
 | `metrics`/`alerts`: неверные флаги, отсутствие обязательных путей | Описание использования в stderr. | 2 |
 | Неизвестная команда, лишние аргументы, нет `--config` | Описание использования в stderr. | 2 |
 
