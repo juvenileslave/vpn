@@ -16,6 +16,8 @@ var (
 	ErrInvalidArgument   = errors.New("invalid argument")
 	ErrMalformedResponse = errors.New("malformed response")
 	ErrResponseTooLarge  = errors.New("response body too large")
+	ErrRequestTooLarge   = errors.New("request body too large")
+	ErrAmbiguousWrite    = errors.New("write outcome unknown")
 
 	ErrRedirect         = errors.New("redirect refused")
 	ErrBadRequest       = errors.New("bad request")
@@ -35,6 +37,30 @@ func (e safeCause) Error() string    { return "transport or response read failur
 func (e safeCause) String() string   { return e.Error() }
 func (e safeCause) GoString() string { return e.Error() }
 func (e safeCause) Unwrap() error    { return e.cause }
+
+// WriteOutcomeUnknownError indicates that a mutating request may have reached
+// the panel and its outcome cannot be determined without inspecting panel
+// state. It unwraps to ErrAmbiguousWrite and the underlying secret-safe cause.
+type WriteOutcomeUnknownError struct {
+	cause error
+}
+
+func (e *WriteOutcomeUnknownError) Error() string {
+	if e == nil || e.cause == nil {
+		return ErrAmbiguousWrite.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrAmbiguousWrite, e.cause)
+}
+
+func (e *WriteOutcomeUnknownError) String() string   { return e.Error() }
+func (e *WriteOutcomeUnknownError) GoString() string { return e.Error() }
+
+func (e *WriteOutcomeUnknownError) Unwrap() []error {
+	if e == nil || e.cause == nil {
+		return []error{ErrAmbiguousWrite}
+	}
+	return []error{ErrAmbiguousWrite, e.cause}
+}
 
 // APIError is a non-2xx response. It carries only the status, the panel error
 // code (such as "A025") and Retry-After; the response message, body and the

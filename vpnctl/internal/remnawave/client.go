@@ -1,7 +1,9 @@
-// Package remnawave is a read-only client for the Remnawave panel REST API.
+// Package remnawave is a client for the Remnawave panel REST API.
 //
-// It reads users, nodes, config profiles, computed profiles, snippets and hosts
-// from the pinned Remnawave API 3.4.10. The client never writes, retries or logs.
+// It supports read-only queries for users, nodes, config profiles, computed
+// profiles, snippets and hosts, as well as explicit per-endpoint mutating
+// operations for config profiles, snippets and hosts on the pinned Remnawave
+// API 3.4.10. Reads stay read-only and writes never retry or log.
 // Legacy user/node models omit secrets. Planning models retain raw fields in
 // memory but redact themselves when formatted or JSON encoded.
 package remnawave
@@ -22,6 +24,9 @@ const (
 	// of 1000 users stays well below this limit.
 	DefaultMaxResponseBytes int64 = 16 << 20
 
+	// DefaultMaxRequestBytes bounds an outgoing JSON request body.
+	DefaultMaxRequestBytes int64 = 16 << 20
+
 	// MaxPageSize is the largest page size accepted by GET /api/users.
 	MaxPageSize = 1000
 
@@ -30,12 +35,13 @@ const (
 	maxErrorBodyBytes int64 = 64 << 10
 )
 
-// Client is a read-only Remnawave API client. It is safe for concurrent use.
+// Client is a Remnawave API client. It is safe for concurrent use.
 type Client struct {
-	base     *url.URL
-	token    string
-	http     *http.Client
-	maxBytes int64
+	base        *url.URL
+	token       string
+	http        *http.Client
+	maxBytes    int64
+	maxReqBytes int64
 }
 
 // Option customises a Client.
@@ -49,6 +55,18 @@ func WithMaxResponseBytes(n int64) Option {
 			return fmt.Errorf("%w: max response bytes must be positive", ErrInvalidConfig)
 		}
 		c.maxBytes = n
+		return nil
+	}
+}
+
+// WithMaxRequestBytes sets the maximum allowed size of an outgoing JSON
+// request body.
+func WithMaxRequestBytes(n int64) Option {
+	return func(c *Client) error {
+		if n <= 0 {
+			return fmt.Errorf("%w: max request bytes must be positive", ErrInvalidConfig)
+		}
+		c.maxReqBytes = n
 		return nil
 	}
 }
@@ -101,7 +119,7 @@ func New(baseURL *url.URL, token string, httpClient *http.Client, opts ...Option
 
 	base := *baseURL
 	base.User = nil
-	c := &Client{base: &base, token: token, http: &hc, maxBytes: DefaultMaxResponseBytes}
+	c := &Client{base: &base, token: token, http: &hc, maxBytes: DefaultMaxResponseBytes, maxReqBytes: DefaultMaxRequestBytes}
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
 			return nil, err
