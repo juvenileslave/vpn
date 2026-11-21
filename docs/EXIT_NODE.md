@@ -41,29 +41,40 @@ inbounds `slot-N-v4` / `slot-N-v6`). Relay служит только входн�
 - Любой слот `N > 0` без явно настроенного внешнего proxy в `profiles_upstreams`
   маршрутизируется в `block` (`blackhole`) и не может попасть в `egress-0` или
   иной `freedom` outbound. Завершающее правило `exit.json` — `block`.
-- `egress-0` блокирует приватные адреса (`geoip:private`) и `bittorrent`, а
-  также применяет `finalRules` после DNS.
+- Правила маршрутизации `exit.json` блокируют приватные адреса (`geoip:private`)
+  и `bittorrent`, а `egress-0` дополнительно применяет `finalRules` после DNS.
 - Обе адресные семьи сохраняются и управляются `egress_family`:
   `v4_prefer` (`UseIPv4v6`), `v6_prefer` (`UseIPv6v4`), `v4_only` (`ForceIPv4`
   с блокировкой `::/0` в `finalRules`).
 
 ## Ожидаемый внешний адрес
 
-- Для пользовательского трафика слота 0 внешние сайты видят объявленный
-  `public_ipv4` или `public_ipv6` exit-узла — никогда `public_ipv*` или
-  `relay_egress_ipv*` relay.
+- Ожидается, что для пользовательского трафика слота 0 внешние сайты видят
+  фактический исходящий адрес exit-узла (соответствующий `public_ipv4` или
+  `public_ipv6`, если exit выходит в сеть напрямую без отдельного NAT), а не
+  адреса relay (`public_ipv*` или `relay_egress_ipv*`). В отличие от relay,
+  отдельных полей `exit_egress_ipv*` и `sendThrough` у `egress-0` в рендерере
+  нет; фактический внешний адрес подтверждается только runtime-проверкой.
 - Фактические исходящие адреса второго хопа (`relay_egress_ipv4`,
   `relay_egress_ipv6`) объявляются в inventory явно и не выводятся из
   `public_ipv*`; публичные адреса exit и relay обязаны различаться
   ([ANSIBLE.md](ANSIBLE.md)).
 - Отдельный клиентский профиль direct (`clients/direct-N.json`, используется
-  только при отдельном разрешении) также выходит через `egress-0` exit-узла.
-  Согласно инварианту № 7 ([INVARIANTS.md](INVARIANTS.md)), совпадение
-  внешнего IP само по себе не различает direct и relay-путь: доказательством
-  служат наблюдения/счётчики inbound и outbound.
-- Для клиентского имени exit AAAA-запись не публикуется; единственным
-  потребителем транзитного адреса exit остаются outbounds `slot-N-v6`/`slot-N-v4`
-  relay.
+  только при отдельном разрешении и не является аварийным fallback relay) также
+  выходит через `egress-0` exit-узла. Согласно инварианту № 7
+  ([INVARIANTS.md](INVARIANTS.md)), совпадение внешнего IP само по себе не
+  различает direct и relay-путь: доказательством служат наблюдения/счётчики
+  inbound и outbound.
+- По политике D-003 / AP-01 ([DECISIONS.md](DECISIONS.md),
+  [ACTIVE_PROBING.md](ACTIVE_PROBING.md)) для клиентского имени exit при
+  клиентском `v4` AAAA-запись в публичном DNS не публикуется (DNS в этом срезе
+  не проверялся и не менялся). В отрендеренных клиентских и relay-профилях на
+  `public_ipv6` exit нацелены только outbounds `slot-N-v6` relay
+  (`clients/direct-N.json` обращается только к `public_ipv4`), а порт
+  `transit_port` на обеих семьях ограничен source ACL для relay; при этом
+  `public_ipv6` exit может использоваться и для исходящего IPv6-трафика
+  `egress-0` (при `v4_prefer`/`v6_prefer`), а `exit.json` слушает `direct-v6`
+  на `::`.
 
 ## Закрытый транзитный и management-путь
 
@@ -74,6 +85,18 @@ inbounds `slot-N-v4` / `slot-N-v6`). Relay служит только входн�
 - **Node API (`node_api_port`):** порт объявляется явно (без неявного fallback
   `2222`), запрещён в `base_firewall_vpn_ports` и допускается в
   `base_firewall_source_ports` строго от `node_port_allow`.
+- **Граница с issue #72 для `exit_direct_port`:** хотя цель #72 требует, чтобы
+  exit не был публично доступен для клиентского трафика, принятые контракты
+  ([DECISIONS.md](DECISIONS.md) D-001, [PROFILES.md](PROFILES.md),
+  [ACTIVE_PROBING.md](ACTIVE_PROBING.md) AC-06/AC-07) и рендерер по-прежнему
+  требуют публичного объявления `exit_direct_port` в `base_firewall_vpn_ports`,
+  создают inbounds `direct-v4`/`direct-v6` и требуют непустой
+  `exit_direct_client_ids`. Этот порт остаётся отдельным резервным входом (не
+  fallback relay); его закрытие требует отдельного изменения D-001 и контракта
+  роли `profiles`. Публичный TCP/80 для ACME HTTP-01 относится к отдельной
+  эксплуатационной предпосылке роли `cover_site` и не требуется в
+  `profile_bundle.validate_host()` ([ANSIBLE.md](ANSIBLE.md),
+  [ACTIVE_PROBING.md](ACTIVE_PROBING.md)).
 - RemnaNode работает с `network_mode: host` без публикации портов Docker и
   слушает wildcard (`app.listen(NODE_PORT)`), поэтому единственным сетевым
   ограничителем является действующая таблица `base` (`inet vpn_base/input`,
@@ -137,8 +160,11 @@ inbounds `slot-N-v4` / `slot-N-v6`). Relay служит только входн�
   двухузловой стенд: прохождение клиентского трафика до exit sink с
   подтверждением пути и отсутствием утечек через relay/direct, отказ IPv6 с
   переходом на IPv4 и восстановлением, fail-closed при недоступности обеих
-  семей и для пустых слотов, `xray -test` / read-back effective-конфигурации и
-  закрытость transit/API по source ACL ([PROFILES.md](PROFILES.md)).
+  семей и для пустых слотов, `xray -test`, фиксацию SHA256 исходной и
+  effective-конфигурации (с описанием тестовых дельт) в receipt и
+  закрытость transit/API по source ACL ([PROFILES.md](PROFILES.md)); отдельный
+  read-back effective-конфигурации из API работающего узла в
+  [PROFILES.md](PROFILES.md) не описан.
 - В рамках текущего изменения одноразовый runtime acceptance **не запускался**,
   реальные контейнеры, сеть, firewall, DNS, панель и production-хосты не
   затрагивались.
@@ -153,5 +179,6 @@ inbounds `slot-N-v4` / `slot-N-v6`). Relay служит только входн�
   выполнить штатный откат узла (`remnawave_node_state: rollback` с текущими
   credentials и повторным CP management gate, [REMNAWAVE_NODE.md](REMNAWAVE_NODE.md))
   и восстановить прежние входы cover/bundle с обязательным повторным наложением
-  текущего списка `profiles_revoked_client_ids` до переключения активного
-  указателя ([PROFILES.md](PROFILES.md)).
+  текущего списка `profiles_revoked_client_ids`, перегенерацией новой
+  согласованной identity и повторным прохождением actual gates до переключения
+  активного указателя ([PROFILES.md](PROFILES.md)).
