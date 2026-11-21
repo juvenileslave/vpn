@@ -44,9 +44,13 @@ profiles, метрики, бота, DNS или публичный HTTPS.
   примите host key отдельной проверенной командой (`ssh-keyscan` — только
   синтетический стенд);
 - gate использует `ssh -F /dev/null`: `ansible_host` должен разрешаться без
-  `Host`-алиасов из `~/.ssh/config`, а `ProxyJump`/`ProxyCommand` и
+  `Host`-алиасов из `~/.ssh/config`, а опциональные `ProxyJump`/`ProxyCommand` и
   `UserKnownHostsFile` задаются в `ansible_ssh_common_args`. Иначе gate честно
-  откажет, а не будет угадывать адрес;
+  откажет, а не будет угадывать адрес. `ProxyJump`/`ProxyCommand` — только
+  необязательное удобство обычного пути через entrance, но не требование
+  break-glass: если в `ansible_ssh_common_args` задан прокси, gate проверяет
+  именно проксируемый путь, поэтому прямой аварийный доступ к каждому узлу
+  проверяется отдельно без прокси (см. [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md));
 - UFW не включён (`/etc/ufw/ufw.conf`: `ENABLED=no`), firewalld не активен и
   нет незаявленных публичных listeners, которые `base` отказался бы закрывать.
   Эти отказы — явный контракт, а не повод отключать чужую службу или
@@ -81,8 +85,8 @@ connection-переменные inventory (`ansible_ssh_private_key_file` или
 | `base_ssh_enabled` | Обязательно `true`: иначе bootstrap не применял бы hardening. |
 | `base_firewall_enabled` | Обязательно `true`. |
 | `base_ssh_permit_root_login` | Обязательно `no`: повторный запуск идёт администратором, root обратно не включается. |
-| `base_ssh_trusted_cidrs` | Непустой список безопасных CIDR по контракту `base`; текущий SSH-клиент проверяется ролью до firewall. |
-| `base_ssh_port` | Должен совпадать с `ansible_port` (по умолчанию 22); роль не меняет порт sshd. |
+| `base_ssh_trusted_cidrs` | Непустой список узких CIDR администратора по контракту `base` (не шире `/24` IPv4 и `/64` IPv6, без loopback); текущий SSH-клиент проверяется ролью до firewall. |
+| `base_ssh_port` | Должен совпадать с `ansible_port` (по умолчанию 22); роль не меняет порт sshd и в preflight проверяет наличие непустых файлов host key. |
 | `cp_placement` | `dedicated` (один отдельный cp-хост) или `exit` (панель на exit, cp-группа пуста); ровно один `exit` и один `relay`, хост не в двух группах. |
 | `image_tags.remnawave_panel`, `image_tags.postgres`, `image_tags.valkey` | Точные пины по контракту роли панели; `latest` и отсутствие пина отклоняются до изменений. |
 | `panel_bind` / `panel_port` | Только loopback-адрес; порт не должен совпадать с 5432, 6379 или SSH-портом. |
@@ -254,8 +258,9 @@ root-password bootstrap; отказ нового admin key/sudo оставляе
   **без `-v`**, чтобы сохранить тома. Секреты и пины возвращаются revert-PR и
   повторным запуском.
 - SSH/firewall: контракт и ручной откат описаны в
-  [BASE_ROLE.md](BASE_ROLE.md). Не удаляйте sudoers/ключи администратора, пока
-  нет другого проверенного способа входа; root-доступ восстанавливается
-  отдельно и осознанно.
+  [BASE_ROLE.md](BASE_ROLE.md) и [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md). Не
+  удаляйте sudoers/ключи администратора, пока нет другого проверенного способа
+  входа; root-доступ восстанавливается отдельно и осознанно только при
+  аварийном восстановлении.
 - Для реального пилота нужен отдельно одобренный план восстановления; эта
   задача не развёртывает и не откатывает production.

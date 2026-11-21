@@ -41,7 +41,7 @@ def admin_errors(users) -> list[str]:
 
 
 def cidr_error(value):
-    return _vpn_base.cidr_error(value)
+    return _vpn_base.ssh_cidr_error(value)
 
 
 def key_matches(derived_line, declared_keys) -> bool:

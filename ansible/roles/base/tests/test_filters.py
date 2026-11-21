@@ -9,7 +9,10 @@ from pathlib import Path
 import struct
 import unittest
 
+import jinja2
+
 PLUGIN = Path(__file__).resolve().parents[1] / "filter_plugins" / "vpn_base.py"
+TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 _spec = importlib.util.spec_from_file_location("vpn_base", PLUGIN)
 vpn_base = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vpn_base)
@@ -41,6 +44,8 @@ def valid_config(**overrides) -> dict:
         "base_ssh_enabled": False,
         "base_ssh_port": 22,
         "base_ssh_permit_root_login": "no",
+        "base_ssh_max_auth_tries": 4,
+        "base_ssh_login_grace_time": 30,
         "base_ssh_trusted_cidrs": [],
         "base_firewall_enabled": False,
         "base_firewall_vpn_ports": [],
@@ -101,6 +106,21 @@ class NetworkTest(unittest.TestCase):
                     "example", 24):
             self.assertIsNotNone(vpn_base.cidr_error(bad), bad)
 
+    def test_ssh_cidrs_refuse_broad_ranges_without_narrowing_source_acls(self):
+        for good in ("192.0.2.10/32", "192.0.2.0/24", "2001:db8:10::10/128", "2001:db8:10::/64"):
+            self.assertIsNone(vpn_base.ssh_cidr_error(good), good)
+        for broad in ("192.0.2.0/23", "10.0.0.0/8", "2001:db8::/63", "2001:db8::/48", "2001:db8::/32"):
+            error = vpn_base.ssh_cidr_error(broad)
+            self.assertIsNotNone(error, broad)
+            self.assertNotIn(broad, error)
+            # Generic source-port ACLs keep their existing prefix limits.
+            self.assertIsNone(vpn_base.source_cidr_error(broad), broad)
+        for forbidden in ("0.0.0.0/0", "::/0", "127.0.0.1/32", "::1/128", "192.0.2.1/24"):
+            self.assertIsNotNone(vpn_base.ssh_cidr_error(forbidden), forbidden)
+        for loopback in ("127.0.0.1/32", "::1/128"):
+            self.assertIsNotNone(vpn_base.ssh_cidr_error(loopback), loopback)
+            self.assertIsNone(vpn_base.source_cidr_error(loopback), loopback)
+
     def test_split_and_source(self):
         cidrs = ["192.0.2.0/24", "2001:db8::/48", "192.0.2.0/24"]
         self.assertEqual(vpn_base.split_cidrs(cidrs),
@@ -140,9 +160,17 @@ class NetworkTest(unittest.TestCase):
                                                     source_ports=restricted), [])
 
     def test_sshd_effective(self):
-        parsed = vpn_base.sshd_effective("port 22\nport 2222\nPasswordAuthentication no\n")
+        parsed = vpn_base.sshd_effective(
+            "port 22\nport 2222\nPasswordAuthentication no\n"
+            "authenticationmethods publickey\n"
+            "hostkey /etc/ssh/ssh_host_ed25519_key\n"
+            "hostkey /etc/ssh/ssh_host_rsa_key\n"
+        )
         self.assertEqual(parsed["port"], ["22", "2222"])
         self.assertEqual(parsed["passwordauthentication"], ["no"])
+        self.assertEqual(parsed["authenticationmethods"], ["publickey"])
+        self.assertEqual(parsed["hostkey"],
+                         ["/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_rsa_key"])
 
 
 class InputTest(unittest.TestCase):
@@ -151,7 +179,7 @@ class InputTest(unittest.TestCase):
             base_ssh_enabled=True,
             base_firewall_enabled=True,
             base_admin_users=[{"name": "opsadmin", "authorized_keys": [ed25519_key()]}],
-            base_ssh_trusted_cidrs=["192.0.2.0/24", "2001:db8::/48"],
+            base_ssh_trusted_cidrs=["192.0.2.0/24", "2001:db8:10::/64"],
             base_firewall_vpn_ports=[{"proto": "tcp", "port": 443}, {"proto": "udp", "port": 443}],
             base_firewall_acknowledged_closed_ports=["tcp/8080"],
         )
@@ -232,16 +260,29 @@ class InputTest(unittest.TestCase):
             "unknown field": valid_config(base_admin_users=[dict(admin, groups=["docker"])]),
             "ssh no admin": valid_config(base_ssh_enabled=True),
             "ssh admin without sudo": valid_config(
-                base_ssh_enabled=True, base_admin_users=[dict(admin, sudo=False)]),
+                base_ssh_enabled=True,
+                base_admin_users=[dict(admin, sudo=False)],
+                base_ssh_trusted_cidrs=["192.0.2.0/24"]),
+            "ssh no trusted cidrs": valid_config(
+                base_ssh_enabled=True, base_admin_users=[admin]),
             "firewall no cidrs": valid_config(base_firewall_enabled=True),
             "host bits": valid_config(base_ssh_trusted_cidrs=["192.0.2.1/24"]),
             "world": valid_config(base_ssh_trusted_cidrs=["0.0.0.0/0"]),
+            "broad ssh v4": valid_config(base_ssh_trusted_cidrs=["192.0.2.0/23"]),
+            "broad ssh v6": valid_config(base_ssh_trusted_cidrs=["2001:db8::/48"]),
+            "duplicate ssh cidr": valid_config(base_ssh_trusted_cidrs=["192.0.2.0/24", "192.0.2.0/24"]),
             "ssh as vpn port": valid_config(base_firewall_vpn_ports=[{"proto": "tcp", "port": 22}]),
             "bad port": valid_config(base_firewall_vpn_ports=[{"proto": "tcp", "port": 70000}]),
             "bool port": valid_config(base_firewall_vpn_ports=[{"proto": "udp", "port": True}]),
             "bad proto": valid_config(base_firewall_vpn_ports=[{"proto": "sctp", "port": 1}]),
             "bad ack": valid_config(base_firewall_acknowledged_closed_ports=["8080"]),
             "root login yes": valid_config(base_ssh_permit_root_login="yes"),
+            "root login prohibit-password": valid_config(base_ssh_permit_root_login="prohibit-password"),
+            "max auth tries zero": valid_config(base_ssh_max_auth_tries=0),
+            "max auth tries high": valid_config(base_ssh_max_auth_tries=7),
+            "max auth tries bool": valid_config(base_ssh_max_auth_tries=True),
+            "login grace zero": valid_config(base_ssh_login_grace_time=0),
+            "login grace high": valid_config(base_ssh_login_grace_time=61),
             "pool injection": valid_config(base_chrony_pools=["pool.example.com\nallow all"]),
             "origin injection": valid_config(base_unattended_origins_patterns=['a"; Evil "b']),
             "no origins": valid_config(base_unattended_origins_patterns=[]),
@@ -255,6 +296,59 @@ class InputTest(unittest.TestCase):
                 errors = vpn_base.input_errors(config)
                 self.assertTrue(errors)
                 self.assertFalse(any(key.split()[1] in error for error in errors))
+                for cidr in ("192.0.2.0/23", "2001:db8::/48"):
+                    self.assertFalse(any(cidr in error for error in errors))
+
+
+class TemplateRenderTest(unittest.TestCase):
+    def setUp(self):
+        self.env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(str(TEMPLATES)),
+            undefined=jinja2.StrictUndefined,
+        )
+        self.env.filters["vpn_base_split_cidrs"] = vpn_base.split_cidrs
+
+    def test_sshd_template_renders_hardened_break_glass_policy(self):
+        rendered = self.env.get_template("sshd-vpn-base.conf.j2").render(
+            base_ssh_permit_root_login="no",
+            base_ssh_max_auth_tries=4,
+            base_ssh_login_grace_time=30,
+        )
+        lines = [
+            line.strip() for line in rendered.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertEqual(lines, [
+            "PubkeyAuthentication yes",
+            "AuthenticationMethods publickey",
+            "PasswordAuthentication no",
+            "KbdInteractiveAuthentication no",
+            "PermitEmptyPasswords no",
+            "HostbasedAuthentication no",
+            "PermitRootLogin no",
+            "MaxAuthTries 4",
+            "LoginGraceTime 30",
+            "X11Forwarding no",
+            "PermitUserEnvironment no",
+        ])
+        for forbidden in ("AllowUsers", "AllowGroups", "DenyUsers", "AllowTcpForwarding no"):
+            self.assertNotIn(forbidden, "\n".join(lines))
+
+    def test_firewall_template_restricts_ssh_to_declared_sources(self):
+        rendered = self.env.get_template("firewall.nft.j2").render(
+            base_ssh_port=22,
+            base_ssh_trusted_cidrs=["192.0.2.0/24", "2001:db8:10::/64"],
+            base_firewall_vpn_ports=[{"proto": "tcp", "port": 8443}],
+            base_firewall_source_ports=[
+                {"proto": "tcp", "port": 2223, "source_cidrs": ["203.0.113.30/32"]},
+            ],
+            base_firewall_allow_icmp_echo=True,
+            base_firewall_allow_dhcpv6_client=True,
+        )
+        self.assertIn("policy drop;", rendered)
+        self.assertIn("ip saddr { 192.0.2.0/24 } tcp dport 22 accept", rendered)
+        self.assertIn("ip6 saddr { 2001:db8:10::/64 } tcp dport 22 accept", rendered)
+        self.assertNotIn("tcp dport { 22", rendered)
 
 
 if __name__ == "__main__":

@@ -284,7 +284,7 @@ if in_ns trusted ssh "${SSH_OPTS[@]}" -o PubkeyAuthentication=no \
 fi
 grep -q 'Permission denied (publickey)' "$WORK/pw.err" || { cat "$WORK/pw.err"; fail "sshd предлагает не только publickey"; }
 ok "sshd предлагает только publickey"
-sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|permitrootlogin|permitemptypasswords) '
+sshd -T | grep -E '^(authenticationmethods|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|hostbasedauthentication|permitrootlogin|permitemptypasswords|maxauthtries|logingracetime|x11forwarding|permituserenvironment) '
 
 step "Поведение firewall IPv4/IPv6"
 mkdir "$WORK/public-empty"

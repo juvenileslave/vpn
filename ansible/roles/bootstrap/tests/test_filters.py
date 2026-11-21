@@ -43,6 +43,16 @@ class AdminValidationTest(unittest.TestCase):
                 self.assertNotEqual(bootstrap.admin_errors([user]), [])
 
 
+class SshCidrTest(unittest.TestCase):
+    def test_ssh_cidrs_reuse_base_narrow_contract(self):
+        for good in ("192.0.2.10/32", "192.0.2.0/24", "2001:db8:10::10/128", "2001:db8:10::/64"):
+            self.assertIsNone(bootstrap.cidr_error(good), good)
+        for bad in ("192.0.2.0/23", "10.0.0.0/8", "2001:db8::/48", "2001:db8::/32",
+                    "0.0.0.0/0", "::/0", "127.0.0.1/32", "::1/128"):
+            with self.subTest(cidr=bad):
+                self.assertIsNotNone(bootstrap.cidr_error(bad))
+
+
 class KeyMatchTest(unittest.TestCase):
     def test_derived_key_must_match_a_declared_key(self):
         declared = ed25519_key("opsadmin@workstation")

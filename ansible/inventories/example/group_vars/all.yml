@@ -25,7 +25,7 @@ subscription_public_path: /sub/
 base_firewall_enabled: true
 base_ssh_trusted_cidrs:
   - 192.0.2.0/24
-  - 2001:db8::/32
+  - 2001:db8:10::/64
 reality_sni: www.example.com
 cover_tls_port: 9443
 cover_site_source: /srv/owned-cover-site

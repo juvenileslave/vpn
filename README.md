@@ -25,6 +25,10 @@
   не создаёт учётную запись Remnawave, подписки или публичный HTTPS.
 - [Source ACL в роли base](docs/BASE_ROLE.md) — публичные и source-restricted
   порты, SSH/IPv6 и транзакционная собственная таблица nftables.
+- [SSH break-glass](docs/SSH_BREAK_GLASS.md) — прямой аварийный SSH-доступ
+  администратора к каждому узлу независимо от entrance, overlay и control
+  plane, узкий source ACL, ротация ключей, восстановление и откат; VPN не
+  развёрнут.
 - [Приватный TLS cover-site](docs/COVER_SITE.md) — nginx на host-loopback,
   операторский контент и Certbot; не публичный альтернативный backend.
 - [RemnaNode](docs/REMNAWAVE_NODE.md) — закреплённый контейнер, приватный
