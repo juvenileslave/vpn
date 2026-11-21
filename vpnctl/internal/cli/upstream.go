@@ -141,7 +141,7 @@ func runUpstreamList(args []string, stdout, stderr io.Writer) int {
 		}
 		if slot, err := st.UpstreamSlot(ctx, src.Slot()); err == nil {
 			view.Mode = slot.Mode
-			view.Active = shortVersionID(slot.ActiveVersionID)
+			view.Active = slot.ActiveVersionID
 			view.Failures = slot.FailureCount
 			if !slot.NextRunAt.IsZero() {
 				view.NextRun = slot.NextRunAt.UTC().Format(time.RFC3339)
@@ -169,7 +169,7 @@ func runUpstreamList(args []string, stdout, stderr io.Writer) int {
 	for _, v := range views {
 		fmt.Fprintf(stdout, "%-5d %-12s %-13s %-9s %-8t %-10d %-10s %-13s %-9d %s\n",
 			v.Slot, v.ID, v.Kind, v.Interval, v.Enabled, v.CountryFilter,
-			dash(v.Mode), dash(v.Active), v.Failures, dash(v.NextRun))
+			dash(v.Mode), dash(shortVersionID(v.Active)), v.Failures, dash(v.NextRun))
 	}
 	return ExitOK
 }
@@ -217,7 +217,7 @@ func runUpstreamVersions(args []string, stdout, stderr io.Writer) int {
 	for _, v := range versions {
 		views = append(views, upstreamVersionView{
 			Slot:        v.Slot,
-			ID:          shortVersionID(v.ID),
+			ID:          v.ID,
 			Seq:         v.Seq,
 			State:       v.State,
 			Origin:      v.Origin,
@@ -234,7 +234,7 @@ func runUpstreamVersions(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "SLOT  ID            SEQ  STATE       ORIGIN     CREATED                   ACTIVATED")
 	for _, v := range views {
 		fmt.Fprintf(stdout, "%-5d %-12s %-4d %-11s %-10s %-25s %s\n",
-			v.Slot, v.ID, v.Seq, v.State, v.Origin, v.CreatedAt, dash(v.ActivatedAt))
+			v.Slot, shortVersionID(v.ID), v.Seq, v.State, v.Origin, v.CreatedAt, dash(v.ActivatedAt))
 	}
 	return ExitOK
 }
@@ -294,7 +294,7 @@ func runSlotShow(args []string, stdout, stderr io.Writer) int {
 		views = append(views, upstreamSlotView{
 			Slot:      s.Slot,
 			Mode:      s.Mode,
-			Active:    shortVersionID(s.ActiveVersionID),
+			Active:    s.ActiveVersionID,
 			Failures:  s.FailureCount,
 			NextRun:   formatTime(s.NextRunAt),
 			LastError: s.LastErrorCode,
@@ -310,7 +310,7 @@ func runSlotShow(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "SLOT  MODE       ACTIVE        FAILURES  NEXT RUN                  LAST ERROR")
 	for _, v := range views {
 		fmt.Fprintf(stdout, "%-5d %-10s %-13s %-9d %-25s %s\n",
-			v.Slot, v.Mode, dash(v.Active), v.Failures, dash(v.NextRun), dash(v.LastError))
+			v.Slot, v.Mode, dash(shortVersionID(v.Active)), v.Failures, dash(v.NextRun), dash(v.LastError))
 	}
 	return ExitOK
 }
