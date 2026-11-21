@@ -25,8 +25,16 @@ ALLOWED_KEY_TYPES = frozenset({
 # Every algorithm name that may appear in an existing authorized_keys line.
 KNOWN_KEY_TYPES = ALLOWED_KEY_TYPES | {"ssh-dss"}
 MIN_RSA_BITS = 3072
-# Trusted SSH networks broader than this are refused as unsafe.
+# Generic source-port networks broader than this are refused as unsafe.
 MIN_PREFIX = {4: 8, 6: 32}
+# Direct break-glass SSH source ACLs must be explicit narrow admin ranges.
+SSH_MIN_PREFIX = {4: 24, 6: 64}
+DEFAULT_SSH_MAX_AUTH_TRIES = 4
+MIN_SSH_MAX_AUTH_TRIES = 1
+MAX_SSH_MAX_AUTH_TRIES = 6
+DEFAULT_SSH_LOGIN_GRACE_TIME = 30
+MIN_SSH_LOGIN_GRACE_TIME = 10
+MAX_SSH_LOGIN_GRACE_TIME = 60
 
 USER_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 RESERVED_USERS = frozenset({
@@ -136,6 +144,18 @@ def cidr_error(value) -> str | None:
         return "multicast, loopback и unspecified сети недопустимы"
     if network.version == 6 and network.network_address.ipv4_mapped is not None:
         return "IPv4-mapped IPv6 недопустим, укажите IPv4 CIDR"
+    return None
+
+
+def ssh_cidr_error(value) -> str | None:
+    """Validate an explicit, narrow administrator source CIDR for direct SSH."""
+    reason = cidr_error(value)
+    if reason:
+        return reason
+    network = ipaddress.ip_network(value, strict=True)
+    if network.prefixlen < SSH_MIN_PREFIX[network.version]:
+        return (f"слишком широкая SSH-сеть: префикс короче /{SSH_MIN_PREFIX[network.version]}"
+                f" для IPv{network.version}")
     return None
 
 
@@ -287,8 +307,23 @@ def input_errors(cfg) -> list[str]:
     if not _is_int(ssh_port) or not 1 <= ssh_port <= 65535:
         errors.append("base_ssh_port: ожидается целое 1–65535")
         ssh_port = None
-    if cfg.get("base_ssh_permit_root_login") not in ("no", "prohibit-password"):
-        errors.append("base_ssh_permit_root_login: допустимо 'no' или 'prohibit-password'")
+    if cfg.get("base_ssh_permit_root_login") != "no":
+        errors.append("base_ssh_permit_root_login: допустимо только 'no'")
+
+    max_auth_tries = cfg.get("base_ssh_max_auth_tries", DEFAULT_SSH_MAX_AUTH_TRIES)
+    if (not _is_int(max_auth_tries)
+            or not MIN_SSH_MAX_AUTH_TRIES <= max_auth_tries <= MAX_SSH_MAX_AUTH_TRIES):
+        errors.append(
+            f"base_ssh_max_auth_tries: ожидается целое "
+            f"{MIN_SSH_MAX_AUTH_TRIES}–{MAX_SSH_MAX_AUTH_TRIES}"
+        )
+    login_grace_time = cfg.get("base_ssh_login_grace_time", DEFAULT_SSH_LOGIN_GRACE_TIME)
+    if (not _is_int(login_grace_time)
+            or not MIN_SSH_LOGIN_GRACE_TIME <= login_grace_time <= MAX_SSH_LOGIN_GRACE_TIME):
+        errors.append(
+            f"base_ssh_login_grace_time: ожидается целое "
+            f"{MIN_SSH_LOGIN_GRACE_TIME}–{MAX_SSH_LOGIN_GRACE_TIME}"
+        )
 
     if cfg.get("base_ssh_enabled") is True:
         usable = [
@@ -304,10 +339,16 @@ def input_errors(cfg) -> list[str]:
     if not isinstance(cidrs, list):
         errors.append("base_ssh_trusted_cidrs: ожидается список")
         cidrs = []
+    normalized_ssh_cidrs = set()
     for index, cidr in enumerate(cidrs):
-        reason = cidr_error(cidr)
+        reason = ssh_cidr_error(cidr)
         if reason:
             errors.append(f"base_ssh_trusted_cidrs[{index}]: {reason}")
+            continue
+        network = str(ipaddress.ip_network(cidr, strict=True))
+        if network in normalized_ssh_cidrs:
+            errors.append(f"base_ssh_trusted_cidrs[{index}]: повтор CIDR")
+        normalized_ssh_cidrs.add(network)
 
     ports = cfg.get("base_firewall_vpn_ports")
     if not isinstance(ports, list):
@@ -378,6 +419,8 @@ def input_errors(cfg) -> list[str]:
     ):
         errors.append("base_firewall_acknowledged_closed_ports: ожидается список 'tcp/N' или 'udp/N'")
 
+    if cfg.get("base_ssh_enabled") is True and not cidrs:
+        errors.append("base_ssh_enabled: задайте непустой base_ssh_trusted_cidrs")
     if cfg.get("base_firewall_enabled") is True and not cidrs:
         errors.append("base_firewall_enabled: задайте непустой base_ssh_trusted_cidrs")
 

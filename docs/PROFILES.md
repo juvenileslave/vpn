@@ -135,6 +135,9 @@ path. Это переключение **новых** потоков, не бес
 задержка обнаружения включает probe/transport timeout и интервал. Пустые слоты
 не превращаются в probe freedom: probe также упирается в exit blackhole.
 
+Топология relay → exit, ожидаемый внешний адрес, ограничения публикации и откат
+сведены в [EXIT_NODE.md](EXIT_NODE.md).
+
 ## Почему `sni` не объявлен работающим
 
 `nginx stream ssl_preread` не расшифровывает REALITY. При единственном принятом
@@ -369,7 +372,8 @@ relay port, одного serverName/path/fingerprint/public key/shortId/UUID н�
 проверяет только явно объявленные profiles/snippets/hosts; renderer API не вызывает.
 Запись и rollback заблокированы отсутствующим CAS в закреплённой панели
 (см. [PANEL_WRITE.md](PANEL_WRITE.md)). Публикация/выдача links пользователям
-и production cutover здесь не выполнены.
+и production cutover здесь не выполнены; срез маршрутизации через exit-узел
+и отката описан в [EXIT_NODE.md](EXIT_NODE.md).
 
 Откат: восстановить прежние inputs/site/ACL, **наложить текущие revocations**,
 сгенерировать новую consistent identity, повторить actual gates и только затем

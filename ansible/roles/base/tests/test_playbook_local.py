@@ -105,6 +105,13 @@ class RejectionTest(unittest.TestCase):
     def test_ssh_without_admin_key(self):
         self.assert_rejected({"base_ssh_enabled": True}, "base_ssh_enabled:")
 
+    def test_ssh_without_trusted_cidrs(self):
+        self.assert_rejected(
+            {"base_ssh_enabled": True,
+             "base_admin_users": [{"name": "opsadmin", "authorized_keys": [ed25519_key()]}]},
+            "base_ssh_trusted_cidrs",
+        )
+
     def test_firewall_without_cidrs(self):
         self.assert_rejected({"base_firewall_enabled": True}, "base_ssh_trusted_cidrs")
 
@@ -117,6 +124,25 @@ class RejectionTest(unittest.TestCase):
         self.assert_rejected(
             {"base_firewall_enabled": True, "base_ssh_trusted_cidrs": ["::/0"]},
             "base_ssh_trusted_cidrs[0]")
+
+    def test_broad_ssh_cidrs_rejected_without_echo(self):
+        for cidr in ("192.0.2.0/23", "2001:db8::/48"):
+            with self.subTest(cidr=cidr):
+                output = self.assert_rejected(
+                    {"base_firewall_enabled": True, "base_ssh_trusted_cidrs": [cidr]},
+                    "base_ssh_trusted_cidrs[0]",
+                )
+                self.assertNotIn(cidr, output)
+
+    def test_root_login_prohibit_password_rejected(self):
+        self.assert_rejected(
+            {"base_ssh_permit_root_login": "prohibit-password"},
+            "base_ssh_permit_root_login",
+        )
+
+    def test_ssh_auth_bounds_rejected(self):
+        self.assert_rejected({"base_ssh_max_auth_tries": 0}, "base_ssh_max_auth_tries")
+        self.assert_rejected({"base_ssh_login_grace_time": 0}, "base_ssh_login_grace_time")
 
     def test_string_toggle(self):
         self.assert_rejected({"base_firewall_enabled": "false"}, "base_firewall_enabled")

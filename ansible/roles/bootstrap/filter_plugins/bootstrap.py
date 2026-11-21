@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import ipaddress
 from pathlib import Path
+import re
 import shlex
 
 from ansible.errors import AnsibleFilterError
@@ -41,7 +42,7 @@ def admin_errors(users) -> list[str]:
 
 
 def cidr_error(value):
-    return _vpn_base.cidr_error(value)
+    return _vpn_base.ssh_cidr_error(value)
 
 
 def key_matches(derived_line, declared_keys) -> bool:
@@ -86,7 +87,10 @@ _WEAK_SSH_OPTIONS = {
         ("/dev/null", "none"),
         "UserKnownHostsFile=/dev/null|none отключает проверку host key",
     ),
-    "globalknownhostsfile": (("/dev/null",), "GlobalKnownHostsFile=/dev/null отключает проверку host key"),
+    "globalknownhostsfile": (
+        ("/dev/null", "none"),
+        "GlobalKnownHostsFile=/dev/null|none отключает проверку host key",
+    ),
     "passwordauthentication": (("yes",), "PasswordAuthentication=yes ослабляет key-only доступ"),
     "kbdinteractiveauthentication": (("yes",), "KbdInteractiveAuthentication=yes ослабляет key-only доступ"),
 }
@@ -96,16 +100,27 @@ _FORBIDDEN_SSH_OPTIONS = {
     "port": "порт SSH задаётся ansible_port",
     "hostname": "хост SSH задаётся inventory ansible_host",
 }
+_FORBIDDEN_SSH_FLAGS = {
+    "i": "нельзя добавлять identity file в ansible_ssh_common_args",
+    "F": "нельзя переопределять ssh config в ansible_ssh_common_args",
+    "p": "порт SSH задаётся ansible_port",
+    "l": "пользователь SSH задаётся bootstrap_admin_name",
+}
+_PROXY_SSH_OPTIONS = frozenset({"proxyjump", "proxycommand", "proxyusefdpass"})
+_SSH_FLAGS_WITH_ARG = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
+_OPTION_SPLIT = re.compile(r"^([^\s=]+)(?:(?:\s*=\s*|\s+)(.*))?$", re.DOTALL)
 
 
 def _option_key_value(option):
     option = option.strip()
-    if "=" in option:
-        key, value = option.split("=", 1)
-    else:
-        parts = option.split(None, 1)
-        key, value = parts[0], (parts[1] if len(parts) > 1 else "")
-    return key.strip().lower(), value.strip().lower()
+    if not option:
+        return "", ""
+    match = _OPTION_SPLIT.match(option)
+    if not match:
+        return "", option.lstrip("=").strip().lower()
+    key = match.group(1).lower()
+    value = (match.group(2) or "").strip().lower()
+    return key, value
 
 
 def _ssh_option_problems(option):
@@ -119,6 +134,93 @@ def _ssh_option_problems(option):
     if key == "preferredauthentications" and "password" in value:
         return ["PreferredAuthentications добавляет пароль"]
     return []
+
+
+def direct_ssh_args(value) -> list[str]:
+    """Strip ProxyJump/ProxyCommand/-J options for direct break-glass probes.
+
+    Preserves host-key checking, known_hosts, timeouts, identity and other
+    explicit SSH options. Fails closed if proxy options cannot be stripped
+    unambiguously.
+    """
+    args = ssh_args(value)
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            raise AnsibleFilterError(
+                "ansible_ssh_common_args: разделитель '--' недопустим для прямого пути"
+            )
+        if not token.startswith("-") or token == "-":
+            raise AnsibleFilterError(
+                "ansible_ssh_common_args: позиционный аргумент недопустим"
+            )
+        if token.startswith("--"):
+            raise AnsibleFilterError(
+                "ansible_ssh_common_args: неизвестный длинный флаг недопустим для прямого пути"
+            )
+        if token == "-o":
+            if (index + 1 >= len(args) or not args[index + 1].strip()
+                    or args[index + 1].startswith("-")):
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: -o без значения"
+                )
+            key, _opt_val = _option_key_value(args[index + 1])
+            if not key:
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: пустое имя опции -o"
+                )
+            if key not in _PROXY_SSH_OPTIONS:
+                result.extend((token, args[index + 1]))
+            index += 2
+            continue
+        if token.startswith("-o") and len(token) > 2:
+            option = token[2:]
+            if not option.strip():
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: пустая опция -o"
+                )
+            key, _opt_val = _option_key_value(option)
+            if not key:
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: пустое имя опции -o"
+                )
+            if key not in _PROXY_SSH_OPTIONS:
+                result.append(token)
+            index += 1
+            continue
+        if token == "-J":
+            if (index + 1 >= len(args) or not args[index + 1].strip()
+                    or args[index + 1].startswith("-")):
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: -J без значения"
+                )
+            index += 2
+            continue
+        if token.startswith("-J") and len(token) > 2:
+            index += 1
+            continue
+        arg_flag = None
+        for pos, flag in enumerate(token[1:], start=1):
+            if flag in ("J", "o"):
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: комбинированный флаг с -J/-o нельзя безопасно разобрать для прямого пути"
+                )
+            if flag in _SSH_FLAGS_WITH_ARG:
+                arg_flag = (pos, flag)
+                break
+        if arg_flag is not None and arg_flag[0] == len(token) - 1:
+            if index + 1 >= len(args) or not args[index + 1].strip():
+                raise AnsibleFilterError(
+                    f"ansible_ssh_common_args: -{arg_flag[1]} без значения"
+                )
+            result.extend((token, args[index + 1]))
+            index += 2
+            continue
+        result.append(token)
+        index += 1
+    return result
 
 
 def ssh_args_problems(value) -> list[str]:
@@ -136,7 +238,6 @@ def ssh_args_problems(value) -> list[str]:
     index = 0
     while index < len(args):
         token = args[index]
-        lowered = token.lower()
         if token == "-o":
             if index + 1 < len(args):
                 problems.extend(_ssh_option_problems(args[index + 1]))
@@ -145,17 +246,26 @@ def ssh_args_problems(value) -> list[str]:
                 problems.append("ansible_ssh_common_args: -o без значения")
                 index += 1
             continue
-        if lowered.startswith("-o") and len(token) > 2:
+        if token.startswith("-o") and len(token) > 2:
             problems.extend(_ssh_option_problems(token[2:]))
-        elif token == "-i" or (token.startswith("-i") and len(token) > 2):
-            problems.append("нельзя добавлять identity file в ansible_ssh_common_args")
-        elif token == "-F" or (token.startswith("-F") and len(token) > 2):
-            problems.append("нельзя переопределять ssh config в ansible_ssh_common_args")
-        elif token == "-p" or (token.startswith("-p") and len(token) > 2 and token[2:3].isdigit()):
-            problems.append("порт SSH задаётся ansible_port")
-        elif token == "-l" or (token.startswith("-l") and len(token) > 2):
-            problems.append("пользователь SSH задаётся bootstrap_admin_name")
+            index += 1
+            continue
+        if token.startswith("-") and len(token) > 1 and not token.startswith("--"):
+            for pos, flag in enumerate(token[1:], start=1):
+                if flag in _FORBIDDEN_SSH_FLAGS:
+                    problems.append(_FORBIDDEN_SSH_FLAGS[flag])
+                    if pos == len(token) - 1:
+                        index += 1
+                    break
+                if flag in _SSH_FLAGS_WITH_ARG:
+                    if pos == len(token) - 1:
+                        index += 1
+                    break
         index += 1
+    try:
+        direct_ssh_args(value)
+    except AnsibleFilterError as exc:
+        problems.append(str(exc))
     # Keep the message order stable and avoid duplicate lines.
     return list(dict.fromkeys(problems))
 
@@ -237,6 +347,7 @@ class FilterModule:
             "bootstrap_cidr_error": cidr_error,
             "bootstrap_key_matches": key_matches,
             "bootstrap_ssh_args": ssh_args,
+            "bootstrap_direct_ssh_args": direct_ssh_args,
             "bootstrap_ssh_args_problems": ssh_args_problems,
             "bootstrap_listener_problems": listener_problems,
             "bootstrap_panel_url": panel_url,
