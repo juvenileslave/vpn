@@ -23,7 +23,7 @@
       base_ssh_permit_root_login=no при подключении под root отрежет доступ.
       Подключитесь администратором из base_admin_users.
     quiet: true
-  when: base_ssh_enabled and base_ssh_permit_root_login == 'no' and base_ssh_connection.rc == 0
+  when: base_ssh_enabled and base_ssh_connection.rc == 0
 
 - name: Refuse a firewall that would block the current SSH client
   ansible.builtin.assert:
@@ -96,6 +96,34 @@
       (base_ssh_port | string)
       in (base_sshd_before.stdout | vpn_base_sshd_effective).get('port', [])
     fail_msg: sshd не слушает base_ssh_port; роль не меняет порт SSH.
+    quiet: true
+  when: base_sshd_before is not skipped
+
+- name: Inspect effective sshd host key files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: true
+  loop: "{{ (base_sshd_before.stdout | default('') | vpn_base_sshd_effective).get('hostkey', []) }}"
+  register: base_sshd_hostkeys
+  when:
+    - base_sshd_before is not skipped
+    - item is string
+    - item is regex('^/')
+
+- name: Refuse missing or empty sshd host keys
+  ansible.builtin.assert:
+    that:
+      - base_sshd_hostkeys.results | default([]) | length > 0
+      - >-
+        base_sshd_hostkeys.results
+        | selectattr('stat.exists', 'defined')
+        | selectattr('stat.exists')
+        | selectattr('stat.isreg')
+        | selectattr('stat.size', 'gt', 0)
+        | list | length == (base_sshd_hostkeys.results | length)
+    fail_msg: >-
+      У sshd отсутствуют или пусты действующие файлы host key (sshd -T: hostkey).
+      Проверка host key обязательна; восстановите ключи хоста вручную до применения роли.
     quiet: true
   when: base_sshd_before is not skipped
 

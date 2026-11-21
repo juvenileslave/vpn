@@ -13,6 +13,7 @@ node_port_allow:
 # not part of the accepted example contract (see docs/DEPLOYMENT.md).
 node_api_port: 2223
 base_ssh_port: 22
+base_ssh_permit_root_login: "no"
 # One authority for the public subscription endpoint. The panel
 # SUB_PUBLIC_DOMAIN, the cp_proxy vhost server_name/path prefix and the proxy
 # upstream (panel_bind:panel_port) are derived from these two values. Do not
@@ -25,7 +26,7 @@ subscription_public_path: /sub/
 base_firewall_enabled: true
 base_ssh_trusted_cidrs:
   - 192.0.2.0/24
-  - 2001:db8::/32
+  - 2001:db8:10::/64
 # Private L3 overlay (ADR-0001): IPv6 ULA preferred with explicit IPv4 fallback.
 # Private keys are never stored in inventory; supply via SOPS/extra-vars or
 # overlay_private_key_file outside the repository checkout.

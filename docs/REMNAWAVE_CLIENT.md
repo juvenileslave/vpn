@@ -1,15 +1,21 @@
-# Клиент API Remnawave (только чтение)
+# Клиент API Remnawave
 
 Пакет `vpnctl/internal/remnawave` — библиотечный Go-клиент панели Remnawave для
 чтения пользователей, узлов, config profiles, computed-config, именованных
-snippets и hosts. Команды `vpnctl panel plan/show` используют только чтение;
-условия STRICT и границы apply описаны в [PANEL_WRITE.md](PANEL_WRITE.md).
+snippets и hosts, а также явного библиотечного write-транспорта для config
+profiles, snippets и hosts. Все read-методы остались без изменений; команды
+`vpnctl panel plan/show` используют только чтение, ни одна команда CLI не
+вызывает методы записи. Условия STRICT и границы apply описаны в
+[PANEL_WRITE.md](PANEL_WRITE.md).
 
 ## Чего клиент не делает
 
-- Нет методов создания, изменения и удаления: только девять GET-запросов ниже.
+- Нет записи для пользователей и узлов, нет оркестрации `panel.Apply`/`Rollback`,
+  CLI-вызовов записи, записей SQLite, идемпотентности, эмуляции `If-Match`/CAS
+  и автоматического sync.
 - Нет экспортированного универсального метода HTTP-запроса.
-- Нет автоматических повторов. `429` и `5xx` возвращаются вызывающему коду.
+- Нет автоматических повторов и replay тела запроса. `429` и `5xx` возвращаются
+  вызывающему коду.
 - Нет логирования. Токен не читается из окружения или файлов: его передаёт
   вызывающий код.
 - Конструктор не открывает сетевых соединений.
@@ -52,7 +58,12 @@ snippets и hosts. Команды `vpnctl panel plan/show` используют 
   принимает положительный **числовой** `id` пользователя, а у пользователя нет
   поля `uuid`. Поэтому метод называется `User(ctx, id int64)`. Поиск по
   `shortUuid` и `username` не реализован: `shortUuid` входит в ссылку подписки.
-- Остальные эндпоинты не реализованы.
+- Помимо девяти GET-методов выше, реализованы только явные библиотечные методы
+  write-транспорта для config profiles (`POST|PATCH /api/config-profiles`,
+  `DELETE /api/config-profiles/{uuid}`), snippets (`POST|PATCH|DELETE /api/snippets`,
+  `POST /api/snippets/actions/sync`) и hosts (`POST|PATCH /api/hosts`,
+  `DELETE /api/hosts/{uuid}`). Ни одна команда CLI их не вызывает; остальные
+  эндпоинты не реализованы.
 - Шесть новых методов не используют query, тело запроса или пагинацию.
   `total` у profiles/snippets обязан совпадать с длиной полной коллекции.
   Пустые коллекции возвращаются непустым по типу, но пустым по длине срезом
@@ -88,6 +99,8 @@ page, err := client.ListUsers(ctx, 0, 100)
   отклоняется (`ErrInvalidConfig`).
 - `WithMaxResponseBytes(n)` меняет лимит тела успешного ответа (по умолчанию
   16 МиБ).
+- `WithMaxRequestBytes(n)` меняет лимит исходящего JSON-тела запроса записи
+  (по умолчанию 16 МиБ).
 
 `fmt` с `%v`, `%+v` и `%#v` не печатает токен клиента.
 
@@ -158,6 +171,8 @@ page, err := client.ListUsers(ctx, 0, 100)
 | `ErrInvalidArgument` | Неверные `start`, `size`, `id`, UUID или `nil` context; запрос не отправляется. |
 | `ErrMalformedResponse` | Не JSON, обрезанный или лишний JSON, не тот конверт, нет обязательных полей, неверные типы, UUID или время, `Content-Type` не `application/json`; для новых моделей — duplicate keys/identities и несогласованный `total`. |
 | `ErrResponseTooLarge` | Тело больше лимита. |
+| `ErrRequestTooLarge` | Исходящее JSON-тело запроса записи больше лимита (до I/O). |
+| `ErrAmbiguousWrite` / `*WriteOutcomeUnknownError` | Неизвестный исход запроса записи (ошибка транспорта, чтения тела, 5xx, неожиданный 2xx); повтор без чтения состояния панели запрещён. |
 | `*APIError` | Ответ не `2xx`: `StatusCode`, `Code` (`errorCode` панели вида `A025`, если корректен), `RetryAfter` для `429`. |
 
 `*APIError` разворачивается в sentinel: `3xx` → `ErrRedirect`, `400` →
@@ -169,19 +184,22 @@ page, err := client.ListUsers(ctx, 0, 100)
 Ошибки транспорта и чтения тела не печатают исходный текст, URL или тело;
 цепочка причин для `errors.Is`/`errors.As`, отмены, deadline и timeout сохранена.
 
-## STRICT: запись намеренно недоступна
+## STRICT: границы write-транспорта и отказ CLI apply
 
 Владелец выбрал защиту от **независимых writers**, а не эксклюзивное владение.
 На disposable панели pinned 3.4.10 устаревший `If-Match` не предотвратил PATCH:
 панель приняла изменение с HTTP 200. Атомарного API precondition нет;
-повторное чтение перед записью не заменяет CAS. Поэтому клиент не содержит
-mutating методов, а явный apply отказывается **до** токена, сети и состояния.
-Нет обхода `--exclusive`, фиктивного CAS, журнала apply или rollback.
+повторное чтение перед записью не заменяет CAS. Пакет содержит только
+библиотечный write-транспорт без оркестрации; ни одна команда CLI его не
+вызывает, а явный `vpnctl panel apply --apply` по-прежнему отказывается **до**
+чтения файлов, токена, сети и состояния. Нет `panel.Apply`/`Rollback`, обхода
+`--exclusive`, фиктивного CAS, идемпотентности, журнала SQLite или rollback.
 
 Дополнительно full profile PATCH очищает managed inbound static clients,
 хотя POST сохраняет их. Сохранение raw config при чтении не разрешает такой
 lossy update. Доставка на реальные nodes и user injection не подтверждены.
-Read-only срез не завершает write adapter и **не закрывает issue #53**.
+Библиотечный транспортный срез не завершает apply/rollback, не означает
+развёртывания VPN и **не закрывает issue #53**.
 
 ## Проверка
 
@@ -202,8 +220,10 @@ deadline, отказ от редиректа (цель редиректа не �
 недоверенного сертификата и от `InsecureSkipVerify`, отсутствие токена и
 секретных полей в моделях и ошибках.
 
-Новые synthetic тесты проверяют все шесть method/path/query/header/body
-контрактов, raw/unknown поля в памяти и redaction моделей/контейнеров;
+Synthetic тесты проверяют read-контракты планирования и библиотечный
+write-транспорт (exact method/path/query/headers/body, отсутствие `If-Match` и
+повторов, лимит тела запроса 16 МиБ, `ErrAmbiguousWrite`), raw/unknown поля в
+памяти и redaction входных и выходных моделей/контейнеров;
 mandatory fields, неверные envelopes, UUID, duplicate keys/identities,
 несогласованный `total`, malformed/trailing JSON, HTTP errors, oversized
 Content-Length/chunked ответы, отмену/deadline/client timeout до и после
@@ -213,3 +233,5 @@ Content-Length/chunked ответы, отмену/deadline/client timeout до �
 disposable панелью 3.4.10 за доверенным TLS proxy. Probe-объекты удалены.
 К ней не был подключён Node: HTTP readback и принятие очереди не доказывают
 эффективную конфигурацию узлов, refresh или пользовательскую инъекцию.
+Новый библиотечный write-транспорт проверен **только** на локальных `httptest`
+TLS fake servers без вызовов реальной панели и без runtime-приёмки узла.

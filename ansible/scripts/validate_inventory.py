@@ -112,6 +112,16 @@ def profile_contract() -> Any:
     return contract
 
 
+@lru_cache(maxsize=1)
+def base_contract() -> Any:
+    """The accepted base role validator; one source for SSH CIDR rules."""
+    module_path = Path(__file__).resolve().parents[1] / "roles/base/filter_plugins/vpn_base.py"
+    spec = importlib.util.spec_from_file_location("vpn_base_contract", module_path)
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    return contract
+
+
 class Inventory:
     def __init__(self, path: Path, example: bool) -> None:
         self.path = path
@@ -294,6 +304,7 @@ class Inventory:
                 values = self.effective(group, host)
                 self.validate_host(group, host, values, addresses)
                 self.validate_common(host, values)
+                self.validate_ssh_break_glass(host, values)
                 self.validate_management(group, host, values)
                 if "cp_placement" in values:
                     placement = self.placement_value(values["cp_placement"])
@@ -452,6 +463,107 @@ class Inventory:
                 )
                 self.error(f"{located[1]}: must be derived from {source}; "
                            "remove the duplicate declaration")
+
+    def validate_ssh_break_glass(self, host: str, values: dict[str, Located]) -> None:
+        """Every declared host must preserve an explicit direct SSH path."""
+        where = f"host {host}"
+        ssh_enabled = values.get("base_ssh_enabled")
+        if ssh_enabled is None:
+            if not self.example:
+                self.error(
+                    f"{where}: base_ssh_enabled is required and must be true "
+                    "for direct SSH break-glass"
+                )
+        else:
+            value, origin = ssh_enabled
+            if not isinstance(value, bool):
+                self.error(f"{origin}: must be true or false")
+            elif not value:
+                self.error(f"{origin}: base_ssh_enabled must be true for direct SSH break-glass")
+
+        ssh_port_entry = values.get("base_ssh_port")
+        ssh_port: int | None = None
+        if ssh_port_entry is None:
+            self.error(f"{where}: base_ssh_port is required")
+        else:
+            value, origin = ssh_port_entry
+            if type(value) is not int or not 1 <= value <= 65535:
+                self.error(f"{origin}: must be an integer port 1-65535")
+            else:
+                ssh_port = value
+
+        ansible_port_entry = values.get("ansible_port")
+        if ansible_port_entry is not None:
+            ap_value, ap_origin = ansible_port_entry
+            if type(ap_value) is not int or not 1 <= ap_value <= 65535:
+                self.error(f"{ap_origin}: must be an integer port 1-65535")
+            elif ssh_port is not None and ap_value != ssh_port:
+                self.error(f"{ap_origin}: ansible_port must equal base_ssh_port")
+        elif ssh_port is not None and ssh_port != 22:
+            self.error(
+                f"{where}: ansible_port is required and must equal base_ssh_port when base_ssh_port != 22"
+            )
+
+        root_login = values.get("base_ssh_permit_root_login")
+        if root_login is None:
+            self.error(f"{where}: base_ssh_permit_root_login is required and must be 'no'")
+        elif root_login[0] != "no":
+            self.error(f"{root_login[1]}: base_ssh_permit_root_login must be 'no'")
+
+        trusted = values.get("base_ssh_trusted_cidrs")
+        if trusted is None:
+            self.error(f"{where}: base_ssh_trusted_cidrs is required for direct SSH break-glass")
+        else:
+            cidrs, origin = trusted
+            if not isinstance(cidrs, list):
+                self.error(f"{origin}: must be a list of CIDRs")
+            elif not cidrs:
+                self.error(f"{origin}: must not be empty")
+            else:
+                ssh_cidr_error = base_contract().ssh_cidr_error
+                seen: set[str] = set()
+                for index, item in enumerate(cidrs):
+                    problem = ssh_cidr_error(item)
+                    if problem:
+                        self.error(f"{origin}[{index}]: {problem}")
+                        continue
+                    network = ipaddress.ip_network(item, strict=True)
+                    if self.example and not in_networks(network, DOCUMENTATION_NETWORKS + PRIVATE_NETWORKS):
+                        self.error(f"{origin}[{index}]: example CIDR must be in documentation or private ranges")
+                    normalized = str(network)
+                    if normalized in seen:
+                        self.error(f"{origin}[{index}]: duplicate CIDR")
+                    seen.add(normalized)
+
+        for var_name, ssh_msg in (
+            (
+                "base_firewall_vpn_ports",
+                "base_ssh_port must not be declared as a public base_firewall_vpn_ports listener",
+            ),
+            (
+                "base_firewall_source_ports",
+                "base_ssh_port is governed only by base_ssh_trusted_cidrs, not base_firewall_source_ports",
+            ),
+        ):
+            entry = values.get(var_name)
+            if entry is None:
+                continue
+            rules, origin = entry
+            if not isinstance(rules, list):
+                self.error(f"{origin}: must be a list")
+                continue
+            for index, item in enumerate(rules):
+                if not isinstance(item, dict):
+                    self.error(f"{origin}[{index}]: expected a mapping with proto and port")
+                    continue
+                proto = item.get("proto")
+                port = item.get("port")
+                if not isinstance(proto, str) or proto not in ("tcp", "udp"):
+                    self.error(f"{origin}[{index}].proto: must be 'tcp' or 'udp'")
+                if type(port) is not int or not 1 <= port <= 65535:
+                    self.error(f"{origin}[{index}].port: must be an integer port 1-65535")
+                elif ssh_port is not None and proto == "tcp" and port == ssh_port:
+                    self.error(f"{origin}[{index}]: {ssh_msg}")
 
     def validate_management(self, group: str, host: str, values: dict[str, Located]) -> None:
         where = f"host {host}"

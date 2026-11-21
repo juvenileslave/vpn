@@ -258,6 +258,8 @@ def validate_host(host, kind):
         require(pair not in public_pairs and pair != ("tcp", ssh), "duplicate public port or SSH conflict")
         public_pairs.add(pair)
     require(("tcp", api) not in public_pairs and ("tcp", cover) not in public_pairs, "private API/origin cannot be public")
+    if kind == "exit":
+        require(("tcp", service[1]) not in public_pairs, "exit transit_port cannot be public")
     restricted = host.get("base_firewall_source_ports")
     require(isinstance(restricted, list), "base_firewall_source_ports must be a list")
     rules = {}

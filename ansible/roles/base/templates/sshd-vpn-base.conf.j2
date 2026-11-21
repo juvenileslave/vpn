@@ -1,7 +1,16 @@
 # Managed by Ansible role base (vpn). Loaded first from sshd_config.d, so these
 # values take precedence (sshd keeps the first value of each keyword).
+# AllowTcpForwarding is intentionally left at the OpenSSH default (yes) so the
+# loopback panel remains reachable via `ssh -L`. AllowUsers/AllowGroups are not
+# set here so pre-existing non-admin accounts keep working.
 PubkeyAuthentication yes
+AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
+HostbasedAuthentication no
 PermitRootLogin {{ base_ssh_permit_root_login }}
+MaxAuthTries {{ base_ssh_max_auth_tries }}
+LoginGraceTime {{ base_ssh_login_grace_time }}
+X11Forwarding no
+PermitUserEnvironment no

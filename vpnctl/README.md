@@ -50,7 +50,7 @@ check|run` и `vpnctl alerts list|mute` ([METRICS_ALERTS.md](../docs/METRICS_ALE
 | Ошибка external inputs, pinned core, store, private cleanup или output | Короткий secret-safe code; не успех сетевой пробы. | 1 |
 | `vpnctl panel [plan] --config PATH --bundle MANIFEST --objects PATH` | Проверка bundle и безопасный JSON-diff; только GET. `apply` без `--apply` выполняет тот же plan. | 0 |
 | `vpnctl panel show --config PATH --bundle MANIFEST --objects PATH` | Только текущие объявленные identities и наличие effective fields. | 0 |
-| `vpnctl panel apply --apply` | Отказ до чтения файлов/токена, сети и SQLite: атомарной защиты в API нет. | 3 |
+| `vpnctl panel apply --apply` | Отказ до чтения файлов/токена, сети и SQLite: CLI `apply`/`rollback` не подключены, атомарной защиты (CAS) в API нет (в `internal/remnawave` есть только библиотечный write-транспорт). | 3 |
 | `panel`: stale UUID, ownership-конфликт, потенциально lossy update | Безопасный отказ; панель не меняется. | 3 |
 | `panel`: неверные inputs, token/TLS/HTTP/response ошибки | Значения и сырые diagnostics не выводятся. | 1 |
 | `vpnctl metrics check --config PATH --rules PATH [--format text|json]` | Один цикл вычислений: все правила проверяются до запроса, затем типизированные `ok`/`firing`/`unknown`; состояние не пишется. | 0 — все `ok`; 4 — есть `firing`; 5 — нет `firing`, есть `unknown` |
