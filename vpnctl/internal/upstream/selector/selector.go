@@ -15,9 +15,10 @@ type Filter struct {
 
 // Probe is one bounded probe observation for a candidate.
 type Probe struct {
-	Outcome string        // "success" | "failure" | "timeout"
-	Latency time.Duration // meaningful for success
-	Country string        // observed country; "" = unknown
+	Outcome    string        // "success" | "failure" | "timeout"
+	Latency    time.Duration // meaningful for success
+	Country    string        // observed country; "" = unknown
+	ExternalIP string        // observed egress address; "" = unknown
 }
 
 // Input pairs a parsed candidate with its probes (in observation order).

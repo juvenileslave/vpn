@@ -44,6 +44,7 @@ var (
 type Options struct {
 	XrayPath      string        // absolute pinned xray executable
 	ProbeURL      string        // https endpoint used for latency and health
+	IPURL         string        // optional https endpoint returning the egress address
 	GeoURL        string        // optional https endpoint returning a 2-letter country
 	Timeout       time.Duration // per HTTP sample; 0 => 10s
 	Samples       int           // 0 => 2, max 5
@@ -55,6 +56,7 @@ type Options struct {
 type Prober struct {
 	xrayPath     string
 	probeURL     *url.URL
+	ipURL        *url.URL
 	geoURL       *url.URL
 	timeout      time.Duration
 	samples      int
@@ -79,6 +81,13 @@ func New(opts Options) (*Prober, error) {
 		return nil, fmt.Errorf("%w: probe URL must be https", ErrInvalidOptions)
 	}
 	probeURL, _ := url.Parse(opts.ProbeURL)
+	var ipURL *url.URL
+	if opts.IPURL != "" {
+		if err := validateHTTPSURL(opts.IPURL); err != nil {
+			return nil, fmt.Errorf("%w: IP URL must be https", ErrInvalidOptions)
+		}
+		ipURL, _ = url.Parse(opts.IPURL)
+	}
 	var geoURL *url.URL
 	if opts.GeoURL != "" {
 		if err := validateHTTPSURL(opts.GeoURL); err != nil {
@@ -105,6 +114,7 @@ func New(opts Options) (*Prober, error) {
 	return &Prober{
 		xrayPath:     opts.XrayPath,
 		probeURL:     probeURL,
+		ipURL:        ipURL,
 		geoURL:       geoURL,
 		timeout:      timeout,
 		samples:      samples,
@@ -146,7 +156,7 @@ func (p *Prober) Probe(ctx context.Context, cand candidate.Candidate) ([]selecto
 	if err != nil {
 		return nil, fmt.Errorf("%w: no local port", ErrStart)
 	}
-	config, err := buildConfig(port, outbound, tag, p.probeURL, p.geoURL)
+	config, err := buildConfig(port, outbound, tag, p.probeURL, p.ipURL, p.geoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -211,8 +221,13 @@ func (p *Prober) Probe(ctx context.Context, cand candidate.Candidate) ([]selecto
 	if p.geoURL != nil {
 		country = p.observeCountry(ctx, client)
 	}
+	externalIP := ""
+	if p.ipURL != nil {
+		externalIP = p.observeIP(ctx, client)
+	}
 	for i := range probes {
 		probes[i].Country = country
+		probes[i].ExternalIP = externalIP
 	}
 	return probes, nil
 }
@@ -258,6 +273,30 @@ func (p *Prober) observeCountry(ctx context.Context, client *http.Client) string
 		return ""
 	}
 	return code
+}
+
+func (p *Prober) observeIP(ctx context.Context, client *http.Client) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.ipURL.String(), nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCountryBody+1))
+	if err != nil || len(body) > maxCountryBody {
+		return ""
+	}
+	raw := strings.TrimSpace(string(body))
+	if net.ParseIP(raw) == nil {
+		return ""
+	}
+	return raw
 }
 
 func outcomeFor(err error) string {
@@ -374,7 +413,7 @@ type config struct {
 	Routing   routing           `json:"routing"`
 }
 
-func buildConfig(port int, outbound json.RawMessage, tag string, probeURL, geoURL *url.URL) ([]byte, error) {
+func buildConfig(port int, outbound json.RawMessage, tag string, probeURL, ipURL, geoURL *url.URL) ([]byte, error) {
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("%w: invalid proxy port", ErrConfig)
 	}
@@ -387,11 +426,20 @@ func buildConfig(port int, outbound json.RawMessage, tag string, probeURL, geoUR
 	}
 	probeHost := probeURL.Hostname()
 	allowedDomains := []string{"full:" + probeHost}
-	if geoURL != nil {
-		if geoHost := geoURL.Hostname(); geoHost != probeHost {
-			allowedDomains = append(allowedDomains, "full:"+geoHost)
+	addHost := func(u *url.URL) {
+		if u == nil {
+			return
 		}
+		host := u.Hostname()
+		for _, existing := range allowedDomains {
+			if existing == "full:"+host {
+				return
+			}
+		}
+		allowedDomains = append(allowedDomains, "full:"+host)
 	}
+	addHost(ipURL)
+	addHost(geoURL)
 	blocked := struct {
 		Protocol string `json:"protocol"`
 		Tag      string `json:"tag"`

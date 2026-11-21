@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -74,6 +76,7 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 	outbound := json.RawMessage(`{"protocol":"vless","tag":"upstream-slot-3","settings":{"address":"203.0.113.9"}}`)
 	raw, err := buildConfig(23456, outbound, "upstream-slot-3",
 		mustURL(t, "https://probe.example/generate_204"),
+		mustURL(t, "https://ip.example/ip"),
 		mustURL(t, "https://geo.example/country"))
 	if err != nil {
 		t.Fatalf("buildConfig: %v", err)
@@ -114,8 +117,8 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 	if len(rules) != 3 {
 		t.Fatalf("rules = %+v", rules)
 	}
-	if rules[0].OutboundTag != "upstream-slot-3" || len(rules[0].Domain) != 2 ||
-		rules[0].Domain[0] != "full:probe.example" || rules[0].Domain[1] != "full:geo.example" {
+	if rules[0].OutboundTag != "upstream-slot-3" || len(rules[0].Domain) != 3 ||
+		rules[0].Domain[0] != "full:probe.example" || rules[0].Domain[1] != "full:ip.example" || rules[0].Domain[2] != "full:geo.example" {
 		t.Fatalf("allow rule = %+v", rules[0])
 	}
 	if rules[1].OutboundTag != "blocked" || !contains(rules[1].IP, "127.0.0.0/8") || !contains(rules[1].IP, "fc00::/7") {
@@ -138,16 +141,16 @@ func contains(values []string, want string) bool {
 func TestBuildConfigRejectsBadInputs(t *testing.T) {
 	outbound := json.RawMessage(`{"protocol":"vless","tag":"upstream-slot-1"}`)
 	probe := mustURL(t, "https://probe.example/generate_204")
-	if _, err := buildConfig(0, outbound, "upstream-slot-1", probe, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(0, outbound, "upstream-slot-1", probe, nil, nil); !errors.Is(err, ErrConfig) {
 		t.Fatalf("port error = %v", err)
 	}
-	if _, err := buildConfig(1000, outbound, "bad tag", probe, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(1000, outbound, "bad tag", probe, nil, nil); !errors.Is(err, ErrConfig) {
 		t.Fatalf("tag error = %v", err)
 	}
-	if _, err := buildConfig(1000, outbound, "blocked", probe, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(1000, outbound, "blocked", probe, nil, nil); !errors.Is(err, ErrConfig) {
 		t.Fatalf("reserved tag error = %v", err)
 	}
-	if _, err := buildConfig(1000, json.RawMessage(`[]`), "upstream-slot-1", probe, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(1000, json.RawMessage(`[]`), "upstream-slot-1", probe, nil, nil); !errors.Is(err, ErrConfig) {
 		t.Fatalf("array outbound error = %v", err)
 	}
 }
@@ -161,6 +164,25 @@ func TestParseCandidate(t *testing.T) {
 		if _, _, err := parseCandidate(candidate.Candidate{Outbound: json.RawMessage(raw)}); !errors.Is(err, ErrConfig) {
 			t.Fatalf("candidate %q error = %v, want ErrConfig", raw, err)
 		}
+	}
+}
+
+func TestObserveIP(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("203.0.113.7\n"))
+	}))
+	defer server.Close()
+	p := &Prober{ipURL: mustURL(t, server.URL+"/ip")}
+	if got := p.observeIP(context.Background(), server.Client()); got != "203.0.113.7" {
+		t.Fatalf("observeIP = %q", got)
+	}
+	bad := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html>not an IP</html>"))
+	}))
+	defer bad.Close()
+	p.ipURL = mustURL(t, bad.URL+"/ip")
+	if got := p.observeIP(context.Background(), bad.Client()); got != "" {
+		t.Fatalf("observeIP(bad) = %q, want empty", got)
 	}
 }
 

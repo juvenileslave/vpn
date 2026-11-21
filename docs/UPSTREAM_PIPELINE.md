@@ -144,8 +144,9 @@ type Publisher interface {
 
 Production-реализации, не требующие панели: `fetch.Fetcher` (HTTPS-подписка
 или WireGuard-файл), `prober.Prober` (временный Xray на 127.0.0.1,
-HTTP-proxy inbound, allowlist только probe/geo доменов, block для private,
-loopback, link-local и всего остального) и `validate.Xray` (`xray -test`).
+HTTP-proxy inbound, allowlist только probe/IP/geo доменов, block для private,
+loopback, link-local и всего остального; внешний IP и страна записываются в
+наблюдение пробы, если заданы соответствующие HTTPS-эндпоинты) и `validate.Xray` (`xray -test`).
 `Publisher` в этом срезе существует только как интерфейс и fake в тестах.
 
 `Pipeline.Refresh` выполняет: fetch включённых источников слота (ошибка одного
