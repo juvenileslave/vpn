@@ -7,8 +7,8 @@ slot_fanout: ports
 node_port_allow:
   - 127.0.0.1/32
   - ::1/128
-  - 203.0.113.30/32
-  - 2001:db8:30::30/128
+  - 10.250.0.30/32
+  - "fd00:db8:1::30/128"
 # Explicit private management port. 2222 is only the upstream example and is
 # not part of the accepted example contract (see docs/DEPLOYMENT.md).
 node_api_port: 2223
@@ -27,6 +27,15 @@ base_firewall_enabled: true
 base_ssh_trusted_cidrs:
   - 192.0.2.0/24
   - 2001:db8:10::/64
+# Private L3 overlay (ADR-0001): IPv6 ULA preferred with explicit IPv4 fallback.
+# Private keys are never stored in inventory; supply via SOPS/extra-vars or
+# overlay_private_key_file outside the repository checkout.
+overlay_backend: wireguard
+overlay_interface: wg0
+overlay_port: 51820
+overlay_ipv6_prefix: "fd00:db8:1::/64"
+overlay_ipv4_fallback: true
+overlay_ipv4_prefix: 10.250.0.0/24
 reality_sni: www.example.com
 cover_tls_port: 9443
 cover_site_source: /srv/owned-cover-site
