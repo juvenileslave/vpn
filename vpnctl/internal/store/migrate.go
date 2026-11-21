@@ -107,6 +107,36 @@ var migrations = []migration{
 			expires_at INTEGER NOT NULL CHECK (expires_at > 0)
 		) STRICT`,
 	),
+	// Version 5: upstream candidate pipeline versions and slot refresh state.
+	// Only new tables are created, so every row from versions 1-4 is preserved.
+	execAll(
+		`CREATE TABLE upstream_versions (
+			id                   TEXT    PRIMARY KEY CHECK (length(id) = 32),
+			slot                 INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 63),
+			seq                  INTEGER NOT NULL CHECK (seq >= 1),
+			origin               TEXT    NOT NULL CHECK (origin IN ('upstream', 'blackhole')),
+			state                TEXT    NOT NULL CHECK (state IN ('candidate', 'active', 'superseded', 'failed')),
+			payload_ref          TEXT    NOT NULL CHECK (length(payload_ref) BETWEEN 1 AND 128),
+			payload_sha256       TEXT    NOT NULL CHECK (length(payload_sha256) = 64),
+			outbound_fingerprint TEXT    NOT NULL CHECK (length(outbound_fingerprint) = 64),
+			failure_code         TEXT    NOT NULL DEFAULT '' CHECK (length(failure_code) <= 64),
+			created_at           INTEGER NOT NULL CHECK (created_at > 0),
+			activated_at         INTEGER NOT NULL DEFAULT 0 CHECK (activated_at >= 0),
+			retired_at           INTEGER NOT NULL DEFAULT 0 CHECK (retired_at >= 0),
+			UNIQUE (slot, seq)
+		) STRICT`,
+		`CREATE UNIQUE INDEX upstream_versions_active ON upstream_versions (slot) WHERE state = 'active'`,
+		`CREATE INDEX upstream_versions_latest ON upstream_versions (slot, seq DESC)`,
+		`CREATE TABLE upstream_slots (
+			slot              INTEGER PRIMARY KEY CHECK (slot BETWEEN 1 AND 63),
+			mode              TEXT    NOT NULL CHECK (mode IN ('upstream', 'blackhole')),
+			active_version_id TEXT    NOT NULL DEFAULT '' CHECK (length(active_version_id) IN (0, 32)),
+			failure_count     INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+			next_run_at       INTEGER NOT NULL DEFAULT 0 CHECK (next_run_at >= 0),
+			last_error_code   TEXT    NOT NULL DEFAULT '' CHECK (length(last_error_code) <= 64),
+			updated_at        INTEGER NOT NULL CHECK (updated_at > 0)
+		) STRICT`,
+	),
 }
 
 func execAll(statements ...string) migration {
