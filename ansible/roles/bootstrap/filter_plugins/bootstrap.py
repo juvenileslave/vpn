@@ -96,6 +96,8 @@ _FORBIDDEN_SSH_OPTIONS = {
     "port": "порт SSH задаётся ansible_port",
     "hostname": "хост SSH задаётся inventory ansible_host",
 }
+_PROXY_SSH_OPTIONS = frozenset({"proxyjump", "proxycommand", "proxyusefdpass"})
+_SSH_FLAGS_WITH_ARG = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
 
 
 def _option_key_value(option):
@@ -119,6 +121,75 @@ def _ssh_option_problems(option):
     if key == "preferredauthentications" and "password" in value:
         return ["PreferredAuthentications добавляет пароль"]
     return []
+
+
+def direct_ssh_args(value) -> list[str]:
+    """Strip ProxyJump/ProxyCommand/-J options for direct break-glass probes.
+
+    Preserves host-key checking, known_hosts, timeouts, identity and other
+    explicit SSH options. Fails closed if proxy options cannot be stripped
+    unambiguously.
+    """
+    args = ssh_args(value)
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            raise AnsibleFilterError(
+                "ansible_ssh_common_args: разделитель '--' недопустим для прямого пути"
+            )
+        if token == "-o":
+            if (index + 1 >= len(args) or not args[index + 1].strip()
+                    or args[index + 1].startswith("-")):
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: -o без значения"
+                )
+            key, _opt_val = _option_key_value(args[index + 1])
+            if not key:
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: пустое имя опции -o"
+                )
+            if key not in _PROXY_SSH_OPTIONS:
+                result.extend((token, args[index + 1]))
+            index += 2
+            continue
+        if token.startswith("-o") and len(token) > 2:
+            option = token[2:]
+            if not option.strip():
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: пустая опция -o"
+                )
+            key, _opt_val = _option_key_value(option)
+            if not key:
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: пустое имя опции -o"
+                )
+            if key not in _PROXY_SSH_OPTIONS:
+                result.append(token)
+            index += 1
+            continue
+        if token == "-J":
+            if (index + 1 >= len(args) or not args[index + 1].strip()
+                    or args[index + 1].startswith("-")):
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: -J без значения"
+                )
+            index += 2
+            continue
+        if token.startswith("-J") and len(token) > 2:
+            index += 1
+            continue
+        if token.startswith("-") and len(token) > 2 and not token.startswith("--"):
+            if token[1] not in _SSH_FLAGS_WITH_ARG and any(
+                flag in ("J", "o") for flag in token[1:]
+            ):
+                raise AnsibleFilterError(
+                    "ansible_ssh_common_args: комбинированный флаг с -J/-o нельзя безопасно разобрать для прямого пути"
+                )
+        result.append(token)
+        index += 1
+    return result
 
 
 def ssh_args_problems(value) -> list[str]:
@@ -156,6 +227,10 @@ def ssh_args_problems(value) -> list[str]:
         elif token == "-l" or (token.startswith("-l") and len(token) > 2):
             problems.append("пользователь SSH задаётся bootstrap_admin_name")
         index += 1
+    try:
+        direct_ssh_args(value)
+    except AnsibleFilterError as exc:
+        problems.append(str(exc))
     # Keep the message order stable and avoid duplicate lines.
     return list(dict.fromkeys(problems))
 
@@ -237,6 +312,7 @@ class FilterModule:
             "bootstrap_cidr_error": cidr_error,
             "bootstrap_key_matches": key_matches,
             "bootstrap_ssh_args": ssh_args,
+            "bootstrap_direct_ssh_args": direct_ssh_args,
             "bootstrap_ssh_args_problems": ssh_args_problems,
             "bootstrap_listener_problems": listener_problems,
             "bootstrap_panel_url": panel_url,

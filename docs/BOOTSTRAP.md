@@ -46,11 +46,15 @@ profiles, метрики, бота, DNS или публичный HTTPS.
 - gate использует `ssh -F /dev/null`: `ansible_host` должен разрешаться без
   `Host`-алиасов из `~/.ssh/config`, а опциональные `ProxyJump`/`ProxyCommand` и
   `UserKnownHostsFile` задаются в `ansible_ssh_common_args`. Иначе gate честно
-  откажет, а не будет угадывать адрес. `ProxyJump`/`ProxyCommand` — только
-  необязательное удобство обычного пути через entrance, но не требование
-  break-glass: если в `ansible_ssh_common_args` задан прокси, gate проверяет
-  именно проксируемый путь, поэтому прямой аварийный доступ к каждому узлу
-  проверяется отдельно без прокси (см. [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md));
+  откажет, а не будет угадывать адрес. `ProxyJump`/`ProxyCommand`/`-J` — только
+  необязательное удобство обычного пути через entrance и не могут подменять
+  break-glass: gate в `roles/bootstrap/tasks/verify.yml` **всегда** выполняет
+  независимую прямую проверку без прокси (`bootstrap_direct_ssh_args` удаляет
+  `ProxyJump`/`ProxyCommand`/`-J` и передаёт `ProxyJump=none`/`ProxyCommand=none`,
+  сохраняя проверку host key; при неоднозначных флагах проверка отказывает
+  fail-closed), а при наличии прокси в `ansible_ssh_common_args` дополнительно
+  проверяет проксируемый путь. Отказ прямой проверки останавливает bootstrap до
+  hardening/firewall (см. [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md));
 - UFW не включён (`/etc/ufw/ufw.conf`: `ENABLED=no`), firewalld не активен и
   нет незаявленных публичных listeners, которые `base` отказался бы закрывать.
   Эти отказы — явный контракт, а не повод отключать чужую службу или
@@ -130,15 +134,20 @@ chrony/systemd-timesyncd и незаявленным listeners: отказ ос�
    root-доступ не закрывается. Если root уже закрыт, эта фаза пропускается; это
    не PASS, а rerun-путь.
 3. **Gate нового доступа**: отдельный процесс `ssh` с `-F /dev/null` предлагает
-   ровно объявленный ключ, проверяет host key, получает `id -un`/`id -u` и
-   выполняет `sudo -n true`. Успех `become` под root, локальный
+   ровно объявленный ключ, проверяет host key, получает `id -un`/`id -u` (`>= 1000`)
+   и выполняет `sudo -n true` **напрямую без прокси** (`bootstrap_direct_ssh_args`,
+   `ProxyJump=none`, `ProxyCommand=none`) на каждом хосте. Если в
+   `ansible_ssh_common_args` настроен прокси, вторым шагом дополнительно
+   проверяется проксируемый путь. Успех `become` под root, локальный
    `authorized_keys` или старая сессия доказательством не считаются. При отказе
-   root остаётся открыт, hardening и панель не применяются.
+   прямой (или настроенной проксируемой) проверки root остаётся открыт,
+   hardening и панель не применяются.
 4. **Hardening/firewall**: только после gate play подключается администратором
    (`BatchMode`, `IdentitiesOnly`, `PreferredAuthentications=publickey`) и
    применяет `base` с объявленными `base_ssh_*`/`base_firewall_*` контрактами.
-   Внутри роли пользователи/ключи/sudoers сходятся до SSH и firewall. Затем тот
-   же новый key-only gate повторяется уже под hardened-политикой.
+   Внутри роли пользователи/ключи/sudoers сходятся до SSH и firewall. Затем
+   прямой (и при наличии — проксируемый) key-only gate повторяется уже под
+   hardened-политикой.
 5. **Docker**: роль `docker` ставит закреплённые пакеты на все inventory-хосты.
 6. **Панель**: роль `remnawave_panel` применяется ровно на выбранном
    control-plane хосте (`exit` или dedicated `cp`). После запуска проверяются

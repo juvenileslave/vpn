@@ -105,6 +105,59 @@ class SshOptionsTest(unittest.TestCase):
         self.assertNotEqual(bootstrap.ssh_args_problems(42), [])
         self.assertNotEqual(bootstrap.ssh_args_problems("-o 'unterminated"), [])
 
+    def test_direct_ssh_args_leaves_non_proxy_options_unchanged(self):
+        self.assertEqual(bootstrap.direct_ssh_args(""), [])
+        self.assertEqual(bootstrap.direct_ssh_args(None), [])
+        value = (
+            "-o BatchMode=yes -o StrictHostKeyChecking=yes "
+            "-o UserKnownHostsFile=/tmp/known_hosts -o ConnectTimeout=10 "
+            "-i /tmp/admin_key"
+        )
+        self.assertEqual(bootstrap.direct_ssh_args(value), bootstrap.ssh_args(value))
+
+    def test_direct_ssh_args_strips_proxy_options_and_preserves_safe_options(self):
+        cases = (
+            (
+                "-o ProxyJump=ops@jump.example.com:2222 "
+                "-o UserKnownHostsFile=/tmp/known_hosts "
+                "-o StrictHostKeyChecking=yes -o ConnectTimeout=10",
+                ["-o", "UserKnownHostsFile=/tmp/known_hosts",
+                 "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10"],
+            ),
+            (
+                "-oProxyJump=ops@jump -J ops@jump2 -Jops@jump3 "
+                "-o ProxyUseFdpass=yes -o UserKnownHostsFile=/tmp/kh -i /tmp/key",
+                ["-o", "UserKnownHostsFile=/tmp/kh", "-i", "/tmp/key"],
+            ),
+            (
+                '-o "ProxyCommand=ssh -p 2200 jump nc %h %p" '
+                "-o UserKnownHostsFile=/tmp/kh -o ConnectTimeout=15",
+                ["-o", "UserKnownHostsFile=/tmp/kh", "-o", "ConnectTimeout=15"],
+            ),
+            (
+                '-o "ProxyCommand ssh -W %h:%p ops@jump" -o IdentitiesOnly=yes',
+                ["-o", "IdentitiesOnly=yes"],
+            ),
+            (
+                '-oProxyCommand="ssh -W %h:%p ops@jump" -o BatchMode=yes',
+                ["-o", "BatchMode=yes"],
+            ),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(bootstrap.direct_ssh_args(raw), expected)
+
+    def test_direct_ssh_args_fails_closed_on_ambiguous_or_malformed_input(self):
+        for bad in (
+            "-J", "-J -o ConnectTimeout=5", "-o", "-o -o ConnectTimeout=5",
+            "-4J ops@jump", "-4o ProxyJump=ops@jump", "-- -o ProxyJump=ops@jump",
+            "-o 'unterminated", 42,
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(bootstrap.AnsibleFilterError):
+                    bootstrap.direct_ssh_args(bad)
+                self.assertNotEqual(bootstrap.ssh_args_problems(bad), [])
+
 
 class ListenerTest(unittest.TestCase):
     def test_private_panel_is_accepted(self):

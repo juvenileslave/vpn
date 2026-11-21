@@ -4,7 +4,8 @@
 администратора к каждому объявленному узлу (`exit`, `relay`, `cp`) независимо
 от entrance (`relay`), приватного overlay и control plane (`cp`).
 
-- **Статус:** реализация базового hardening и документации (срез issue #75).
+- **Статус:** реализованы базовый SSH/firewall hardening, статический контракт
+  inventory, прямой gate в `bootstrap` и документация (срезы issue #75).
 - **Состояние инфраструктуры:** **VPN не развёрнут, production-хосты не
   изменялись.** Наличие этого документа, шаблонов и статических проверок не
   является runtime acceptance на рабочих серверах. Любые изменения на реальных
@@ -110,12 +111,19 @@ ssh -F /dev/null \
 - В репозитории нет переменной `relay_proxy_command` и нет жёсткой зависимости
   от `ProxyCommand`: прокси — **только опциональное удобство**, а не условие
   работы `base`, `bootstrap` или break-glass.
-- **Важно для `bootstrap.yml`:** если в приватном inventory задан
-  `ProxyJump`/`ProxyCommand` внутри `ansible_ssh_common_args`, gate в
-  `ansible/roles/bootstrap/tasks/verify.yml` подтверждает проксируемый путь, а
-  не независимый прямой вход. После bootstrap прямой break-glass путь к каждому
-  узлу проверяется отдельно командой выше с `ProxyJump=none` и
-  `ProxyCommand=none`.
+- **Статический контракт inventory (`validate_inventory.py`):** для каждого
+  объявленного хоста обязательны `base_ssh_port` (и равенство с `ansible_port`),
+  `base_ssh_permit_root_login: "no"`, непустой узкий `base_ssh_trusted_cidrs` и
+  отсутствие SSH-порта в `base_firewall_vpn_ports`/`base_firewall_source_ports`,
+  а в рабочем (non-example) inventory — `base_ssh_enabled: true`. Наличие
+  `relay_proxy_command` или `ProxyJump`/`ProxyCommand` не подменяет прямой
+  контракт.
+- **Прямой gate в `bootstrap.yml` (`roles/bootstrap/tasks/verify.yml`):** на
+  каждом хосте до и после hardening/firewall сначала выполняется независимая
+  прямая проверка без прокси (`bootstrap_direct_ssh_args` удаляет
+  `ProxyJump`/`ProxyCommand`/`-J`, передаются `ProxyJump=none`/`ProxyCommand=none`),
+  а при наличии прокси в `ansible_ssh_common_args` дополнительно проверяется
+  проксируемый путь. Отказ прямой проверки останавливает изменение.
 - При использовании `ProxyJump` через entrance учтите, что для прямого входа
   на `exit` и `cp` в `base_ssh_trusted_cidrs` обязан присутствовать реальный
   источник рабочей станции администратора, а не только адрес entrance.
@@ -274,11 +282,14 @@ sudo systemctl reload vpn-base-firewall.service
 
 - Статически и локально (без изменения хостов) проверяются: синтаксис
   playbook, unit-тесты фильтров и рендера `sshd-vpn-base.conf.j2` /
-  `firewall.nft.j2`, локальные отказы `base` на `localhost`, фильтры `bootstrap`,
-  валидация синтетического inventory и `make check`.
+  `firewall.nft.j2`, локальные отказы `base` на `localhost`, фильтры `bootstrap`
+  (включая fail-closed очистку прокси-аргументов `bootstrap_direct_ssh_args`),
+  статический SSH break-glass контракт в `validate_inventory.py` для каждого
+  объявленного узла и `make check`.
 - В CI на одноразовом GitHub-hosted Linux guest `ansible/roles/base/tests/runtime_vm.sh`
   проверяет один хост: key-only SSH по IPv4/IPv6, отказ без ключа, source ACL,
   сохранение существующего ключа и не-административного пользователя.
 - Многоузловой одноразовый тест с отключением entrance/overlay/CP и проверкой
   прямого SSH к каждому объявленному узлу выделен в следующий срез issue #75 и
-  в этом срезе ещё не выполнялся. На production-узлах проверки не проводились.
+  пока не реализован и не выполнялся. На production-узлах проверки и
+  развёртывание не проводились.
