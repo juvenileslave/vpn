@@ -850,6 +850,14 @@ class Inventory:
             cp_ov4 = peer_overlay_v4.get(cp_host) if fallback is True else None
             cp_pub4 = ip_or_none(cp_values["public_ipv4"][0]) if "public_ipv4" in cp_values and isinstance(cp_values["public_ipv4"][0], str) else None
             cp_pub6 = ip_or_none(cp_values["public_ipv6"][0]) if "public_ipv6" in cp_values and isinstance(cp_values["public_ipv6"][0], str) else None
+            allowed_nets = {
+                ipaddress.ip_network("127.0.0.1/32"),
+                ipaddress.ip_network("::1/128"),
+            }
+            if cp_ov6 is not None and cp_ov6.prefixlen == 128:
+                allowed_nets.add(cp_ov6)
+            if cp_ov4 is not None and cp_ov4.prefixlen == 32:
+                allowed_nets.add(cp_ov4)
             for node_group in NODE_GROUPS:
                 for node_host in self.groups[node_group]:
                     node_values = self.effective(node_group, node_host)
@@ -869,6 +877,16 @@ class Inventory:
                         self.error(f"{allow[1]}: dedicated CP node_port_allow must include CP overlay IPv6 address")
                     if fallback is True and cp_ov4 is not None and cp_ov4 not in allow_nets:
                         self.error(f"{allow[1]}: dedicated CP node_port_allow must include CP overlay IPv4 fallback address")
+                    if cp_ov6 is not None and (fallback is not True or cp_ov4 is not None):
+                        unexpected_nets = [
+                            str(net)
+                            for net in allow_nets
+                            if net not in allowed_nets
+                            and not (cp_pub4 is not None and net.version == 4 and cp_pub4 in net)
+                            and not (cp_pub6 is not None and net.version == 6 and cp_pub6 in net)
+                        ]
+                        if unexpected_nets:
+                            self.error(f"{allow[1]}: dedicated CP node_port_allow must only allow loopback and exact CP overlay addresses (unexpected: {', '.join(unexpected_nets)})")
                     if cp_pub4 is not None and any(net.version == 4 and cp_pub4 in net for net in allow_nets):
                         self.error(f"{allow[1]}: dedicated CP node_port_allow must use CP overlay addresses, not CP public IP")
                     if cp_pub6 is not None and any(net.version == 6 and cp_pub6 in net for net in allow_nets):

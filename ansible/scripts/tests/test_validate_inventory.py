@@ -582,6 +582,24 @@ class ValidateInventoryTest(unittest.TestCase):
         set_allow(["127.0.0.1/32", "::1/128", "fd00:db8:1::30/128"])
         self.assertInvalid("must include CP overlay IPv4 fallback address")
 
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.0/24", "10.250.0.30/32", "fd00:db8:1::30/128"])
+        self.assertInvalid("must only allow loopback and exact CP overlay addresses")
+
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.30/32", "fd00:db8:1::/64", "fd00:db8:1::30/128"])
+        self.assertInvalid("must only allow loopback and exact CP overlay addresses")
+
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.30/32", "fd00:db8:1::30/128", "10.250.0.20/32"])
+        self.assertInvalid("must only allow loopback and exact CP overlay addresses")
+
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.30/32", "fd00:db8:1::30/128", "fd00:db8:1::20/128"])
+        self.assertInvalid("must only allow loopback and exact CP overlay addresses")
+
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.30/32", "fd00:db8:1::30/128", "192.168.100.0/24"])
+        self.assertInvalid("must only allow loopback and exact CP overlay addresses")
+
+        set_allow(["127.0.0.1/32", "::1/128", "10.250.0.30/32", "fd00:db8:1::30/128", "198.51.100.10/32"])
+        self.assertInvalid("must only allow loopback and exact CP overlay addresses")
+
         set_allow(["10.250.0.30/32", "fd00:db8:1::30/128", "203.0.113.30/32"])
         self.assertInvalid("must use CP overlay addresses, not CP public IP")
 
