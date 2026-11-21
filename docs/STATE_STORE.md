@@ -7,8 +7,10 @@
 Это библиотека без собственной команды CLI. Пакет используют
 `vpnctl bot`, `probe ladder`, `diagnose`, `vpnctl metrics run`,
 `vpnctl alerts list|mute` и тесты; облачная оркестрация (в том числе смена IP)
-здесь не реализована. Версии конфигов апстримов из пункта 5.2 в эту поставку
-не входят. Семантика алертов — [METRICS_ALERTS.md](METRICS_ALERTS.md).
+здесь не реализована. Схема 5 добавляет метаданные версий конфигов апстримов и
+состояние слотов; загрузка источников, проверка кандидатов, публикация и откат в
+панели описаны в [UPSTREAM_PIPELINE.md](UPSTREAM_PIPELINE.md) и здесь не
+реализованы. Семантика алертов — [METRICS_ALERTS.md](METRICS_ALERTS.md).
 
 ## Драйвер и подключение
 
@@ -54,6 +56,18 @@ states, err := s.ListAlertStates(ctx)
 st, inserted, err := s.CommitAlertTransition(ctx, revision, next, outbox)
 mutes, err := s.ListAlertMutes(ctx)
 pending, expired, err := s.AlertOutboxStatus(ctx, now)
+
+v, err := s.CreateUpstreamVersion(ctx, store.UpstreamVersion{Slot: 1, ...}, now)
+v, err = s.GetUpstreamVersion(ctx, id)
+versions, err := s.ListUpstreamVersions(ctx, 1, 20)       // новее первыми
+active, err := s.ActiveUpstreamVersion(ctx, 1)
+active, prev, err := s.ActivateUpstreamVersion(ctx, id, now)
+failed, err := s.FailUpstreamVersion(ctx, id, "probe_failed", now)
+slot, err := s.UpstreamSlot(ctx, 1)
+slots, err := s.ListUpstreamSlots(ctx)
+slot, err = s.RecordUpstreamFailure(ctx, 1, "probe_failed", nextRun, now)
+err = s.ScheduleUpstreamSlot(ctx, 1, nextRun, now)
+v, err = s.RollbackUpstreamSlot(ctx, 1, now)
 ```
 
 Все чтения и записи принимают `context.Context`; отменённый контекст прерывает
@@ -181,7 +195,7 @@ pending ──► running ──► succeeded
 ## Схема и миграции
 
 Версия схемы хранится в `PRAGMA user_version`, принадлежность файла — в
-`PRAGMA application_id = 0x76706e63` (`vpnc`). Текущая версия — 4.
+`PRAGMA application_id = 0x76706e63` (`vpnc`). Текущая версия — 5.
 
 ```text
 probes(id INTEGER PK AUTOINCREMENT, target, stage, family, outcome,
@@ -206,6 +220,17 @@ alert_outbox(id INTEGER PK AUTOINCREMENT, rule, event, fingerprint,
   index alert_outbox_due(delivered_at, abandoned_at, next_attempt_at, id)
 alert_mutes(rule TEXT PK, until)                                     STRICT
 alert_runs(id INTEGER PK CHECK (id = 1), owner, expires_at)          STRICT
+upstream_versions(id TEXT PK, slot 1..63, seq >= 1,
+                  origin upstream|blackhole,
+                  state candidate|active|superseded|failed,
+                  payload_ref, payload_sha256, outbound_fingerprint,
+                  failure_code, created_at, activated_at, retired_at,
+                  UNIQUE (slot, seq))                              STRICT
+  unique index upstream_versions_active(slot) WHERE state = 'active'
+  index upstream_versions_latest(slot, seq DESC)
+upstream_slots(slot INTEGER PK 1..63, mode upstream|blackhole,
+               active_version_id, failure_count >= 0, next_run_at,
+               last_error_code, updated_at)                        STRICT
 ```
 
 Версия 2 добавляет `telegram_offsets` и `telegram_updates`; существующие базы
@@ -224,6 +249,37 @@ alert_runs(id INTEGER PK CHECK (id = 1), owner, expires_at)          STRICT
 `alerts.state_db`; alert-воркер использует только их. Семантика состояний,
 очереди и блокировок описана в [METRICS_ALERTS.md](METRICS_ALERTS.md).
 
+Версия 5 только создаёт `upstream_versions` и `upstream_slots`; строки и схема
+версий 1–4 не меняются. Версия хранит идентификатор, слот, монотонный `seq`,
+origin (`upstream` или `blackhole`), состояние, ссылку на зашифрованный payload,
+SHA-256 ciphertext, отпечаток outbound-JSON, код ошибки и временные метки.
+`upstream_slots` хранит режим слота, активную версию, счётчик неудач, время
+следующего запуска и последний код ошибки. Слот 0 (direct exit) отклоняется:
+для него нет upstream-версии. Частичный уникальный индекс допускает ровно одну
+активную версию на слот, `UNIQUE (slot, seq)` — одну последовательность.
+
+`CreateUpstreamVersion` назначает случайный 32-hex ID и `seq = max(seq) + 1`
+слота в одной транзакции `BEGIN IMMEDIATE`; новая версия получает состояние
+`candidate`. `ActivateUpstreamVersion` переводит только `candidate` в `active`,
+предыдущую активную — в `superseded` с `retired_at` и сбрасывает счётчики
+неудач; `FailUpstreamVersion` переводит только `candidate` в `failed`.
+`RollbackUpstreamSlot` возвращает активной последнюю `superseded`-версию с
+`origin = 'upstream'`; blackhole-версия не восстанавливается. Ошибки
+недопустимого перехода — `ErrInvalidTransition`, отсутствующая версия —
+`ErrNotFound`.
+
+Payload в SQLite не попадает: хранятся только `payload_ref`, `payload_sha256`
+(ciphertext) и `outbound_fingerprint` (SHA-256 outbound-JSON). Сам payload
+лежит в отдельном каталоге оператора: каталог `0700`, файлы `0600`,
+шифрование age X25519. Без identity чтение завершается ошибкой, plaintext на
+диск не пишется; URL подписки, содержимое/путь WireGuard, учётные данные
+прокси и outbound-JSON в базе отсутствуют.
+
+`RecordUpstreamFailure` создаёт отсутствующий слот в `blackhole` и увеличивает
+`failure_count`; существующий слот сохраняет режим и активную версию.
+`ScheduleUpstreamSlot` меняет только `next_run_at`. Межпроцессный single-flight
+и история проверок кандидатов в версию 5 не входят.
+
 Столбцы дополнительно ограничены `CHECK` (допустимые значения и длины).
 
 - Каждая миграция и запись новой `user_version` выполняются в одной транзакции:
@@ -234,7 +290,7 @@ alert_runs(id INTEGER PK CHECK (id = 1), owner, expires_at)          STRICT
 - База с версией новее поддерживаемой отклоняется (`ErrUnsupportedSchema`) без
   изменений: откат бинарника не может открыть базу, обновлённую новой версией.
 
-Откат к бинарнику до версии 4 не понижает базу: старый бинарник отклонит её как
+Откат к бинарнику до версии 5 не понижает базу: старый бинарник отклонит её как
 `ErrUnsupportedSchema`. Сохраняйте probe-записи, alert-состояние и совместимый
 reader либо закрытую pre-upgrade backup отдельно; автоматического удаления
 новых столбцов или данных нет. Revert PR кода не является downgrade внешнего
@@ -289,14 +345,17 @@ SQLite-файла.
 Тесты используют настоящие временные базы SQLite в `t.TempDir()` — без моков и
 без проверок текста SQL — и покрывают: сохранение после закрытия и повторного
 открытия, изоляцию баз, порядок и лимиты проб, отсутствующие ID, откат
-неудачной миграции, миграции 1 → 2 → 3 → 4 с сохранением строк, scoped
+неудачной миграции, миграции 1 → 2 → 3 → 4 → 5 с сохранением строк, scoped
 identities и отклонение устаревшей ревизии, конкурирующих писателей (одна
 успешная запись), неизменность терминальных состояний, монотонность bot offset,
 одновременный claim одного `update_id` (ровно один победитель), retention
 обработанных ID, переходы и ревизии alert-состояния, дедупликацию outbox,
 порядок выдачи, claim/backoff/abandon/expiry, mute и run lock, посторонние и
 повреждённые файлы, сохранение чужих `-wal`/`-shm`/`-journal` при неудачном
-открытии (в том числе с отменённым контекстом), инъекцию параметров через путь.
+открытии (в том числе с отменённым контекстом), инъекцию параметров через путь,
+версии и слоты апстримов: монотонный `seq`, одну активную версию, переходы
+`candidate → active|failed`, откат к предыдущей upstream-версии, сохранение
+режима слота при неудаче, валидацию и повреждённые строки.
 
 ```sh
 cd vpnctl
