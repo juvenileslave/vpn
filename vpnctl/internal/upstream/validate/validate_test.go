@@ -103,14 +103,56 @@ func TestValidateRejectsBadInputs(t *testing.T) {
 }
 
 func TestValidateTimeout(t *testing.T) {
-	path := fakeXray(t, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.9.0'; exit 0; fi\nsleep 5\nexit 0\n")
-	v, err := New(Options{XrayPath: path, Timeout: 100 * time.Millisecond})
+	t.Setenv("TMPDIR", t.TempDir())
+	path := fakeXray(t, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.9.0'; exit 0; fi\nexec sleep 5\n")
+	v, err := New(Options{XrayPath: path, Timeout: 300 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	err = v.Validate(context.Background(), 1, json.RawMessage(`{"protocol":"vless"}`))
 	if !errors.Is(err, ErrRejected) || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("timeout error = %v", err)
+	}
+}
+
+func TestValidateZeroValue(t *testing.T) {
+	var v Xray
+	if err := v.Validate(context.Background(), 1, json.RawMessage(`{}`)); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("zero value error = %v, want ErrInvalidOptions", err)
+	}
+}
+
+func TestValidateRejectsMalformedAndOversizedJSON(t *testing.T) {
+	path := fakeXray(t, "#!/bin/sh\necho 'Xray 26.9.0'\n")
+	v, err := New(Options{XrayPath: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, raw := range []string{`{"bad":}`, `{"x":1} trailing`} {
+		if err := v.Validate(context.Background(), 1, json.RawMessage(raw)); !errors.Is(err, ErrConfig) {
+			t.Fatalf("malformed %q error = %v, want ErrConfig", raw, err)
+		}
+	}
+	oversized := json.RawMessage(`{"x":"` + strings.Repeat("a", maxOutbound) + `"}`)
+	if err := v.Validate(context.Background(), 1, oversized); !errors.Is(err, ErrConfig) {
+		t.Fatalf("oversized error = %v, want ErrConfig", err)
+	}
+}
+
+func TestValidateDoesNotLeakStderrOrConfig(t *testing.T) {
+	path := fakeXray(t, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.9.0'; exit 0; fi\necho \"LEAKMARKER $3\" >&2\nexit 1\n")
+	v, err := New(Options{XrayPath: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = v.Validate(context.Background(), 1, json.RawMessage(`{"protocol":"vless","settings":{"id":"SECRETMARKER"}}`))
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("error = %v, want ErrRejected", err)
+	}
+	for _, leak := range []string{"LEAKMARKER", "SECRETMARKER", os.TempDir()} {
+		if strings.Contains(err.Error(), leak) {
+			t.Fatalf("error leaked %q: %v", leak, err)
+		}
 	}
 }
 

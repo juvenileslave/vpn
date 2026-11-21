@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/juvenileslave/vpn/vpnctl/internal/upstream/candidate"
@@ -30,6 +33,7 @@ var (
 	ErrRequest        = errors.New("fetch: subscription request failed")
 	ErrResponse       = errors.New("fetch: subscription response rejected")
 	ErrWireguardFile  = errors.New("fetch: wireguard file rejected")
+	errBlockedDest    = errors.New("fetch: destination address is not allowed")
 )
 
 // Options configures a Fetcher.
@@ -47,27 +51,46 @@ type Fetcher struct {
 
 // New validates options and returns a Fetcher.
 func New(opts Options) (*Fetcher, error) {
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
 	client := opts.Client
 	if client == nil {
-		timeout := opts.Timeout
-		if timeout <= 0 {
-			timeout = DefaultTimeout
+		// An explicit transport with Proxy: nil ignores HTTP_PROXY/HTTPS_PROXY
+		// from the environment, so credentials cannot be routed to an
+		// unexpected proxy. safeDialContext rejects loopback, private,
+		// link-local, multicast and documentation destinations at dial time,
+		// which also covers DNS rebinding.
+		client = &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				Proxy:                 nil,
+				DialContext:           safeDialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          4,
+				IdleConnTimeout:       30 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: timeout,
+			},
 		}
-		client = &http.Client{Timeout: timeout}
 	} else {
 		cloned := *client
 		client = &cloned
 	}
-	if client.CheckRedirect == nil {
-		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme != "https" {
-				return fmt.Errorf("%w: redirect to non-https", ErrResponse)
-			}
-			if len(via) >= 3 {
-				return fmt.Errorf("%w: too many redirects", ErrResponse)
-			}
-			return nil
+	if client.Timeout <= 0 {
+		client.Timeout = timeout
+	}
+	// Enforce the redirect policy even for a caller-supplied client: a
+	// redirect must not downgrade to HTTP, carry userinfo or exceed 3 hops.
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" || req.URL.Host == "" || req.URL.User != nil {
+			return fmt.Errorf("%w: redirect destination rejected", ErrResponse)
 		}
+		if len(via) >= 3 {
+			return fmt.Errorf("%w: too many redirects", ErrResponse)
+		}
+		return nil
 	}
 	return &Fetcher{client: client}, nil
 }
@@ -139,10 +162,89 @@ func (f *Fetcher) fetchSubscription(ctx context.Context, locator, tag string) ([
 	return candidate.ParseSubscription(body, tag)
 }
 
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, errBlockedDest
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, errBlockedDest
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	var lastErr error
+	for _, ip := range ips {
+		if blockedIP(ip.IP) {
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errBlockedDest
+}
+
+var blockedPrefixes = func() []netip.Prefix {
+	raw := []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+		"192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+		"224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "100::/64",
+		"2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+	}
+	out := make([]netip.Prefix, 0, len(raw))
+	for _, s := range raw {
+		p, err := netip.ParsePrefix(s)
+		if err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}()
+
+func blockedIP(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, p := range blockedPrefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *Fetcher) fetchWireguard(path, tag string) (candidate.Candidate, error) {
-	info, err := os.Lstat(path)
+	early, err := os.Lstat(path)
 	if err != nil {
 		return candidate.Candidate{}, fmt.Errorf("%w: file is inaccessible", ErrWireguardFile)
+	}
+	if !early.Mode().IsRegular() || early.Mode()&os.ModeSymlink != 0 {
+		return candidate.Candidate{}, fmt.Errorf("%w: file must be a regular non-symlink file", ErrWireguardFile)
+	}
+	fh, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return candidate.Candidate{}, fmt.Errorf("%w: file is inaccessible", ErrWireguardFile)
+	}
+	defer func() { _ = fh.Close() }()
+
+	// Validate the opened file and the path entry together so a swap between
+	// Lstat and Open (including replacing the file with a symlink) is caught.
+	info, err := fh.Stat()
+	if err != nil {
+		return candidate.Candidate{}, fmt.Errorf("%w: file is inaccessible", ErrWireguardFile)
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, pathInfo) {
+		return candidate.Candidate{}, fmt.Errorf("%w: file changed while reading", ErrWireguardFile)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return candidate.Candidate{}, fmt.Errorf("%w: file must be a regular non-symlink file", ErrWireguardFile)
@@ -153,11 +255,6 @@ func (f *Fetcher) fetchWireguard(path, tag string) (candidate.Candidate, error) 
 	if info.Size() > MaxWireguardBytes {
 		return candidate.Candidate{}, fmt.Errorf("%w: file exceeds %d bytes", ErrWireguardFile, MaxWireguardBytes)
 	}
-	fh, err := os.Open(path)
-	if err != nil {
-		return candidate.Candidate{}, fmt.Errorf("%w: file is inaccessible", ErrWireguardFile)
-	}
-	defer func() { _ = fh.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(fh, MaxWireguardBytes+1))
 	if err != nil {

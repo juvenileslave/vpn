@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +42,9 @@ type Xray struct {
 	xrayPath string
 	version  string
 	timeout  time.Duration
+
+	versionMu sync.Mutex
+	versionOK bool
 }
 
 // New validates options without executing Xray.
@@ -64,7 +69,7 @@ func New(opts Options) (*Xray, error) {
 // Validate writes the outbound to a 0600 temporary config and runs
 // `xray -test -c <config>`. Errors never include the config or its path.
 func (v *Xray) Validate(ctx context.Context, slot int, outbound json.RawMessage) error {
-	if v == nil {
+	if v == nil || v.xrayPath == "" || v.timeout <= 0 {
 		return ErrInvalidOptions
 	}
 	if ctx == nil {
@@ -123,14 +128,71 @@ func (v *Xray) Validate(ctx context.Context, slot int, outbound json.RawMessage)
 }
 
 func (v *Xray) checkVersion(ctx context.Context) error {
-	checkCtx, cancel := context.WithTimeout(ctx, versionTimeout)
+	v.versionMu.Lock()
+	defer v.versionMu.Unlock()
+	if v.versionOK {
+		return nil
+	}
+	timeout := versionTimeout
+	if v.timeout < timeout {
+		timeout = v.timeout
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, err := exec.CommandContext(checkCtx, v.xrayPath, "-version").CombinedOutput()
-	if err != nil {
+
+	var out limitedBuffer
+	out.limit = 4096
+	cmd := exec.CommandContext(checkCtx, v.xrayPath, "-version")
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("%w: version check failed", ErrCore)
 	}
-	if v.version != "" && !strings.HasPrefix(strings.TrimSpace(string(out)), v.version) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	got := strings.TrimSpace(out.String())
+	if v.version != "" && !hasVersionPrefix(got, v.version) {
 		return fmt.Errorf("%w: version does not match the pinned prefix", ErrCore)
 	}
+	v.versionOK = true
 	return nil
+}
+
+type limitedBuffer struct {
+	b     strings.Builder
+	limit int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit - b.b.Len()
+	if remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	b.b.Write(p)
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string { return b.b.String() }
+
+func hasVersionPrefix(got, prefix string) bool {
+	if !strings.HasPrefix(got, prefix) {
+		return false
+	}
+	if len(got) == len(prefix) {
+		return true
+	}
+	switch got[len(prefix)] {
+	case ' ', '\t', '\n', '(', ',':
+		return true
+	default:
+		return false
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -227,5 +228,45 @@ func TestFetchInvalidInputs(t *testing.T) {
 	}
 	if _, _, err := f.Fetch(nil, source.Source{}, "upstream-slot-1"); !errors.Is(err, ErrInvalidOptions) {
 		t.Fatalf("nil context error = %v, want ErrInvalidOptions", err)
+	}
+}
+
+func TestBlockedIP(t *testing.T) {
+	blocked := []string{"127.0.0.1", "10.1.2.3", "169.254.169.254", "192.168.1.1", "100.64.0.1", "0.0.0.0", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1", "ff02::1", "2001:db8::1"}
+	for _, raw := range blocked {
+		if !blockedIP(net.ParseIP(raw)) {
+			t.Fatalf("blockedIP(%s) = false", raw)
+		}
+	}
+	allowed := []string{"1.1.1.1", "8.8.8.8", "2001:4860:4860::8888"}
+	for _, raw := range allowed {
+		if blockedIP(net.ParseIP(raw)) {
+			t.Fatalf("blockedIP(%s) = true", raw)
+		}
+	}
+}
+
+func TestSafeDialContextBlocksLoopback(t *testing.T) {
+	if _, err := safeDialContext(context.Background(), "tcp", "127.0.0.1:443"); !errors.Is(err, errBlockedDest) {
+		t.Fatalf("safeDialContext error = %v, want errBlockedDest", err)
+	}
+}
+
+func TestFetchRejectsRedirectWithUserinfo(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://user:pass@example.com/sub", http.StatusFound)
+	}))
+	defer server.Close()
+	decl := subscriptionDeclaration(t, server.URL+"/sub/SECRETTOKEN")
+	f, err := New(Options{Client: server.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _, err = f.Fetch(context.Background(), decl.Sources[0], "upstream-slot-1")
+	if !errors.Is(err, ErrResponse) {
+		t.Fatalf("error = %v, want ErrResponse", err)
+	}
+	if strings.Contains(err.Error(), "SECRETTOKEN") || strings.Contains(err.Error(), "user:pass") {
+		t.Fatalf("error leaked credentials: %v", err)
 	}
 }
