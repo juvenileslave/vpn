@@ -466,6 +466,10 @@ class Inventory:
                 self.error(f"{ap_origin}: must be an integer port 1-65535")
             elif ssh_port is not None and ap_value != ssh_port:
                 self.error(f"{ap_origin}: ansible_port must equal base_ssh_port")
+        elif ssh_port is not None and ssh_port != 22:
+            self.error(
+                f"{where}: ansible_port is required and must equal base_ssh_port when base_ssh_port != 22"
+            )
 
         root_login = values.get("base_ssh_permit_root_login")
         if root_login is None:
@@ -498,23 +502,35 @@ class Inventory:
                         self.error(f"{origin}[{index}]: duplicate CIDR")
                     seen.add(normalized)
 
-        if ssh_port is not None:
-            public = values.get("base_firewall_vpn_ports")
-            if public is not None and isinstance(public[0], list):
-                for index, item in enumerate(public[0]):
-                    if isinstance(item, dict) and item.get("proto") == "tcp" and item.get("port") == ssh_port:
-                        self.error(
-                            f"{public[1]}[{index}]: base_ssh_port must not be declared as a public "
-                            "base_firewall_vpn_ports listener"
-                        )
-            source_ports = values.get("base_firewall_source_ports")
-            if source_ports is not None and isinstance(source_ports[0], list):
-                for index, item in enumerate(source_ports[0]):
-                    if isinstance(item, dict) and item.get("proto") == "tcp" and item.get("port") == ssh_port:
-                        self.error(
-                            f"{source_ports[1]}[{index}]: base_ssh_port is governed only by "
-                            "base_ssh_trusted_cidrs, not base_firewall_source_ports"
-                        )
+        for var_name, ssh_msg in (
+            (
+                "base_firewall_vpn_ports",
+                "base_ssh_port must not be declared as a public base_firewall_vpn_ports listener",
+            ),
+            (
+                "base_firewall_source_ports",
+                "base_ssh_port is governed only by base_ssh_trusted_cidrs, not base_firewall_source_ports",
+            ),
+        ):
+            entry = values.get(var_name)
+            if entry is None:
+                continue
+            rules, origin = entry
+            if not isinstance(rules, list):
+                self.error(f"{origin}: must be a list")
+                continue
+            for index, item in enumerate(rules):
+                if not isinstance(item, dict):
+                    self.error(f"{origin}[{index}]: expected a mapping with proto and port")
+                    continue
+                proto = item.get("proto")
+                port = item.get("port")
+                if not isinstance(proto, str) or proto not in ("tcp", "udp"):
+                    self.error(f"{origin}[{index}].proto: must be 'tcp' or 'udp'")
+                if type(port) is not int or not 1 <= port <= 65535:
+                    self.error(f"{origin}[{index}].port: must be an integer port 1-65535")
+                elif ssh_port is not None and proto == "tcp" and port == ssh_port:
+                    self.error(f"{origin}[{index}]: {ssh_msg}")
 
     def validate_management(self, group: str, host: str, values: dict[str, Located]) -> None:
         where = f"host {host}"

@@ -103,9 +103,12 @@
   ansible.builtin.stat:
     path: "{{ item }}"
     follow: true
-  loop: "{{ (base_sshd_before.stdout | vpn_base_sshd_effective).get('hostkey', []) }}"
+  loop: "{{ (base_sshd_before.stdout | default('') | vpn_base_sshd_effective).get('hostkey', []) }}"
   register: base_sshd_hostkeys
-  when: base_sshd_before is not skipped
+  when:
+    - base_sshd_before is not skipped
+    - item is string
+    - item is regex('^/')
 
 - name: Refuse missing or empty sshd host keys
   ansible.builtin.assert:

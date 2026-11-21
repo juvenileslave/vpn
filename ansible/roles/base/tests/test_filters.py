@@ -10,6 +10,7 @@ import struct
 import unittest
 
 import jinja2
+import yaml
 
 PLUGIN = Path(__file__).resolve().parents[1] / "filter_plugins" / "vpn_base.py"
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -171,6 +172,20 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(parsed["authenticationmethods"], ["publickey"])
         self.assertEqual(parsed["hostkey"],
                          ["/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_rsa_key"])
+        self.assertEqual(vpn_base.sshd_effective(""), {})
+        self.assertEqual(vpn_base.sshd_effective(None), {})
+        spaced = vpn_base.sshd_effective("hostkey /etc/ssh/host keys/ssh_host_ed25519_key\n")
+        self.assertEqual(spaced["hostkey"], ["/etc/ssh/host keys/ssh_host_ed25519_key"])
+
+    def test_preflight_hostkey_loop_handles_skipped_sshd_before(self):
+        preflight = Path(__file__).resolve().parents[1] / "tasks" / "preflight.yml"
+        tasks = yaml.safe_load(preflight.read_text(encoding="utf-8"))
+        task = next(item for item in tasks if item.get("name") == "Inspect effective sshd host key files")
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["vpn_base_sshd_effective"] = vpn_base.sshd_effective
+        rendered = env.from_string(task["loop"]).render(base_sshd_before={"skipped": True})
+        self.assertEqual(rendered, "[]")
+        self.assertIn("item is regex('^/')", task["when"])
 
 
 class InputTest(unittest.TestCase):

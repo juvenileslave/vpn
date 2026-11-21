@@ -112,7 +112,8 @@ ssh -F /dev/null \
   от `ProxyCommand`: прокси — **только опциональное удобство**, а не условие
   работы `base`, `bootstrap` или break-glass.
 - **Статический контракт inventory (`validate_inventory.py`):** для каждого
-  объявленного хоста обязательны `base_ssh_port` (и равенство с `ansible_port`),
+  объявленного хоста обязательны `base_ssh_port` (при `base_ssh_port != 22`
+  обязателен и `ansible_port`, и они должны совпадать),
   `base_ssh_permit_root_login: "no"`, непустой узкий `base_ssh_trusted_cidrs` и
   отсутствие SSH-порта в `base_firewall_vpn_ports`/`base_firewall_source_ports`,
   а в рабочем (non-example) inventory — `base_ssh_enabled: true`. Наличие
@@ -249,7 +250,7 @@ firewall):
 
 ```sh
 # Если ранее существовал рабочий drop-in — вернуть его; иначе удалить новый.
-if [ -f /root/vpn-base-rollback/00-vpn-base.conf ]; then
+if sudo test -f /root/vpn-base-rollback/00-vpn-base.conf; then
   sudo install -o root -g root -m 0644 \
     /root/vpn-base-rollback/00-vpn-base.conf /etc/ssh/sshd_config.d/00-vpn-base.conf
 else

@@ -532,6 +532,12 @@ class ValidateInventoryTest(unittest.TestCase):
         self.all_vars["ansible_port"] = "22"
         self.assertInvalid("must be an integer port 1-65535")
         del self.all_vars["ansible_port"]
+        self.all_vars["base_ssh_port"] = 2222
+        self.assertInvalid("ansible_port is required and must equal base_ssh_port")
+        self.all_vars["ansible_port"] = 2222
+        self.assertEqual(self.errors(), [])
+        del self.all_vars["ansible_port"]
+        self.all_vars["base_ssh_port"] = 22
         for bad_port in ("22", True, 0, 65536):
             with self.subTest(port=bad_port):
                 self.all_vars["base_ssh_port"] = bad_port
@@ -558,6 +564,17 @@ class ValidateInventoryTest(unittest.TestCase):
             ],
         }}
         self.assertInvalid("governed only by base_ssh_trusted_cidrs")
+        for bad_rules, fragment in (
+            ([{"proto": "tcp", "port": "22"}], "must be an integer port 1-65535"),
+            (["tcp/22"], "expected a mapping with proto and port"),
+            ([{"proto": "TCP", "port": 22}], "must be 'tcp' or 'udp'"),
+            ("tcp/22", "must be a list"),
+        ):
+            with self.subTest(bad_rules=bad_rules):
+                self.host_vars = {"cp-a": {"base_firewall_vpn_ports": bad_rules}}
+                self.assertInvalid(fragment)
+                self.host_vars = {"cp-a": {"base_firewall_source_ports": bad_rules}}
+                self.assertInvalid(fragment)
 
     def test_proxy_variables_do_not_satisfy_direct_ssh_contract(self) -> None:
         self.all_vars["relay_proxy_command"] = "ssh -W %h:%p 198.51.100.20"

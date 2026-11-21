@@ -137,9 +137,9 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
 Контракт прямого аварийного SSH-доступа (break-glass), проверяемый
 `validate_inventory.py` для **каждого** объявленного хоста (`exit`, `relay`, `cp`):
 
-- `base_ssh_port`: явное целое `1–65535`; при наличии `ansible_port` они обязаны
-  совпадать. Порт SSH запрещено объявлять в `base_firewall_vpn_ports` или
-  `base_firewall_source_ports`.
+- `base_ssh_port`: явное целое `1–65535`; при `base_ssh_port != 22` обязателен
+  `ansible_port`, и они обязаны совпадать. Порт SSH запрещено объявлять в
+  `base_firewall_vpn_ports` или `base_firewall_source_ports`.
 - `base_ssh_permit_root_login`: обязательно `"no"`.
 - `base_ssh_trusted_cidrs`: непустой список узких CIDR без повторов по единому
   валидатору роли `base` (`ssh_cidr_error`: не шире `/24` IPv4 и `/64` IPv6, без

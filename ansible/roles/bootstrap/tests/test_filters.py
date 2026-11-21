@@ -85,14 +85,20 @@ class SshOptionsTest(unittest.TestCase):
             "-o UserKnownHostsFile=/dev/null",
             "-o UserKnownHostsFile=none",
             "-o GlobalKnownHostsFile=/dev/null",
+            "-o GlobalKnownHostsFile=none",
             '-o "PasswordAuthentication yes"',
             "-o PreferredAuthentications=password,publickey",
             "-i /tmp/other_key",
+            "-4i /tmp/other_key",
             "-o IdentityFile=/tmp/other_key",
+            '-o "IdentityFile /tmp/key=1"',
             "-F /tmp/ssh_config",
+            "-4F /tmp/ssh_config",
             "-p 2222",
             "-p2222",
+            "-4p 2222",
             "-l root",
+            "-4l root",
             "-o User=root",
             "-o Port=2222",
             "-o Hostname=evil.example.com",
@@ -139,17 +145,35 @@ class SshOptionsTest(unittest.TestCase):
                 ["-o", "IdentitiesOnly=yes"],
             ),
             (
+                '-o "ProxyCommand ssh -o StrictHostKeyChecking=yes -W %h:%p ops@jump" '
+                "-o BatchMode=yes",
+                ["-o", "BatchMode=yes"],
+            ),
+            (
                 '-oProxyCommand="ssh -W %h:%p ops@jump" -o BatchMode=yes',
                 ["-o", "BatchMode=yes"],
+            ),
+            (
+                '-o "ProxyJump none" -o "ProxyCommand none" '
+                '-o PROXYJUMP=ops@jump -o "proxycommand ssh -W %h:%p ops@jump" '
+                "-o ConnectTimeout=10",
+                ["-o", "ConnectTimeout=10"],
             ),
         )
         for raw, expected in cases:
             with self.subTest(raw=raw):
                 self.assertEqual(bootstrap.direct_ssh_args(raw), expected)
+        self.assertEqual(
+            bootstrap.ssh_args_problems(
+                '-o "ProxyCommand ssh -o StrictHostKeyChecking=yes -W %h:%p ops@jump"'
+            ),
+            [],
+        )
 
     def test_direct_ssh_args_fails_closed_on_ambiguous_or_malformed_input(self):
         for bad in (
             "-J", "-J -o ConnectTimeout=5", "-o", "-o -o ConnectTimeout=5",
+            "-Jo host", "evil.example.com", "--proxy=jump", "-o =value", "-o=value", "-b",
             "-4J ops@jump", "-4o ProxyJump=ops@jump", "-- -o ProxyJump=ops@jump",
             "-o 'unterminated", 42,
         ):
