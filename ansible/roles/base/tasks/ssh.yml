@@ -24,11 +24,17 @@
     base_sshd_effective: "{{ base_sshd_after.stdout | vpn_base_sshd_effective }}"
   ansible.builtin.assert:
     that:
-      - base_sshd_effective.pubkeyauthentication == ['yes']
-      - base_sshd_effective.passwordauthentication == ['no']
-      - base_sshd_effective.kbdinteractiveauthentication == ['no']
-      - base_sshd_effective.permitemptypasswords == ['no']
-      - base_sshd_effective.permitrootlogin == [base_ssh_permit_root_login | replace('prohibit-password', 'without-password')]
+      - base_sshd_effective.get('pubkeyauthentication') == ['yes']
+      - base_sshd_effective.get('authenticationmethods') == ['publickey']
+      - base_sshd_effective.get('passwordauthentication') == ['no']
+      - base_sshd_effective.get('kbdinteractiveauthentication') == ['no']
+      - base_sshd_effective.get('permitemptypasswords') == ['no']
+      - base_sshd_effective.get('hostbasedauthentication') == ['no']
+      - base_sshd_effective.get('permitrootlogin') == ['no']
+      - base_sshd_effective.get('maxauthtries') == [base_ssh_max_auth_tries | string]
+      - base_sshd_effective.get('logingracetime') == [base_ssh_login_grace_time | string]
+      - base_sshd_effective.get('x11forwarding') == ['no']
+      - base_sshd_effective.get('permituserenvironment') == ['no']
     fail_msg: >-
       Действующая конфигурация sshd не соответствует политике (другой файл задаёт значения
       раньше 00-vpn-base.conf). sshd не перезагружен; исправьте конфликт вручную.

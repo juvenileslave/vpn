@@ -20,6 +20,8 @@
         'base_ssh_enabled': base_ssh_enabled,
         'base_ssh_port': base_ssh_port,
         'base_ssh_permit_root_login': base_ssh_permit_root_login,
+        'base_ssh_max_auth_tries': base_ssh_max_auth_tries,
+        'base_ssh_login_grace_time': base_ssh_login_grace_time,
         'base_ssh_trusted_cidrs': base_ssh_trusted_cidrs,
         'base_firewall_enabled': base_firewall_enabled,
         'base_firewall_vpn_ports': base_firewall_vpn_ports,

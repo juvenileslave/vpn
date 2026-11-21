@@ -134,6 +134,23 @@ Exit: `exit_direct_port`, `transit_port`. Relay: `relay_slot_ports` с одни�
 - SSH, API, direct/transit/relay и cover listener ports не пересекаются. Origin
   host-loopback не имеет ни public, ни source-exposed alternate port.
 
+Контракт прямого аварийного SSH-доступа (break-glass), проверяемый
+`validate_inventory.py` для **каждого** объявленного хоста (`exit`, `relay`, `cp`):
+
+- `base_ssh_port`: явное целое `1–65535`; при `base_ssh_port != 22` обязателен
+  `ansible_port`, и они обязаны совпадать. Порт SSH запрещено объявлять в
+  `base_firewall_vpn_ports` или `base_firewall_source_ports`.
+- `base_ssh_permit_root_login`: обязательно `"no"`.
+- `base_ssh_trusted_cidrs`: непустой список узких CIDR без повторов по единому
+  валидатору роли `base` (`ssh_cidr_error`: не шире `/24` IPv4 и `/64` IPv6, без
+  loopback, `0.0.0.0/0` и `::/0`).
+- `base_ssh_enabled`: обязателен и равен `true` в рабочем (non-example)
+  inventory; синтетический `ansible/inventories/example/` остаётся без
+  администраторских ключей и `base_ssh_enabled`.
+- Переменные прокси (`relay_proxy_command`, `ProxyJump`/`ProxyCommand` в
+  `ansible_ssh_common_args`) не считаются authority и не заменяют прямой
+  контракт. Подробно — [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md).
+
 См. [BASE_ROLE.md](BASE_ROLE.md), [COVER_SITE.md](COVER_SITE.md),
 [REMNAWAVE_NODE.md](REMNAWAVE_NODE.md). Node source ACL проверяется **live** до
 старта wildcard API; Docker host network не является firewall restriction.

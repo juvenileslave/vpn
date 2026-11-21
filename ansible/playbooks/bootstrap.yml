@@ -85,6 +85,7 @@
     - name: Record the pre-hardening administrator gate
       ansible.builtin.set_fact:
         bootstrap_admin_verified: true
+        bootstrap_admin_direct_verified: true
 
 - name: Apply SSH hardening and the firewall through the administrator
   hosts: all
@@ -119,6 +120,7 @@
     - name: Record the post-hardening administrator gate
       ansible.builtin.set_fact:
         bootstrap_admin_verified_after_hardening: true
+        bootstrap_admin_direct_verified_after_hardening: true
 
 - name: Install Docker Engine and Compose on every inventory host
   hosts: all

@@ -44,9 +44,17 @@ profiles, метрики, бота, DNS или публичный HTTPS.
   примите host key отдельной проверенной командой (`ssh-keyscan` — только
   синтетический стенд);
 - gate использует `ssh -F /dev/null`: `ansible_host` должен разрешаться без
-  `Host`-алиасов из `~/.ssh/config`, а `ProxyJump`/`ProxyCommand` и
+  `Host`-алиасов из `~/.ssh/config`, а опциональные `ProxyJump`/`ProxyCommand` и
   `UserKnownHostsFile` задаются в `ansible_ssh_common_args`. Иначе gate честно
-  откажет, а не будет угадывать адрес;
+  откажет, а не будет угадывать адрес. `ProxyJump`/`ProxyCommand`/`-J` — только
+  необязательное удобство обычного пути через entrance и не могут подменять
+  break-glass: gate в `roles/bootstrap/tasks/verify.yml` **всегда** выполняет
+  независимую прямую проверку без прокси (`bootstrap_direct_ssh_args` удаляет
+  `ProxyJump`/`ProxyCommand`/`-J` и передаёт `ProxyJump=none`/`ProxyCommand=none`,
+  сохраняя проверку host key; при неоднозначных флагах проверка отказывает
+  fail-closed), а при наличии прокси в `ansible_ssh_common_args` дополнительно
+  проверяет проксируемый путь. Отказ прямой проверки останавливает bootstrap до
+  hardening/firewall (см. [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md));
 - UFW не включён (`/etc/ufw/ufw.conf`: `ENABLED=no`), firewalld не активен и
   нет незаявленных публичных listeners, которые `base` отказался бы закрывать.
   Эти отказы — явный контракт, а не повод отключать чужую службу или
@@ -81,8 +89,8 @@ connection-переменные inventory (`ansible_ssh_private_key_file` или
 | `base_ssh_enabled` | Обязательно `true`: иначе bootstrap не применял бы hardening. |
 | `base_firewall_enabled` | Обязательно `true`. |
 | `base_ssh_permit_root_login` | Обязательно `no`: повторный запуск идёт администратором, root обратно не включается. |
-| `base_ssh_trusted_cidrs` | Непустой список безопасных CIDR по контракту `base`; текущий SSH-клиент проверяется ролью до firewall. |
-| `base_ssh_port` | Должен совпадать с `ansible_port` (по умолчанию 22); роль не меняет порт sshd. |
+| `base_ssh_trusted_cidrs` | Непустой список узких CIDR администратора по контракту `base` (не шире `/24` IPv4 и `/64` IPv6, без loopback); текущий SSH-клиент проверяется ролью до firewall. |
+| `base_ssh_port` | Должен совпадать с `ansible_port` (по умолчанию 22); роль не меняет порт sshd и в preflight проверяет наличие непустых файлов host key. |
 | `cp_placement` | `dedicated` (один отдельный cp-хост) или `exit` (панель на exit, cp-группа пуста); ровно один `exit` и один `relay`, хост не в двух группах. |
 | `image_tags.remnawave_panel`, `image_tags.postgres`, `image_tags.valkey` | Точные пины по контракту роли панели; `latest` и отсутствие пина отклоняются до изменений. |
 | `panel_bind` / `panel_port` | Только loopback-адрес; порт не должен совпадать с 5432, 6379 или SSH-портом. |
@@ -126,15 +134,20 @@ chrony/systemd-timesyncd и незаявленным listeners: отказ ос�
    root-доступ не закрывается. Если root уже закрыт, эта фаза пропускается; это
    не PASS, а rerun-путь.
 3. **Gate нового доступа**: отдельный процесс `ssh` с `-F /dev/null` предлагает
-   ровно объявленный ключ, проверяет host key, получает `id -un`/`id -u` и
-   выполняет `sudo -n true`. Успех `become` под root, локальный
+   ровно объявленный ключ, проверяет host key, получает `id -un`/`id -u` (`>= 1000`)
+   и выполняет `sudo -n true` **напрямую без прокси** (`bootstrap_direct_ssh_args`,
+   `ProxyJump=none`, `ProxyCommand=none`) на каждом хосте. Если в
+   `ansible_ssh_common_args` настроен прокси, вторым шагом дополнительно
+   проверяется проксируемый путь. Успех `become` под root, локальный
    `authorized_keys` или старая сессия доказательством не считаются. При отказе
-   root остаётся открыт, hardening и панель не применяются.
+   прямой (или настроенной проксируемой) проверки root остаётся открыт,
+   hardening и панель не применяются.
 4. **Hardening/firewall**: только после gate play подключается администратором
    (`BatchMode`, `IdentitiesOnly`, `PreferredAuthentications=publickey`) и
    применяет `base` с объявленными `base_ssh_*`/`base_firewall_*` контрактами.
-   Внутри роли пользователи/ключи/sudoers сходятся до SSH и firewall. Затем тот
-   же новый key-only gate повторяется уже под hardened-политикой.
+   Внутри роли пользователи/ключи/sudoers сходятся до SSH и firewall. Затем
+   прямой (и при наличии — проксируемый) key-only gate повторяется уже под
+   hardened-политикой.
 5. **Docker**: роль `docker` ставит закреплённые пакеты на все inventory-хосты.
 6. **Панель**: роль `remnawave_panel` применяется ровно на выбранном
    control-plane хосте (`exit` или dedicated `cp`). После запуска проверяются
@@ -254,8 +267,9 @@ root-password bootstrap; отказ нового admin key/sudo оставляе
   **без `-v`**, чтобы сохранить тома. Секреты и пины возвращаются revert-PR и
   повторным запуском.
 - SSH/firewall: контракт и ручной откат описаны в
-  [BASE_ROLE.md](BASE_ROLE.md). Не удаляйте sudoers/ключи администратора, пока
-  нет другого проверенного способа входа; root-доступ восстанавливается
-  отдельно и осознанно.
+  [BASE_ROLE.md](BASE_ROLE.md) и [SSH_BREAK_GLASS.md](SSH_BREAK_GLASS.md). Не
+  удаляйте sudoers/ключи администратора, пока нет другого проверенного способа
+  входа; root-доступ восстанавливается отдельно и осознанно только при
+  аварийном восстановлении.
 - Для реального пилота нужен отдельно одобренный план восстановления; эта
   задача не развёртывает и не откатывает production.
