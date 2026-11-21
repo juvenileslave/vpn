@@ -266,6 +266,17 @@ class ValidateInventoryTest(unittest.TestCase):
         self.group_vars["relay"]["relay_egress_ipv4"] = "198.51.100.99"
         self.assertInvalid("transit source ACL")
 
+    def test_exit_transit_port_cannot_be_public(self) -> None:
+        transit = self.group_vars["exit"]["transit_port"]
+        self.group_vars["exit"]["base_firewall_source_ports"] = [
+            rule for rule in self.group_vars["exit"]["base_firewall_source_ports"]
+            if rule["port"] != transit
+        ]
+        self.group_vars["exit"]["base_firewall_vpn_ports"].append(
+            {"proto": "tcp", "port": transit}
+        )
+        self.assertInvalid("transit_port")
+
     def test_normalized_transit_ipv6_identity(self) -> None:
         self.group_vars["relay"]["relay_egress_ipv6"] = "2001:0db8:0020:0000:0000:0000:0000:0020"
         rule = self.group_vars["exit"]["base_firewall_source_ports"][0]
