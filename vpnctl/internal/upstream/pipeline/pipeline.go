@@ -155,6 +155,7 @@ type probeJob struct {
 	sourceIdx int
 	cand      candidate.Candidate
 	probes    []selector.Probe
+	err       error
 }
 
 type blackholeOutbound struct {
@@ -200,6 +201,9 @@ func (p *Pipeline) Refresh(ctx context.Context, decl *source.Declaration, slot i
 	var fetchErrs int
 	var lastFetchErr error
 	for _, src := range sources {
+		if err := ctx.Err(); err != nil {
+			return p.recordPreActivationFailure(ctx, res, "fetch_canceled", err)
+		}
 		cands, rejects, err := p.fetcher.Fetch(ctx, src, tag)
 		res.Rejects += len(rejects)
 		if err != nil {
@@ -214,6 +218,9 @@ func (p *Pipeline) Refresh(ctx context.Context, decl *source.Declaration, slot i
 		})
 	}
 
+	if err := ctx.Err(); err != nil {
+		return p.recordPreActivationFailure(ctx, res, "fetch_canceled", err)
+	}
 	if len(fetched) == 0 && fetchErrs > 0 {
 		return p.recordPreActivationFailure(ctx, res, "fetch_failed", lastFetchErr)
 	}
@@ -231,9 +238,18 @@ func (p *Pipeline) Refresh(ctx context.Context, decl *source.Declaration, slot i
 	}
 
 	if len(jobs) > 0 {
-		p.probeAll(ctx, jobs)
+		failed, lastErr := p.probeAll(ctx, jobs)
 		if err := ctx.Err(); err != nil {
 			return p.recordPreActivationFailure(ctx, res, "probe_canceled", err)
+		}
+		if failed == len(jobs) {
+			// A systemic prober failure (missing pinned core, unusable temp
+			// dir, version mismatch) must not be treated as "no healthy
+			// candidates": keep the previous active version and record it.
+			if lastErr == nil {
+				lastErr = errors.New("all candidate probes failed")
+			}
+			return p.recordPreActivationFailure(ctx, res, "probe_failed", lastErr)
 		}
 	}
 
@@ -296,7 +312,7 @@ func (p *Pipeline) releaseSlot(slot int) {
 	p.mu.Unlock()
 }
 
-func (p *Pipeline) probeAll(ctx context.Context, jobs []probeJob) {
+func (p *Pipeline) probeAll(ctx context.Context, jobs []probeJob) (int, error) {
 	workers := p.concurrency
 	if workers > len(jobs) {
 		workers = len(jobs)
@@ -319,6 +335,7 @@ func (p *Pipeline) probeAll(ctx context.Context, jobs []probeJob) {
 				}
 				probes, err := p.prober.Probe(ctx, jobs[idx].cand)
 				if err != nil {
+					jobs[idx].err = err
 					continue
 				}
 				jobs[idx].probes = probes
@@ -326,6 +343,16 @@ func (p *Pipeline) probeAll(ctx context.Context, jobs []probeJob) {
 		}()
 	}
 	wg.Wait()
+
+	failed := 0
+	var lastErr error
+	for i := range jobs {
+		if jobs[i].err != nil {
+			failed++
+			lastErr = jobs[i].err
+		}
+	}
+	return failed, lastErr
 }
 
 func (p *Pipeline) activateUpstream(ctx context.Context, res Result, tag string, cand candidate.Candidate) (Result, error) {
@@ -423,12 +450,17 @@ func (p *Pipeline) failVersion(
 	cause error,
 ) (Result, error) {
 	code = sanitizeFailureCode(code)
-	cctx := cleanupContext(ctx)
+	cctx, cancel := cleanupContext(ctx)
+	defer cancel()
 
 	_ = p.store.FailUpstreamVersion(cctx, versionID, code, p.now())
 
 	if published {
 		res.RolledBack = p.restorePrevious(cctx, res.Slot, versionID, tag, hasPrev, prev)
+		if !res.RolledBack {
+			code = code + "_rollback_failed"
+			res.Reason = code
+		}
 	}
 
 	return p.recordPreActivationFailure(cctx, res, code, cause)
@@ -470,7 +502,13 @@ func (p *Pipeline) restorePrevious(
 		SHA256: prev.PayloadSHA256,
 	})
 	if err != nil {
-		return false
+		// The previous payload is unreadable; never leave the slot on the
+		// failed outbound. Restore the fail-closed blackhole instead.
+		bhBytes, mErr := marshalBlackholeOutbound(tag)
+		if mErr != nil {
+			return false
+		}
+		return p.publisher.Restore(ctx, slot, "", json.RawMessage(bhBytes)) == nil
 	}
 
 	if err := p.publisher.Restore(ctx, slot, prev.ID, json.RawMessage(prevBytes)); err != nil {
@@ -491,7 +529,8 @@ func (p *Pipeline) restorePrevious(
 
 func (p *Pipeline) recordPreActivationFailure(ctx context.Context, res Result, code string, cause error) (Result, error) {
 	code = sanitizeFailureCode(code)
-	cctx := cleanupContext(ctx)
+	cctx, cancel := cleanupContext(ctx)
+	defer cancel()
 	_, _ = p.store.RecordUpstreamFailure(cctx, res.Slot, code, time.Time{}, p.now())
 	res.Active = false
 	res.Reason = code
@@ -613,11 +652,10 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func cleanupContext(ctx context.Context) context.Context {
-	if ctx.Err() == nil {
-		return ctx
-	}
-	return context.WithoutCancel(ctx)
+const cleanupTimeout = 15 * time.Second
+
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 }
 
 func isValidFailureCode(code string) bool {

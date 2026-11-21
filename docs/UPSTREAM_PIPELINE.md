@@ -34,7 +34,9 @@ flowchart LR
 upstream-версии запрещены. Каждый цикл создаёт новую версию; в SQLite активна
 ровно одна версия на слот. Кандидат, прошедший порог проб и фильтр источника,
 становится `upstream`-версией; если healthy-кандидатов нет — активируется
-статический `blackhole` для этого слота. Падения на публикации, read-back,
+статический `blackhole` для этого слота. Если все пробы завершились системной
+ошибкой prober (ядро, временный каталог, версия), цикл завершается
+`probe_failed` и не затирает предыдущую активную версию. Падения на публикации, read-back,
 проверке или активации откатывают слот к предыдущей активной версии (или к
 `blackhole`, если предыдущей нет). Свободный egress (freedom) не используется
 как fallback.
@@ -117,7 +119,10 @@ last_error_code).
   `failed` с ограниченным кодом (`publish_failed`, `readback_mismatch`,
   `verify_failed`, `activate_failed`, `fetch_failed`, `probe_canceled`,
   `validate_failed`, `payload_put_failed`, `create_version_failed`,
-  `active_lookup_failed`, `invalid_outbound`, `internal_error`).
+  `active_lookup_failed`, `invalid_outbound`, `fetch_canceled`, `probe_canceled`,
+`probe_failed`, `internal_error`). Если откат после начала публикации не удался,
+результат и ошибка получают суффикс `_rollback_failed`, а версия сохраняет
+базовый код отказа.
 - Read-back сравнивается с опубликованным outbound по SHA-256; расхождение —
   отказ и откат. `Verify` вызывается только для `upstream`-версии: у
   `blackhole` нет туннеля для сквозной проверки.
@@ -145,17 +150,21 @@ type Publisher interface {
 Production-реализации, не требующие панели: `fetch.Fetcher` (HTTPS-подписка
 или WireGuard-файл), `prober.Prober` (временный Xray на 127.0.0.1,
 HTTP-proxy inbound, allowlist только probe/IP/geo доменов, block для private,
-loopback, link-local и всего остального; внешний IP и страна записываются в
-наблюдение пробы, если заданы соответствующие HTTPS-эндпоинты) и `validate.Xray` (`xray -test`).
+loopback, link-local, IPv4-mapped IPv6 и всего остального; blackhole — первый
+outbound, HTTP-proxy inbound защищён случайными credentials, внешний IP и страна
+записываются в наблюдение пробы, если заданы соответствующие HTTPS-эндпоинты) и `validate.Xray` (`xray -test`).
 `Publisher` в этом срезе существует только как интерфейс и fake в тестах.
 
 `Pipeline.Refresh` выполняет: fetch включённых источников слота (ошибка одного
-источника не отбрасывает кандидатов других; если отказали все — `fetch_failed`)
+источника не отбрасывает кандидатов других; если отказали все — `fetch_failed`;
+отмена контекста между источниками — `fetch_canceled`)
 → bounded-параллельные пробы (по умолчанию 4, максимум 16) → отбор → запись
 payload → `Validate` → создание версии → `Publish` → `ReadBack` → `Verify` →
 `Activate`. Любая ошибка после начала публикации вызывает `Restore`
-предыдущей версии или blackhole. Single-flight — только внутри процесса и
-только на слот (`ErrInProgress`); межпроцессная координация не реализована.
+предыдущей версии или blackhole; если payload предыдущей версии недоступен,
+публикатор откатывается на blackhole, а несогласованность строки store
+фиксируется как отказ и устраняется следующим успешным refresh. Single-flight —
+только внутри процесса и только на слот (`ErrInProgress`); межпроцессная координация не реализована.
 
 ## CLI
 

@@ -586,3 +586,134 @@ sources:
 		t.Fatalf("active origin = %s, want blackhole", active.Origin)
 	}
 }
+
+func TestRefreshFailsClosedWhenAllProbesError(t *testing.T) {
+	f := newFixture(t)
+	bad := cand(strings.Repeat("2", 64), `{"protocol":"vless","tag":"upstream-slot-1"}`)
+	f.fetcher.replies["sub-a"] = fetchReply{cands: []candidate.Candidate{bad}}
+	f.prober.errs[bad.ID] = errors.New("prober: pinned xray is unusable")
+	p := f.pipeline(t)
+
+	res, err := p.Refresh(context.Background(), f.decl, 1)
+	if err == nil || !strings.Contains(err.Error(), "probe_failed") {
+		t.Fatalf("Refresh error = %v, want probe_failed", err)
+	}
+	if res.VersionID != "" || res.Reason != "probe_failed" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if len(f.publisher.publishes) != 0 || f.publisher.verifies != 0 {
+		t.Fatalf("publisher used after systemic probe failure: %+v", f.publisher)
+	}
+	slot, err := f.store.UpstreamSlot(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("UpstreamSlot: %v", err)
+	}
+	if slot.Mode != "blackhole" || slot.FailureCount != 1 || slot.LastErrorCode != "probe_failed" {
+		t.Fatalf("slot = %+v", slot)
+	}
+}
+
+func TestRefreshKeepsHealthyCandidateWhenOneProbeErrors(t *testing.T) {
+	f := newFixture(t)
+	bad := cand(strings.Repeat("3", 64), `{"protocol":"vless","tag":"upstream-slot-1"}`)
+	good := cand(strings.Repeat("4", 64), `{"protocol":"vless","tag":"upstream-slot-1"}`)
+	f.fetcher.replies["sub-a"] = fetchReply{cands: []candidate.Candidate{bad, good}}
+	f.prober.errs[bad.ID] = errors.New("probe crashed")
+	f.prober.probes[good.ID] = success(10 * time.Millisecond)
+	p := f.pipeline(t)
+
+	res, err := p.Refresh(context.Background(), f.decl, 1)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !res.Active || res.VersionID == "" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestRefreshRestoresBlackholeWhenPreviousPayloadIsUnreadable(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	prev, err := f.store.CreateUpstreamVersion(ctx, store.UpstreamVersion{
+		Slot:                1,
+		Origin:              "upstream",
+		PayloadRef:          strings.Repeat("c", 32),
+		PayloadSHA256:       strings.Repeat("d", 64),
+		OutboundFingerprint: strings.Repeat("e", 64),
+	}, f.now)
+	if err != nil {
+		t.Fatalf("CreateUpstreamVersion: %v", err)
+	}
+	if _, _, err := f.store.ActivateUpstreamVersion(ctx, prev.ID, f.now); err != nil {
+		t.Fatalf("ActivateUpstreamVersion: %v", err)
+	}
+
+	next := cand(strings.Repeat("5", 64), `{"protocol":"vless","tag":"upstream-slot-1"}`)
+	f.fetcher.replies["sub-a"] = fetchReply{cands: []candidate.Candidate{next}}
+	f.prober.probes[next.ID] = success(10 * time.Millisecond)
+	f.publisher.readBack = []byte(`{"protocol":"blackhole","tag":"upstream-slot-1"}`)
+	p := f.pipeline(t)
+
+	res, err := p.Refresh(ctx, f.decl, 1)
+	if err == nil || !strings.Contains(err.Error(), "readback_mismatch") {
+		t.Fatalf("Refresh error = %v", err)
+	}
+	if !res.RolledBack {
+		t.Fatalf("RolledBack = false, result %+v", res)
+	}
+	if len(f.publisher.restores) != 1 {
+		t.Fatalf("restores = %+v", f.publisher.restores)
+	}
+	restore := f.publisher.restores[0]
+	want := `{"protocol":"blackhole","tag":"upstream-slot-1"}`
+	if restore.versionID != "" || string(restore.outbound) != want {
+		t.Fatalf("restore = %+v", restore)
+	}
+}
+
+func TestRefreshReportsRollbackFailure(t *testing.T) {
+	f := newFixture(t)
+	good := cand(strings.Repeat("6", 64), `{"protocol":"vless","tag":"upstream-slot-1"}`)
+	f.fetcher.replies["sub-a"] = fetchReply{cands: []candidate.Candidate{good}}
+	f.prober.probes[good.ID] = success(10 * time.Millisecond)
+	f.publisher.publishErr = errors.New("panel unavailable")
+	f.publisher.restoreErr = errors.New("restore unavailable")
+	p := f.pipeline(t)
+
+	res, err := p.Refresh(context.Background(), f.decl, 1)
+	if err == nil || !strings.Contains(err.Error(), "publish_failed_rollback_failed") {
+		t.Fatalf("Refresh error = %v, want publish_failed_rollback_failed", err)
+	}
+	if res.RolledBack || res.Reason != "publish_failed_rollback_failed" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	failed, err := f.store.GetUpstreamVersion(context.Background(), res.VersionID)
+	if err != nil {
+		t.Fatalf("GetUpstreamVersion: %v", err)
+	}
+	if failed.FailureCode != "publish_failed" {
+		t.Fatalf("stored failure code = %q", failed.FailureCode)
+	}
+}
+
+func TestRefreshFailsAndRestoresOnVerifyError(t *testing.T) {
+	f := newFixture(t)
+	good := cand(strings.Repeat("7", 64), `{"protocol":"vless","tag":"upstream-slot-1"}`)
+	f.fetcher.replies["sub-a"] = fetchReply{cands: []candidate.Candidate{good}}
+	f.prober.probes[good.ID] = success(10 * time.Millisecond)
+	f.publisher.verifyErr = errors.New("e2e failed")
+	p := f.pipeline(t)
+
+	res, err := p.Refresh(context.Background(), f.decl, 1)
+	if err == nil || !strings.Contains(err.Error(), "verify_failed") {
+		t.Fatalf("Refresh error = %v, want verify_failed", err)
+	}
+	if !res.RolledBack || len(f.publisher.restores) != 1 {
+		t.Fatalf("rollback not attempted: %+v restores=%+v", res, f.publisher.restores)
+	}
+	want := `{"protocol":"blackhole","tag":"upstream-slot-1"}`
+	if string(f.publisher.restores[0].outbound) != want {
+		t.Fatalf("restore = %+v", f.publisher.restores[0])
+	}
+}

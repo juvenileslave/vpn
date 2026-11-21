@@ -37,6 +37,7 @@ func TestNewValidation(t *testing.T) {
 }
 
 func TestValidateAcceptsConfig(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	logPath := filepath.Join(t.TempDir(), "args.log")
 	path := fakeXray(t, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.9.0'; exit 0; fi\nprintf '%s\\n' \"$*\" >> "+logPath+"\nexit 0\n")
 	v, err := New(Options{XrayPath: path, VersionPrefix: "Xray 26.9.0"})

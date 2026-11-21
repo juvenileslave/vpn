@@ -77,7 +77,8 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 	raw, err := buildConfig(23456, outbound, "upstream-slot-3",
 		mustURL(t, "https://probe.example/generate_204"),
 		mustURL(t, "https://ip.example/ip"),
-		mustURL(t, "https://geo.example/country"))
+		mustURL(t, "https://geo.example/country"),
+		account{User: "u", Pass: "p"})
 	if err != nil {
 		t.Fatalf("buildConfig: %v", err)
 	}
@@ -85,10 +86,11 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 	var cfg struct {
 		Log      map[string]string `json:"log"`
 		Inbounds []struct {
-			Listen   string `json:"listen"`
-			Port     int    `json:"port"`
-			Protocol string `json:"protocol"`
-			Tag      string `json:"tag"`
+			Listen   string         `json:"listen"`
+			Port     int            `json:"port"`
+			Protocol string         `json:"protocol"`
+			Settings map[string]any `json:"settings"`
+			Tag      string         `json:"tag"`
 		} `json:"inbounds"`
 		Outbounds []map[string]any `json:"outbounds"`
 		Routing   struct {
@@ -97,6 +99,7 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 				Type        string   `json:"type"`
 				Domain      []string `json:"domain"`
 				IP          []string `json:"ip"`
+				Network     string   `json:"network"`
 				OutboundTag string   `json:"outboundTag"`
 			} `json:"rules"`
 		} `json:"routing"`
@@ -110,7 +113,11 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 	if len(cfg.Inbounds) != 1 || cfg.Inbounds[0].Listen != "127.0.0.1" || cfg.Inbounds[0].Port != 23456 || cfg.Inbounds[0].Protocol != "http" {
 		t.Fatalf("inbound = %+v", cfg.Inbounds)
 	}
-	if len(cfg.Outbounds) != 2 || cfg.Outbounds[0]["tag"] != "upstream-slot-3" || cfg.Outbounds[1]["protocol"] != "blackhole" {
+	auth, _ := json.Marshal(cfg.Inbounds[0].Settings)
+	if !strings.Contains(string(auth), `"auth":"password"`) || !strings.Contains(string(auth), `"user":"u"`) {
+		t.Fatalf("inbound auth = %s", auth)
+	}
+	if len(cfg.Outbounds) != 2 || cfg.Outbounds[0]["protocol"] != "blackhole" || cfg.Outbounds[1]["tag"] != "upstream-slot-3" {
 		t.Fatalf("outbounds = %+v", cfg.Outbounds)
 	}
 	rules := cfg.Routing.Rules
@@ -124,7 +131,7 @@ func TestBuildConfigRestrictsRouting(t *testing.T) {
 	if rules[1].OutboundTag != "blocked" || !contains(rules[1].IP, "127.0.0.0/8") || !contains(rules[1].IP, "fc00::/7") {
 		t.Fatalf("private block rule = %+v", rules[1])
 	}
-	if rules[2].OutboundTag != "blocked" || len(rules[2].Domain) != 0 || len(rules[2].IP) != 0 {
+	if rules[2].OutboundTag != "blocked" || rules[2].Network != "tcp,udp" || len(rules[2].Domain) != 0 || len(rules[2].IP) != 0 {
 		t.Fatalf("final block rule = %+v", rules[2])
 	}
 }
@@ -141,16 +148,16 @@ func contains(values []string, want string) bool {
 func TestBuildConfigRejectsBadInputs(t *testing.T) {
 	outbound := json.RawMessage(`{"protocol":"vless","tag":"upstream-slot-1"}`)
 	probe := mustURL(t, "https://probe.example/generate_204")
-	if _, err := buildConfig(0, outbound, "upstream-slot-1", probe, nil, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(0, outbound, "upstream-slot-1", probe, nil, nil, account{}); !errors.Is(err, ErrConfig) {
 		t.Fatalf("port error = %v", err)
 	}
-	if _, err := buildConfig(1000, outbound, "bad tag", probe, nil, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(1000, outbound, "bad tag", probe, nil, nil, account{}); !errors.Is(err, ErrConfig) {
 		t.Fatalf("tag error = %v", err)
 	}
-	if _, err := buildConfig(1000, outbound, "blocked", probe, nil, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(1000, outbound, "blocked", probe, nil, nil, account{}); !errors.Is(err, ErrConfig) {
 		t.Fatalf("reserved tag error = %v", err)
 	}
-	if _, err := buildConfig(1000, json.RawMessage(`[]`), "upstream-slot-1", probe, nil, nil); !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(1000, json.RawMessage(`[]`), "upstream-slot-1", probe, nil, nil, account{}); !errors.Is(err, ErrConfig) {
 		t.Fatalf("array outbound error = %v", err)
 	}
 }
@@ -176,6 +183,15 @@ func TestObserveIP(t *testing.T) {
 	if got := p.observeIP(context.Background(), server.Client()); got != "203.0.113.7" {
 		t.Fatalf("observeIP = %q", got)
 	}
+	longIP := "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+	serverV6 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(longIP + "\n"))
+	}))
+	defer serverV6.Close()
+	p.ipURL = mustURL(t, serverV6.URL+"/ip")
+	if got := p.observeIP(context.Background(), serverV6.Client()); got != longIP {
+		t.Fatalf("observeIP(v6) = %q", got)
+	}
 	bad := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("<html>not an IP</html>"))
 	}))
@@ -183,6 +199,33 @@ func TestObserveIP(t *testing.T) {
 	p.ipURL = mustURL(t, bad.URL+"/ip")
 	if got := p.observeIP(context.Background(), bad.Client()); got != "" {
 		t.Fatalf("observeIP(bad) = %q, want empty", got)
+	}
+}
+
+func TestCheckVersionIsCached(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "calls.log")
+	path := fakeXray(t, "#!/bin/sh\nprintf 'call\\n' >> "+logPath+"\necho 'Xray 26.9.0'\n")
+	p := &Prober{xrayPath: path, startTimeout: defaultStartTimeout, version: "Xray 26.9.0"}
+	for range 2 {
+		if err := p.checkVersion(context.Background()); err != nil {
+			t.Fatalf("checkVersion: %v", err)
+		}
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read calls: %v", err)
+	}
+	if strings.Count(string(data), "call") != 1 {
+		t.Fatalf("version check executions = %d, want 1", strings.Count(string(data), "call"))
+	}
+}
+
+func TestHasVersionPrefix(t *testing.T) {
+	if !hasVersionPrefix("Xray 26.9.0 (Xray, Penetrates Everything.)", "Xray 26.9.0") {
+		t.Fatal("valid version rejected")
+	}
+	if hasVersionPrefix("Xray 26.90.0", "Xray 26.9") {
+		t.Fatal("prefix matched inside a longer token")
 	}
 }
 
@@ -196,17 +239,20 @@ func TestCheckVersion(t *testing.T) {
 		t.Fatalf("matching version: %v", err)
 	}
 	p.version = "Xray 25."
+	p.versionOK = false
 	if err := p.checkVersion(context.Background()); !errors.Is(err, ErrCore) {
 		t.Fatalf("mismatched version error = %v, want ErrCore", err)
 	}
 	p.xrayPath = fakeXray(t, "#!/bin/sh\nexit 7\n")
 	p.version = ""
+	p.versionOK = false
 	if err := p.checkVersion(context.Background()); !errors.Is(err, ErrCore) {
 		t.Fatalf("failing version error = %v, want ErrCore", err)
 	}
 }
 
 func TestProbeFailsWhenCoreExits(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	path := fakeXray(t, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.9.0'; exit 0; fi\nexit 1\n")
 	p, err := New(Options{XrayPath: path, ProbeURL: "https://probe.example/generate_204", Samples: 1, StartTimeout: 2 * time.Second})
 	if err != nil {
@@ -240,7 +286,7 @@ func TestProbeHonorsCanceledContext(t *testing.T) {
 
 func TestPrivateRangesCoverLoopbackAndLinkLocal(t *testing.T) {
 	ranges := strings.Join(privateRanges(), ",")
-	for _, want := range []string{"127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/10"} {
+	for _, want := range []string{"127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/10", "::ffff:0:0/96", "ff00::/8"} {
 		if !strings.Contains(ranges, want) {
 			t.Fatalf("private ranges missing %s", want)
 		}

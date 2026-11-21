@@ -6,6 +6,8 @@ package prober
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juvenileslave/vpn/vpnctl/internal/upstream/candidate"
@@ -30,7 +33,9 @@ const (
 	maxSamples          = 5
 	defaultStartTimeout = 5 * time.Second
 	maxCountryBody      = 32
+	maxIPBody           = 64
 	maxTagLen           = 63
+	versionTimeout      = 5 * time.Second
 )
 
 var (
@@ -62,6 +67,9 @@ type Prober struct {
 	samples      int
 	startTimeout time.Duration
 	version      string
+
+	versionMu sync.Mutex
+	versionOK bool
 }
 
 // New validates options. It does not execute Xray; the pinned version check
@@ -156,7 +164,11 @@ func (p *Prober) Probe(ctx context.Context, cand candidate.Candidate) ([]selecto
 	if err != nil {
 		return nil, fmt.Errorf("%w: no local port", ErrStart)
 	}
-	config, err := buildConfig(port, outbound, tag, p.probeURL, p.ipURL, p.geoURL)
+	creds, err := newCredentials()
+	if err != nil {
+		return nil, fmt.Errorf("%w: proxy credentials failed", ErrStart)
+	}
+	config, err := buildConfig(port, outbound, tag, p.probeURL, p.ipURL, p.geoURL, creds)
 	if err != nil {
 		return nil, err
 	}
@@ -188,9 +200,8 @@ func (p *Prober) Probe(ctx context.Context, cand candidate.Candidate) ([]selecto
 		close(waitCh)
 	}()
 	defer func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		// CommandContext kills the process when cancel is called; an extra
+		// Process.Kill here would race with Wait and could target a reused PID.
 		cancel()
 		<-waitCh
 	}()
@@ -199,9 +210,16 @@ func (p *Prober) Probe(ctx context.Context, cand candidate.Candidate) ([]selecto
 		return nil, err
 	}
 
-	proxyURL := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	proxyURL := &url.URL{
+		Scheme: "http",
+		User:   url.UserPassword(creds.User, creds.Pass),
+		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+	}
 	client := &http.Client{
 		Timeout: p.timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			Proxy:             http.ProxyURL(proxyURL),
 			DisableKeepAlives: true,
@@ -210,11 +228,22 @@ func (p *Prober) Probe(ctx context.Context, cand candidate.Candidate) ([]selecto
 	defer client.CloseIdleConnections()
 
 	probes := make([]selector.Probe, 0, p.samples)
+	successes := 0
 	for range p.samples {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		probes = append(probes, p.sample(ctx, client))
+		probe := p.sample(ctx, client)
+		if probe.Outcome == "success" {
+			successes++
+		}
+		probes = append(probes, probe)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if successes == 0 {
+		return probes, nil
 	}
 
 	country := ""
@@ -245,7 +274,7 @@ func (p *Prober) sample(ctx context.Context, client *http.Client) selector.Probe
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return selector.Probe{Outcome: "failure", Latency: latency}
 	}
 	return selector.Probe{Outcome: "success", Latency: latency}
@@ -288,8 +317,8 @@ func (p *Prober) observeIP(ctx context.Context, client *http.Client) string {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ""
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCountryBody+1))
-	if err != nil || len(body) > maxCountryBody {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxIPBody+1))
+	if err != nil || len(body) > maxIPBody {
 		return ""
 	}
 	raw := strings.TrimSpace(string(body))
@@ -308,16 +337,44 @@ func outcomeFor(err error) string {
 }
 
 func (p *Prober) checkVersion(ctx context.Context) error {
-	checkCtx, cancel := context.WithTimeout(ctx, p.startTimeout)
+	p.versionMu.Lock()
+	defer p.versionMu.Unlock()
+	if p.versionOK {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, versionTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(checkCtx, p.xrayPath, "-version").CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("%w: version check failed", ErrCore)
 	}
-	if p.version != "" && !strings.HasPrefix(strings.TrimSpace(string(out)), p.version) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	got := strings.TrimSpace(string(out))
+	if p.version != "" && !hasVersionPrefix(got, p.version) {
 		return fmt.Errorf("%w: version does not match the pinned prefix", ErrCore)
 	}
+	p.versionOK = true
 	return nil
+}
+
+func hasVersionPrefix(got, prefix string) bool {
+	if !strings.HasPrefix(got, prefix) {
+		return false
+	}
+	if len(got) == len(prefix) {
+		return true
+	}
+	switch got[len(prefix)] {
+	case ' ', '\t', '\n', '(', ',':
+		return true
+	default:
+		return false
+	}
 }
 
 func waitReady(ctx context.Context, port int, timeout time.Duration, waitCh <-chan error) error {
@@ -335,7 +392,8 @@ func waitReady(ctx context.Context, port int, timeout time.Duration, waitCh <-ch
 		case <-deadline.C:
 			return fmt.Errorf("%w: readiness timeout", ErrStart)
 		case <-ticker.C:
-			conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+			dialer := &net.Dialer{Timeout: 250 * time.Millisecond}
+			conn, err := dialer.DialContext(ctx, "tcp", addr)
 			if err == nil {
 				_ = conn.Close()
 				return nil
@@ -394,10 +452,16 @@ type inbound struct {
 	Tag      string         `json:"tag"`
 }
 
+type account struct {
+	User string `json:"user"`
+	Pass string `json:"pass"`
+}
+
 type routingRule struct {
 	Type        string   `json:"type"`
 	Domain      []string `json:"domain,omitempty"`
 	IP          []string `json:"ip,omitempty"`
+	Network     string   `json:"network,omitempty"`
 	OutboundTag string   `json:"outboundTag"`
 }
 
@@ -413,7 +477,7 @@ type config struct {
 	Routing   routing           `json:"routing"`
 }
 
-func buildConfig(port int, outbound json.RawMessage, tag string, probeURL, ipURL, geoURL *url.URL) ([]byte, error) {
+func buildConfig(port int, outbound json.RawMessage, tag string, probeURL, ipURL, geoURL *url.URL, creds account) ([]byte, error) {
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("%w: invalid proxy port", ErrConfig)
 	}
@@ -451,16 +515,21 @@ func buildConfig(port int, outbound json.RawMessage, tag string, probeURL, ipURL
 			Listen:   "127.0.0.1",
 			Port:     port,
 			Protocol: "http",
-			Settings: map[string]any{},
-			Tag:      "probe-in",
+			Settings: map[string]any{
+				"auth":     "password",
+				"accounts": []account{creds},
+			},
+			Tag: "probe-in",
 		}},
-		Outbounds: []json.RawMessage{outbound, mustMarshal(blocked)},
+		// The first outbound is Xray's default; keep the blackhole first so
+		// any traffic that escapes routing cannot use the candidate.
+		Outbounds: []json.RawMessage{mustMarshal(blocked), outbound},
 		Routing: routing{
 			DomainStrategy: "AsIs",
 			Rules: []routingRule{
 				{Type: "field", Domain: allowedDomains, OutboundTag: tag},
 				{Type: "field", IP: privateRanges(), OutboundTag: "blocked"},
-				{Type: "field", OutboundTag: "blocked"},
+				{Type: "field", Network: "tcp,udp", OutboundTag: "blocked"},
 			},
 		},
 	}
@@ -473,6 +542,14 @@ func mustMarshal(v any) json.RawMessage {
 		panic(err)
 	}
 	return b
+}
+
+func newCredentials() (account, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return account{}, err
+	}
+	return account{User: hex.EncodeToString(b[:8]), Pass: hex.EncodeToString(b[8:])}, nil
 }
 
 func privateRanges() []string {
@@ -491,8 +568,13 @@ func privateRanges() []string {
 		"203.0.113.0/24",
 		"224.0.0.0/4",
 		"240.0.0.0/4",
+		"::/128",
 		"::1/128",
+		"::ffff:0:0/96",
+		"100::/64",
 		"fc00::/7",
+		"fec0::/10",
+		"ff00::/8",
 		"fe80::/10",
 		"2001:db8::/32",
 	}
