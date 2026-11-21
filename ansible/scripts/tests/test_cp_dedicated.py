@@ -241,7 +241,12 @@ class DedicatedControlPlaneTest(unittest.TestCase):
             if path.exists():
                 path.unlink()
 
-        for name in ("backup.yml", "panel_proxy.yml", "cp_proxy.yml"):
+        for name in (
+            "remnawave_panel.yml",
+            "backup.yml",
+            "panel_proxy.yml",
+            "cp_proxy.yml",
+        ):
             with self.subTest(playbook=name):
                 result = self.run_playbook([
                     "-i", str(hosts_path),
@@ -272,6 +277,10 @@ class DedicatedControlPlaneTest(unittest.TestCase):
             "-e", "cp_restore_confirm=true",
         ])
         self.assertNotEqual(no_artifact.returncode, 0)
+        self.assertIn(
+            "cp_restore_artifact_src",
+            no_artifact.stdout + no_artifact.stderr,
+        )
 
     def test_rollback_exit_placement_contract_and_selection(self) -> None:
         exit_root = self.root / "rollback-exit" / "example"
@@ -295,7 +304,12 @@ class DedicatedControlPlaneTest(unittest.TestCase):
         self.assertEqual(rolled_back_state["panel_host"], "exit-example")
 
         self.ansible_playbook()
-        for name in ("backup.yml", "cp_proxy.yml", "panel_proxy.yml"):
+        for name in (
+            "remnawave_panel.yml",
+            "backup.yml",
+            "cp_proxy.yml",
+            "panel_proxy.yml",
+        ):
             with self.subTest(playbook=name):
                 result = self.run_playbook([
                     "-i", str(hosts_path),

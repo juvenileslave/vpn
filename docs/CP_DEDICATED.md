@@ -171,8 +171,8 @@ ssh -L 7443:127.0.0.1:7443 <cp-host>
 
 Учебное восстановление выполняется `ansible/playbooks/restore.yml` **только** в
 новую/одноразовую базу данных. Плейбук требует `-e cp_restore_confirm=true` и
-отказывается работать с живым compose-контейнером панели (`remnawave`) или уже
-существующей базой без явного `-e cp_restore_replace=true`:
+отказывается работать с контейнером PostgreSQL живого compose-проекта панели
+(`remnawave`) или уже существующей базой без явного `-e cp_restore_replace=true`:
 
 ```sh
 .venv/bin/ansible-playbook -i /путь/к/приватному/inventory/hosts.yml \
@@ -210,23 +210,30 @@ ssh -L 7443:127.0.0.1:7443 <cp-host>
    потерять записи БД.
 2. Применить `bootstrap.yml` к новому `cp`-хосту (hardening SSH/firewall,
    Docker, приватная панель Remnawave на loopback).
-3. Остановить панель на `cp`, остановить запись в старую панель на `exit` и
-   снять финальный дамп с `exit`; восстановить артефакт в новую БД на `cp`
-   (или выполнить замену БД только при остановленной панели и явном
-   `cp_restore_confirm=true` + `cp_restore_replace=true`, никогда не
-   восстанавливая в живую работающую БД), проверить целостность данных и только
-   затем запустить панель на восстановленной БД.
-4. Применить `remnawave_node.yml` к `exit` (и остальным узлам) с обновлённым
-   `cp_placement: dedicated`, чтобы открыть `node_api_port` строго для
-   приватного адреса `cp` и проверить mTLS/JWT и nftables ACL.
-5. Применить на `cp` по порядку: `cp_proxy.yml`, `panel_proxy.yml`,
-   `backup.yml`.
+3. Остановить контейнер приложения панели на `cp` (оставив контейнер
+   PostgreSQL запущенным), остановить запись в старую панель на `exit` и снять
+   финальный дамп с `exit`; восстановить артефакт в PostgreSQL на `cp` (в
+   новую БД для проверки, либо выполнить осознанную замену целевой БД панели
+   при остановленном контейнере панели с явными `cp_restore_confirm=true` и
+   `cp_restore_replace=true`, никогда не восстанавливая в живую работающую БД),
+   проверить целостность данных и только затем запустить панель на
+   восстановленной БД.
+4. Применить обновлённую политику firewall (`base_firewall_source_ports`) на
+   `exit` и остальных узлах, чтобы открыть `node_api_port` строго для
+   приватного адреса `cp`, и затем применить `remnawave_node.yml` с
+   `cp_placement: dedicated` для проверки mTLS/JWT и активного nftables ACL.
+5. Применить на `cp` `panel_proxy.yml` и `backup.yml`. Если используется
+   готовый сертификат оператора (`cp_proxy_acme: false`), применить
+   `cp_proxy.yml` на этом шаге; при выпуске сертификата через ACME
+   (`cp_proxy_acme: true`) применение `cp_proxy.yml` выполняется после
+   переключения DNS на `cp` на шаге Cutover.
 
 ### Проверки перед cutover
 
 - Панель: `ssh -L 7443:127.0.0.1:7443 <cp-host>` открывает интерфейс на
   `http://127.0.0.1:7443/`; данные совпадают с перенесённым снимком; публичного
-  admin listener нет; `cp_proxy` отдаёт `404` на `/api/` и `/admin/`.
+  admin listener нет; если `cp_proxy` уже применён с готовым сертификатом,
+  он отдаёт `404` на `/api/` и `/admin/`.
 - Узел: панель на `cp` управляет `remnawave_node` по `node_api_port` через
   приватный маршрут; активный nft ACL разрешает только `node_port_allow`, порт
   отсутствует в `base_firewall_vpn_ports`.
@@ -236,7 +243,8 @@ ssh -L 7443:127.0.0.1:7443 <cp-host>
 ### Cutover
 
 1. Во внешнем DNS (вне Ansible) перевести `subscription_public_host` на адрес
-   `cp` и подтвердить наличие действующего ACME-сертификата на `cp`.
+   `cp`; при режиме ACME применить `cp_proxy.yml` на `cp` и подтвердить
+   наличие действующего сертификата и ответ `404` на `/api/` и `/admin/`.
 2. Проверить получение подписки клиентом по публичному HTTPS URL.
 3. Только после подтверждения работы отключить `cp-backup.timer` и остановить
    старую панель/`cp_proxy` на `exit`; прежние артефакты бэкапов не удалять.
@@ -254,17 +262,25 @@ ssh -L 7443:127.0.0.1:7443 <cp-host>
 
 ## 7. Откат `dedicated -> exit`
 
-1. Прекратить изменения в панели на `cp` и при необходимости снять финальный
-   зашифрованный дамп с `cp`.
-2. Восстановить согласованное состояние БД панели на `exit` (с явным
-   `cp_restore_confirm=true`; флаг `cp_restore_replace=true` допустим только
-   при осознанной замене существующей БД при остановленном контейнере панели).
-3. Вернуть приватный inventory к `cp_placement: exit`: очистить группу `cp`,
+1. Прекратить изменения в панели на `cp`, при необходимости снять финальный
+   зашифрованный дамп с `cp`, затем отключить `cp-backup.timer` и остановить
+   панель, `panel_proxy` и `cp_proxy` на `cp`, чтобы не оставлять второй
+   активный control plane (артефакты и логи на `cp` не удалять).
+2. Вернуть приватный inventory к `cp_placement: exit` (очистить группу `cp`,
    восстановить прежние `node_port_allow` и `base_firewall_source_ports` для
-   размещения панели на `exit`.
-4. Применить `bootstrap.yml` (или `remnawave_panel.yml`), `remnawave_node.yml`,
-   `cp_proxy.yml`, `panel_proxy.yml` и `backup.yml`; вернуть внешний DNS
-   `subscription_public_host` на `exit` (вне Ansible).
+   размещения панели на `exit`), при необходимости откатить ревизию ролей и
+   проверить inventory локальным валидатором (`make -C ansible state`
+   `STATE_INVENTORY=/путь/к/приватному/inventory/hosts.yml`).
+3. При необходимости восстановления БД на `exit` убедиться, что контейнер
+   PostgreSQL на `exit` запущен, а контейнер приложения панели остановлен, и
+   восстановить согласованное состояние БД (с явным `cp_restore_confirm=true`;
+   флаг `cp_restore_replace=true` допустим только при осознанной замене
+   существующей БД при остановленном контейнере панели).
+4. Применить возвращённую политику firewall (`base_firewall_source_ports`) на
+   `exit` и остальных узлах, затем применить `remnawave_panel.yml` (или
+   `bootstrap.yml`), `remnawave_node.yml`, `panel_proxy.yml` и `backup.yml`;
+   вернуть внешний DNS `subscription_public_host` на `exit` (вне Ansible) и
+   применить `cp_proxy.yml` на `exit`.
 5. Проверить вход в панель на `exit` через `ssh -L`, управление узлом,
    subscription endpoint (`200` на prefix, `404` на `/api/` и `/admin/`) и
    выполнение `cp-backup.service`.
@@ -277,7 +293,7 @@ ssh -L 7443:127.0.0.1:7443 <cp-host>
 | --- | --- | --- |
 | Валидация inventory (`cp_placement`, authority, ACL) и offline-тесты Ansible | `make -C ansible validate test` | Статическая / offline проверка |
 | Общие проверки репозитория (линтеры и тесты) | `make check` | Статическая / offline проверка |
-| Учебный цикл `cp_backup` и `restore.yml` на disposable PostgreSQL | `ansible/roles/cp_backup/tests/drill.sh` | Одноразовое контейнерное окружение (без живой панели и systemd PID 1) |
+| Учебный цикл `cp_backup` и `restore.yml` на disposable PostgreSQL | `ansible/roles/cp_backup/tests/drill.sh` | Отдельный контейнерный drill роли `cp_backup` (см. `BACKUP.md`, без живой панели и systemd PID 1; в этом срезе не запускался) |
 | Перенос `exit -> dedicated`, DNS/ACME, node management, exit outage | Runtime acceptance на чистом одноразовом стенде | **Не проверено** |
 
 ### Что не проверено
