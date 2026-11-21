@@ -3,19 +3,16 @@ package store
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"time"
 )
-
-var upstreamFailCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // FailUpstreamVersion marks a candidate version failed. Only candidate -> failed is allowed.
 func (s *Store) FailUpstreamVersion(ctx context.Context, id, code string, now time.Time) error {
 	if !upstreamIDPattern.MatchString(id) {
 		return invalid("upstream version ID must match %s", upstreamIDPattern)
 	}
-	if !upstreamFailCodePattern.MatchString(code) {
-		return invalid("failure code must match %s", upstreamFailCodePattern)
+	if !upstreamFailureCodePattern.MatchString(code) {
+		return invalid("failure code must match %s", upstreamFailureCodePattern)
 	}
 	if !validTime(now) || now.UnixNano() <= 0 {
 		return invalid("timestamp must be valid and after Unix epoch")
@@ -95,7 +92,7 @@ func (s *Store) RollbackUpstreamSlot(ctx context.Context, slot int, now time.Tim
 		        outbound_fingerprint, failure_code, created_at, activated_at, retired_at
 		 FROM upstream_versions
 		 WHERE slot = ? AND origin = 'upstream' AND state = 'superseded' AND seq < ?
-		 ORDER BY seq DESC
+		 ORDER BY retired_at DESC, seq DESC
 		 LIMIT 1`,
 		slot, cur.Seq))
 	if err != nil {

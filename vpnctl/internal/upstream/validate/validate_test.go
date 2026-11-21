@@ -105,7 +105,7 @@ func TestValidateRejectsBadInputs(t *testing.T) {
 func TestValidateTimeout(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	path := fakeXray(t, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.9.0'; exit 0; fi\nexec sleep 5\n")
-	v, err := New(Options{XrayPath: path, Timeout: 300 * time.Millisecond})
+	v, err := New(Options{XrayPath: path, Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

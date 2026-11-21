@@ -254,7 +254,13 @@ func runSlotShow(args []string, stdout, stderr io.Writer) int {
 	if *storePath == "" {
 		return usageError(stderr, "slot show requires --store")
 	}
-	if *slot != 0 && (*slot < minUpstreamSlot || *slot > maxUpstreamSlot) {
+	slotSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "slot" {
+			slotSet = true
+		}
+	})
+	if slotSet && (*slot < minUpstreamSlot || *slot > maxUpstreamSlot) {
 		return usageError(stderr, fmt.Sprintf("--slot must be between %d and %d", minUpstreamSlot, maxUpstreamSlot))
 	}
 	if *format != "text" && *format != "json" {

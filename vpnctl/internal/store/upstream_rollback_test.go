@@ -438,3 +438,52 @@ func TestRollbackUpstreamSlot(t *testing.T) {
 		}
 	}
 }
+
+func TestRollbackUpstreamSlotAfterBlackholePrefersLatestRetired(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, tempPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	t1 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	t3 := t2.Add(time.Minute)
+	sha := strings.Repeat("a", 64)
+	fp := strings.Repeat("b", 64)
+
+	// v1 was restored by a rollback at t2 (so v2 retired at t1), then a
+	// blackhole v3 became active at t3. Rollback must restore v1, not the
+	// rejected v2.
+	v1 := UpstreamVersion{
+		ID: strings.Repeat("a", 32), Slot: 6, Seq: 1, Origin: "upstream", State: "superseded",
+		PayloadRef: "slot6/v1.enc", PayloadSHA256: sha, OutboundFingerprint: fp,
+		CreatedAt: t1, ActivatedAt: t1, RetiredAt: t2,
+	}
+	v2 := UpstreamVersion{
+		ID: strings.Repeat("b", 32), Slot: 6, Seq: 2, Origin: "upstream", State: "superseded",
+		PayloadRef: "slot6/v2.enc", PayloadSHA256: sha, OutboundFingerprint: fp,
+		CreatedAt: t1, ActivatedAt: t1, RetiredAt: t1.Add(time.Second),
+	}
+	v3 := UpstreamVersion{
+		ID: strings.Repeat("c", 32), Slot: 6, Seq: 3, Origin: "blackhole", State: "active",
+		PayloadRef: "slot6/v3-bh.enc", PayloadSHA256: sha, OutboundFingerprint: fp,
+		CreatedAt: t3, ActivatedAt: t3,
+	}
+	for _, row := range []UpstreamVersion{v1, v2, v3} {
+		insertUpstreamVersionRow(t, ctx, s, row)
+	}
+	seedRollbackSlotRow(t, ctx, s, 6, "blackhole", v3.ID, 2, 0, "probe_failed", t3.UnixNano())
+
+	restored, prev, err := s.RollbackUpstreamSlot(ctx, 6, t3.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RollbackUpstreamSlot: %v", err)
+	}
+	if restored.ID != v1.ID {
+		t.Fatalf("restored = %s, want v1 %s", restored.ID, v1.ID)
+	}
+	if prev == nil || prev.ID != v3.ID {
+		t.Fatalf("prev = %+v, want blackhole %s", prev, v3.ID)
+	}
+}

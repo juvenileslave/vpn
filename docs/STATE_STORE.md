@@ -263,8 +263,10 @@ SHA-256 ciphertext, отпечаток outbound-JSON, код ошибки и в�
 `candidate`. `ActivateUpstreamVersion` переводит только `candidate` в `active`,
 предыдущую активную — в `superseded` с `retired_at` и сбрасывает счётчики
 неудач; `FailUpstreamVersion` переводит только `candidate` в `failed`.
-`RollbackUpstreamSlot` возвращает активной последнюю `superseded`-версию с
-`origin = 'upstream'`; blackhole-версия не восстанавливается. Ошибки
+`RollbackUpstreamSlot` возвращает активной `superseded`-версию с
+`origin = 'upstream'` и наибольшим `retired_at` (при равенстве — `seq`); так
+после отката и последующего blackhole не восстанавливается ранее отклонённая
+версия. Blackhole-версия не восстанавливается. Ошибки
 недопустимого перехода — `ErrInvalidTransition`, отсутствующая версия —
 `ErrNotFound`.
 

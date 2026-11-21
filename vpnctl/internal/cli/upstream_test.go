@@ -239,6 +239,8 @@ func TestUpstreamUsageErrors(t *testing.T) {
 		{"slot", "unknown"},
 		{"slot", "show"},
 		{"slot", "show", "--store", dbPath, "--slot", "64"},
+		{"slot", "show", "--store", dbPath, "--slot", "0"},
+		{"slot", "show", "--store", dbPath, "--slot", "-1"},
 	}
 	for _, args := range tests {
 		code, out, errOut := runCLI(t, args...)

@@ -123,7 +123,7 @@ func (s *Store) ListUpstreamVersions(ctx context.Context, slot, limit int) ([]Up
 	}
 	defer rows.Close()
 
-	var versions []UpstreamVersion
+	versions := []UpstreamVersion{}
 	for rows.Next() {
 		v, err := scanUpstreamVersion("list upstream versions", rows)
 		if err != nil {
